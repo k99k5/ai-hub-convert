@@ -1,0 +1,174 @@
+# LLM Protocol Gateway
+
+一个无状态的 OpenAI / Anthropic 协议转换网关。服务使用 TypeScript ESM、Fastify 5 和 Node.js 24，对外提供 Anthropic Messages、Anthropic token counting 与 OpenAI Responses 接口；不使用数据库，不保存凭据、prompt、会话或响应。
+
+## 路由
+
+| 对外接口 | 上游接口 | 行为 |
+| --- | --- | --- |
+| `POST /v1/messages` | `/v1/responses` | 默认路径；仅在明确不存在 Responses endpoint 时受限回退 `/v1/chat/completions` |
+| `POST /v1/messages/count_tokens` | `/v1/responses/input_tokens` | 精确委托；不本地估算，不回退 Chat |
+| `POST /v1/responses` | `/v1/responses` | 完整 decode → canonical IR → encode；永不回退 Chat |
+| `GET /health/live` | 无 | 进程存活检查 |
+| `GET /health/ready` | 无 | 就绪检查 |
+
+`/v1/messages` 只在尚无上游语义事件、尚未向客户端写入 SSE 字节，并且 Responses 返回以下明确 endpoint 缺失信号时回退：
+
+- HTTP 405 或 501；
+- HTTP 404 且错误码为 `route_not_found`、`endpoint_not_found`、`unsupported_endpoint` 或 `not_implemented`。
+
+401、403、429、5xx、timeout、disconnect、`model_not_found`、模糊 404、HTTP 200 后 malformed SSE，以及任何已产生语义事件或客户端写入后的错误都不会触发回退。SDK 自动重试被禁用，每个 adapter attempt 最多调用一次上游。
+
+## 快速开始
+
+要求：
+
+- Node.js 24；
+- pnpm 10.6.3；
+- 一个支持 OpenAI-compatible Responses 的上游；如需 Anthropic Chat 回退，上游还需支持 Chat Completions。
+
+```bash
+pnpm install --frozen-lockfile --ignore-scripts
+cp .env.example .env
+pnpm dev
+```
+
+最小配置：
+
+```dotenv
+UPSTREAM_BASE_URL=https://gateway.example.com/v1
+```
+
+调用方凭据按入口协议读取并转成上游 Bearer：Anthropic 接受 `x-api-key`，并兼容 Bearer；Responses 接受 Bearer。`model` 原样透传。Anthropic SDK 或 Chatbox 的调用端 base URL 应填写 `http://127.0.0.1:3000`，不要追加 `/v1`；SDK 会自行请求 `/v1/messages`。这与可包含 `/v1` 的 `UPSTREAM_BASE_URL` 是两个不同配置。
+
+Anthropic 示例：
+
+```bash
+curl http://127.0.0.1:3000/v1/messages \
+  -H 'content-type: application/json' \
+  -H 'x-api-key: YOUR_UPSTREAM_KEY' \
+  -d '{"model":"vendor/model","max_tokens":256,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+Responses 示例：
+
+```bash
+curl http://127.0.0.1:3000/v1/responses \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer YOUR_UPSTREAM_KEY' \
+  -d '{"model":"vendor/model","input":"hello"}'
+```
+
+两个入口都支持请求中的 `stream:true`。三条 POST route 先做不改写 body 的浅层 wire schema 校验，再由 adapter 做精确语义校验；错误分别使用入口协议的固定 HTTP 400 外壳。超过 `BODY_LIMIT_BYTES` 时返回固定 HTTP 413，且不会回传 validation path 或请求内容。
+
+## 配置
+
+所有配置只在启动时读取。空的 Claude Code 最低/最高版本表示不限制对应边界。
+
+| 环境变量 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `HOST` | `127.0.0.1` | 监听地址；容器内默认覆盖为 `0.0.0.0` |
+| `PORT` | `3000` | 监听端口 |
+| `UPSTREAM_BASE_URL` | 必填 | 上游基础 URL，只允许启动配置提供 |
+| `ALLOW_INSECURE_UPSTREAM` | `false` | 仅在显式为 `true` 时允许 HTTP，供本地开发使用 |
+| `BODY_LIMIT_BYTES` | `33554432` | 请求 body 上限 |
+| `CONNECTION_TIMEOUT_MS` | `10000` | Fastify connection timeout |
+| `REQUEST_TIMEOUT_MS` | `30000` | Fastify request timeout |
+| `UPSTREAM_TIMEOUT_MS` | `600000` | 上游请求总超时 |
+| `UPSTREAM_FIRST_BYTE_TIMEOUT_MS` | `60000` | SSE 首字节超时 |
+| `UPSTREAM_STREAM_IDLE_TIMEOUT_MS` | `120000` | SSE 流空闲超时 |
+| `UPSTREAM_SSE_FRAME_LIMIT_BYTES` | `8388608` | 单个上游 SSE frame 的 UTF-8 wire 上限 |
+| `UPSTREAM_OUTPUT_ITEM_LIMIT_BYTES` | `8388608` | 单个 Responses/Anthropic 流 item 的输出与状态预算 |
+| `UPSTREAM_STREAM_OUTPUT_LIMIT_BYTES` | `33554432` | 单条流全部输出与保留状态的聚合预算 |
+| `UPSTREAM_JSON_BODY_LIMIT_BYTES` | `33554432` | 成功的非流上游 JSON body 上限 |
+| `UPSTREAM_ERROR_BODY_LIMIT_BYTES` | `65536` | 上游错误外壳 body 上限 |
+| `UPSTREAM_TOOL_ARGUMENT_LIMIT_BYTES` | `1048576` | 单次工具参数流上限 |
+| `UPSTREAM_STREAM_TOOL_ARGUMENT_LIMIT_BYTES` | `8388608` | 单条响应中全部工具参数流上限 |
+| `ANTHROPIC_PING_INTERVAL_MS` | `15000` | Anthropic 命名 `event: ping` 间隔 |
+| `SHUTDOWN_GRACE_MS` | `10000` | 优雅关闭期限 |
+| `CLAUDE_CODE_MIN_VERSION` | 空 | 接受范围的闭区间下界，例如 `2.1.63` |
+| `CLAUDE_CODE_MAX_VERSION` | 空 | 接受范围的闭区间上界，例如 `2.5.0` |
+| `PROMPT_CACHE_BREAKPOINTS_ENABLED` | `true` | Claude Code cache planner 开关 |
+| `READ_TOOL_COMPAT_ENABLED` | `true` | Claude Code `Read` 参数修正开关 |
+| `SYNTHETIC_THINKING_SIGNATURE_ENABLED` | `true` | Claude Code synthetic thinking signature 开关 |
+
+非法布尔值、整数、SemVer 边界或 URL 会导致启动失败。
+
+## Claude Code 兼容层
+
+版本识别优先读取首个 system attribution 文本中的：
+
+```text
+x-anthropic-billing-header: cc_version=2.1.220.04c; ...
+```
+
+只比较前三段 `2.1.220`。缺失时回退读取：
+
+```http
+User-Agent: claude-cli/2.1.220 (external, cli)
+```
+
+system attribution 与 User-Agent 冲突时以前者为准。只有严格、有效且位于配置范围内的版本启用以下三个独立 shim；缺失或 malformed 版本作为普通 Anthropic SDK 请求放行，合法但越界版本返回 Anthropic HTTP 400 `invalid_request_error`。
+
+- prompt-cache planner：显式 breakpoint 优先，最多四个；Responses 与 Chat attempt 分别规划。generic profile 的 capability 是 `none`，因此不会发送 `cache_control`、`prompt_cache_key` 或伪造的 breakpoint 字段，也不会把 planned 冒充 encoded/hit。
+- `Read` 参数修正：仅删除顶层、string 且严格等于空字符串的 `pages`，其余 JSON 字节语义保持不变。
+- thinking signature：为缺失签名的 thinking block 生成 `Buffer.from(crypto.randomUUID(), "utf8").toString("base64")`；真实签名优先。synthetic 值不会作为 OpenAI encrypted reasoning 回放。
+
+## Web Search
+
+内置 Web Search 通过独立 provider registry 预留。首版注册的 provider 不支持执行，因此合法的 Anthropic/OpenAI built-in Web Search 请求会在任何上游调用前返回当前协议的 HTTP 501；stream 请求也会在提交 SSE headers 前返回 JSON 501。
+
+普通 function 即使名称为 `web_search`，仍按普通 function 处理。已有 `search_result` 与上游 URL citation 可以转换，服务不会主动联网搜索。
+
+## 兼容范围
+
+支持 JSON 与 SSE：text、system、URL/Base64 image、function tool、tool call/result、并行与交错工具调用、reasoning/thinking、usage、已有 search result、URL citation/annotation。Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 会转为 Responses `reasoning.effort`，token counting 同样保留，Chat fallback 转为 `reasoning_effort`。
+
+首版不支持 document/PDF、audio、file upload、background Responses 生命周期、非空 `output_config.format` 或主动 Web Search。非空 `output_config.format` 会在上游调用前返回 Anthropic 400；`background:true` 会被拒绝。完整矩阵和有损语义见 [docs/compatibility.md](docs/compatibility.md)。
+
+## Docker
+
+```bash
+docker build -t llm-protocol-gateway .
+docker run --rm \
+  -p 3000:3000 \
+  -e UPSTREAM_BASE_URL=https://gateway.example.com/v1 \
+  llm-protocol-gateway
+```
+
+镜像使用 Node 24 多阶段构建、固定 pnpm 10.6.3，只携带 production dependencies，并以非 root `node` 用户运行。镜像内置 `/health/ready` healthcheck。
+
+## 开发命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `pnpm dev` | watch 模式启动 |
+| `pnpm format` | 格式化 |
+| `pnpm format:check` | 检查格式 |
+| `pnpm lint` | lint |
+| `pnpm typecheck` | TypeScript 检查 |
+| `pnpm test` | 全量测试 |
+| `pnpm test:coverage` | 测试与覆盖率 |
+| `pnpm build` | 生成 `dist/` |
+| `pnpm start` | 启动已构建服务 |
+
+## 安全不变量
+
+- 上游URL只能来自启动配置。
+- 默认仅允许HTTPS，本地HTTP必须显式开启。
+- API key、authorization、prompt、工具参数、图片、reasoning、signature不得写日志。
+- 不向客户端暴露上游原始错误body。
+- 上游路径必须是固定枚举。
+- 禁止SDK自动重试，避免重复计费或重复工具执行。
+- body、工具参数、流缓冲和超时必须有上限。
+- client disconnect应传播AbortSignal。
+- 不保存凭据、prompt、会话或响应。
+
+## 设计依据
+
+- Anthropic Messages、Streaming、Effort、Prompt Caching：<https://platform.claude.com/docs/en/api/messages/create>、<https://platform.claude.com/docs/en/build-with-claude/streaming>、<https://platform.claude.com/docs/en/build-with-claude/effort>、<https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
+- Claude Code Gateway Protocol：<https://code.claude.com/docs/en/llm-gateway-protocol>
+- OpenAI Responses 与 Streaming：<https://developers.openai.com/api/reference/resources/responses>、<https://developers.openai.com/api/docs/guides/streaming-responses>
+- Fastify validation：<https://fastify.dev/docs/latest/Reference/Validation-and-Serialization/>
+
+架构决策见 [docs/decisions/0001-stateless-canonical-gateway.md](docs/decisions/0001-stateless-canonical-gateway.md)。
