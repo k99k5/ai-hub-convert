@@ -128,6 +128,8 @@ system attribution 与 User-Agent 冲突时以前者为准。只有严格、有�
 
 ## Docker
 
+直接使用 Docker：
+
 ```bash
 docker build -t llm-protocol-gateway .
 docker run --rm \
@@ -135,6 +137,22 @@ docker run --rm \
   -e UPSTREAM_BASE_URL=https://gateway.example.com/v1 \
   llm-protocol-gateway
 ```
+
+使用 Docker Compose：
+
+```bash
+cp .env.example .env
+# 编辑 .env，至少设置 UPSTREAM_BASE_URL
+docker compose up --build
+```
+
+默认通过 `http://127.0.0.1:3000` 访问。宿主机端口可以通过 `GATEWAY_PORT` 调整，例如 `GATEWAY_PORT=8080 docker compose up --build`；容器内部仍监听 `3000`。停止服务：
+
+```bash
+docker compose down
+```
+
+Compose 服务是无状态的，不需要挂载数据卷或启动额外依赖。它会复用镜像内置的 `/health/ready` healthcheck；该检查确认网关进程可接受请求，不代表上游服务连通。
 
 镜像使用 Node 24 多阶段构建、固定 pnpm 10.6.3，只携带 production dependencies，并以非 root `node` 用户运行。镜像内置 `/health/ready` healthcheck。
 
