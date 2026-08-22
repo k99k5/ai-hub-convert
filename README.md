@@ -146,6 +146,15 @@ cp .env.example .env
 docker compose up --build
 ```
 
+若上游运行在 Linux 宿主机，Compose 已将 `host.docker.internal` 映射到 Docker host gateway。以宿主机上游端口 `8000` 为例：
+
+```dotenv
+UPSTREAM_BASE_URL=http://host.docker.internal:8000/v1
+ALLOW_INSECURE_UPSTREAM=true
+```
+
+HTTP 上游必须显式启用 `ALLOW_INSECURE_UPSTREAM`；使用 HTTPS 时应填写 `https://...` 并保持该开关为 `false`。宿主机上游必须监听 `0.0.0.0` 或 Docker 网桥地址，仅监听 `127.0.0.1` 时 bridge 网络中的容器无法连接。生产环境应通过防火墙只允许 Docker 网桥访问上游端口，避免将其直接暴露到公网。
+
 默认通过 `http://127.0.0.1:3000` 访问。宿主机端口可以通过 `GATEWAY_PORT` 调整，例如 `GATEWAY_PORT=8080 docker compose up --build`；容器内部仍监听 `3000`。停止服务：
 
 ```bash

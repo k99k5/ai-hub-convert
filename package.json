@@ -38,6 +38,8 @@
     "vitest": "4.1.10"
   },
   "pnpm": {
-    "onlyBuiltDependencies": []
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }
