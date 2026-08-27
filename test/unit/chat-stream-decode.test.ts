@@ -359,4 +359,266 @@ describe("ChatStreamDecoder", () => {
 
     expect(() => decoder.finish()).toThrow(/DONE/);
   });
+  it("maps every finish reason in the stream", () => {
+    const finish = (finishReason: string) => {
+      const decoder = new ChatStreamDecoder();
+      chunk(decoder, { id: "s", model: "m", choices: [] });
+      chunk(decoder, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 0, delta: { content: "x" }, finish_reason: finishReason }],
+      });
+      chunk(decoder, { id: "s", model: "m", choices: [] });
+      chunk(decoder, { id: "s", model: "m", choices: [] });
+      return decoder.decode({ event: "message", data: "[DONE]" });
+    };
+
+    expect(finish("length")).toMatchObject([
+      { type: "response_complete", finishReason: "max_tokens" },
+    ]);
+    expect(finish("content_filter")).toMatchObject([
+      { type: "response_complete", finishReason: "refusal" },
+    ]);
+    expect(finish("bogus")).toMatchObject([
+      { type: "response_complete", finishReason: "incomplete" },
+    ]);
+  });
+
+  it("handles upstream error frames and lifecycle violations", () => {
+    const normal = () => {
+      const decoder = new ChatStreamDecoder();
+      chunk(decoder, { id: "s", model: "m", choices: [] });
+      return decoder;
+    };
+
+    const errDecoder = normal();
+    expect(
+      errDecoder.decode({
+        event: "message",
+        data: JSON.stringify({ error: { status: 429 }, choices: [] }),
+      }),
+    ).toEqual([
+      {
+        type: "response_error",
+        error: {
+          status: 429,
+          code: "chat_stream_error",
+          message: "The upstream Chat stream failed",
+          retryable: false,
+        },
+      },
+    ]);
+
+    const earlyErr = new ChatStreamDecoder();
+    expect(() =>
+      earlyErr.decode({ event: "message", data: JSON.stringify({ error: { message: "x" } }) }),
+    ).toThrow(/before its first response chunk/);
+
+    expect(() => new ChatStreamDecoder().decode({ event: "message", data: "[DONE]" })).toThrow(
+      /before a response chunk/,
+    );
+
+    const done = new ChatStreamDecoder();
+    chunk(done, { id: "s", model: "m", choices: [] });
+    chunk(done, { id: "s", model: "m", choices: [] });
+    chunk(done, {
+      id: "s",
+      model: "m",
+      choices: [{ index: 0, delta: { content: "x" }, finish_reason: "stop" }],
+    });
+    chunk(done, { id: "s", model: "m", choices: [] });
+    done.decode({ event: "message", data: "[DONE]" });
+    expect(() => chunk(done, { id: "s", model: "m", choices: [] })).toThrow(/after DONE/);
+
+    expect(() => new ChatStreamDecoder().decode({ event: "message", data: "{bad" })).toThrow(
+      /invalid JSON/,
+    );
+
+    const choicesArray = new ChatStreamDecoder();
+    expect(() => chunk(choicesArray, { id: "s", model: "m", choices: "x" })).toThrow(
+      /choices must be an array/,
+    );
+
+    const twoChoices = new ChatStreamDecoder();
+    chunk(twoChoices, { id: "s", model: "m", choices: [] });
+    expect(() => chunk(twoChoices, { id: "s", model: "m", choices: [{}, {}] })).toThrow(
+      /exactly one choice/,
+    );
+
+    const badIndex = new ChatStreamDecoder();
+    chunk(badIndex, { id: "s", model: "m", choices: [] });
+    expect(() =>
+      chunk(badIndex, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 1, delta: { content: "x" } }],
+      }),
+    ).toThrow(/must be zero/);
+
+    const role = new ChatStreamDecoder();
+    chunk(role, { id: "s", model: "m", choices: [] });
+    expect(() =>
+      chunk(role, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 0, delta: { role: "user", content: "x" } }],
+      }),
+    ).toThrow(/role must be assistant/);
+
+    const unstable = new ChatStreamDecoder();
+    chunk(unstable, { id: "s", model: "m", choices: [] });
+    expect(() => chunk(unstable, { id: "other", model: "m", choices: [] })).toThrow(
+      /must remain stable/,
+    );
+
+    const aliases = new ChatStreamDecoder();
+    chunk(aliases, { id: "s", model: "m", choices: [] });
+    expect(() =>
+      chunk(aliases, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 0, delta: { reasoning: "a", reasoning_content: "b" } }],
+      }),
+    ).toThrow(/both reasoning aliases/);
+
+    const nullStream = new ChatStreamDecoder();
+    expect(() => chunk(nullStream, { id: 5, model: "m", choices: [] })).toThrow(
+      /id must be a string/,
+    );
+    const missingIdx = new ChatStreamDecoder();
+    chunk(missingIdx, { id: "s", model: "m", choices: [] });
+    expect(() =>
+      chunk(missingIdx, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 0, finish_reason: "stop" }],
+      }),
+    ).toThrow(/delta must be an object/);
+  });
+  it("validates tool call integrity across the stream", () => {
+    const toolStream = () => {
+      const decoder = new ChatStreamDecoder();
+      chunk(decoder, { id: "s", model: "m", choices: [] });
+      return decoder;
+    };
+
+    const notArray = toolStream();
+    expect(() =>
+      chunk(notArray, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 0, delta: { tool_calls: "x" } }],
+      }),
+    ).toThrow(/tool_calls must be an array/);
+
+    const badType = toolStream();
+    expect(() =>
+      chunk(badType, {
+        id: "s",
+        model: "m",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                { index: 0, id: "c", type: "custom", function: { name: "f", arguments: "{}" } },
+              ],
+            },
+          },
+        ],
+      }),
+    ).toThrow(/tool call type must be function/);
+
+    const typeChanged = toolStream();
+    chunk(typeChanged, {
+      id: "s",
+      model: "m",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              { index: 0, id: "c", type: "function", function: { name: "f", arguments: "" } },
+            ],
+          },
+        },
+      ],
+    });
+    expect(() =>
+      chunk(typeChanged, {
+        id: "s",
+        model: "m",
+        choices: [
+          { index: 0, delta: { tool_calls: [{ index: 0, type: "custom", function: {} }] } },
+        ],
+      }),
+    ).toThrow(/tool call type changed/);
+
+    const idChanged = toolStream();
+    chunk(idChanged, {
+      id: "s",
+      model: "m",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              { index: 0, id: "c", type: "function", function: { name: "f", arguments: "" } },
+            ],
+          },
+        },
+      ],
+    });
+    expect(() =>
+      chunk(idChanged, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "other", function: {} }] } }],
+      }),
+    ).toThrow(/tool call id changed/);
+
+    const nameChanged = toolStream();
+    chunk(nameChanged, {
+      id: "s",
+      model: "m",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              { index: 0, id: "c", type: "function", function: { name: "f", arguments: "" } },
+            ],
+          },
+        },
+      ],
+    });
+    expect(() =>
+      chunk(nameChanged, {
+        id: "s",
+        model: "m",
+        choices: [
+          { index: 0, delta: { tool_calls: [{ index: 0, id: "c", function: { name: "g" } }] } },
+        ],
+      }),
+    ).toThrow(/tool function name changed/);
+
+    const badUsage = toolStream();
+    expect(() =>
+      chunk(badUsage, {
+        id: "s",
+        model: "m",
+        choices: [],
+        usage: { prompt_tokens: 1.5, completion_tokens: 1 },
+      }),
+    ).toThrow(/non-negative integer/);
+  });
+
+  it("fails when DONE arrives without a finish reason", () => {
+    const decoder = new ChatStreamDecoder();
+    chunk(decoder, { id: "s", model: "m", choices: [] });
+    chunk(decoder, { id: "s", model: "m", choices: [] });
+    expect(() => decoder.decode({ event: "message", data: "[DONE]" })).toThrow(
+      /without finish_reason/,
+    );
+  });
 });

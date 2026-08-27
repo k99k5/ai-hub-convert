@@ -1362,3 +1362,485 @@ describe("OpenAI Chat adapter", () => {
     expect(String(thrown)).not.toContain(secret);
   });
 });
+describe("decodeResponsesRequest hardening", () => {
+  it("decodes string content messages and accepts an omitted input", () => {
+    expect(decodeResponsesRequest({ model: "gpt-test" })).toMatchObject({ messages: [] });
+    expect(
+      decodeResponsesRequest({
+        model: "gpt-test",
+        input: [{ type: "message", role: "user", content: "plain" }],
+      }),
+    ).toMatchObject({
+      messages: [{ role: "user", content: [{ type: "text", text: "plain" }] }],
+    });
+  });
+
+  it.each([
+    { input: 5 },
+    { input: [42] },
+    { input: [{ role: "tool", content: "x" }] },
+    { input: [{ role: "user", content: 5 }] },
+    { input: [{ role: "user", content: [{ type: "input_text" }] }] },
+    {
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_image", image_url: "data:image/tiff;base64,AAAA" }],
+        },
+      ],
+    },
+    { input: [{ type: "reasoning", id: "r", summary: "x" }] },
+    { input: [{ type: "reasoning", id: "r", summary: [{ type: "text", text: "x" }] }] },
+    { input: [{ type: "reasoning", id: "r", summary: [], encrypted_content: 5 }] },
+    { input: [{ type: "reasoning", summary: [] }] },
+    { input: [{ type: "function_call", call_id: "c", name: "f", arguments: "{" }] },
+    { input: [{ type: "function_call_output", call_id: "c", output: 5 }] },
+    { input: [{ type: "unsupported_item" }] },
+    { tools: "x" },
+    { tools: [{ type: "function", name: "f", parameters: {}, description: 1 }] },
+    { tools: [{ type: "function", name: "f", parameters: {}, strict: "yes" }] },
+    { tools: [{ type: "custom", name: "f", parameters: {} }] },
+    { tools: [{ type: "web_search", user_location: { city: 1 } }] },
+    { tools: [{ type: "web_search", filters: "x" }] },
+    { tool_choice: { type: "other" } },
+    { background: "yes" },
+    { stream: "yes" },
+    { parallel_tool_calls: 1 },
+    { instructions: 5 },
+    { max_output_tokens: 1.5 },
+    { max_output_tokens: -1 },
+    { temperature: "hot" },
+    { store: "yes" },
+    { previous_response_id: 5 },
+    { prompt_cache_key: 5 },
+    { reasoning: "x" },
+    { model: "" },
+    { metadata: "x" },
+  ])("rejects malformed Responses request %#", (payload) => {
+    expect(() => decodeResponsesRequest({ model: "gpt-test", ...payload })).toThrowError(
+      expect.objectContaining({
+        name: "OpenAIAdapterError",
+        code: "INVALID_OPENAI_RESPONSES_REQUEST",
+      }),
+    );
+  });
+
+  it("rejects circular and excessively nested metadata and reasoning", () => {
+    const shallow: Record<string, unknown> = {};
+    shallow.self = shallow;
+    expect(() => decodeResponsesRequest({ model: "gpt-test", metadata: shallow })).toThrowError(
+      expect.objectContaining({ name: "OpenAIAdapterError" }),
+    );
+    expect(() => decodeResponsesRequest({ model: "gpt-test", reasoning: shallow })).toThrowError(
+      expect.objectContaining({ name: "OpenAIAdapterError" }),
+    );
+
+    let deep: Record<string, unknown> = {};
+    for (let depth = 0; depth < 101; depth += 1) {
+      deep = { nested: deep };
+    }
+    expect(() => decodeResponsesRequest({ model: "gpt-test", metadata: deep })).toThrowError(
+      expect.objectContaining({ name: "OpenAIAdapterError" }),
+    );
+  });
+});
+describe("decodeResponsesResponse hardening", () => {
+  const base = {
+    id: "resp_1",
+    model: "gpt-test",
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+
+  it("drops non-URL annotations while preserving text", () => {
+    const decoded = decodeResponsesResponse({
+      ...base,
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "hi",
+              annotations: [
+                { type: "file_citation", file_id: "f1" },
+                { type: "url_citation", url: "https://example.test/s", title: "T" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(decoded.content).toEqual([
+      {
+        type: "text",
+        text: "hi",
+        citations: [{ type: "url", url: "https://example.test/s", title: "T" }],
+      },
+    ]);
+  });
+
+  it("maps a non-completed terminal status to incomplete", () => {
+    expect(decodeResponsesResponse({ ...base, status: "failed", output: [] }).finishReason).toBe(
+      "incomplete",
+    );
+  });
+
+  it("validates wire metadata only when preservation is requested", () => {
+    const withIncomplete = decodeResponsesResponse(
+      { ...base, status: "incomplete", incomplete_details: null, output: [] },
+      { preserveWireMetadata: true },
+    );
+    expect(withIncomplete.extensions?.response).toMatchObject({ incomplete_details: null });
+
+    expect(() =>
+      decodeResponsesResponse(
+        { ...base, status: "incomplete", incomplete_details: { reason: "weird" }, output: [] },
+        { preserveWireMetadata: true },
+      ),
+    ).toThrowError(expect.objectContaining({ name: "OpenAIAdapterError" }));
+    expect(() =>
+      decodeResponsesResponse(
+        { ...base, status: "completed", object: "chat", output: [] },
+        { preserveWireMetadata: true },
+      ),
+    ).toThrowError(expect.objectContaining({ name: "OpenAIAdapterError" }));
+    expect(() =>
+      decodeResponsesResponse(
+        { ...base, status: "queued", output: [] },
+        { preserveWireMetadata: true },
+      ),
+    ).toThrowError(expect.objectContaining({ name: "OpenAIAdapterError" }));
+  });
+
+  it.each([
+    { output: "x" },
+    { output: [{ type: "message" }] },
+    { output: [{ type: "reasoning", id: "r", summary: [{ type: "text", text: "x" }] }] },
+    { output: [{ type: "message", role: "assistant", content: [], status: "weird" }] },
+    { output: [{ type: "message", role: "user", content: [] }] },
+    { output: [], usage: { input_tokens: -1, output_tokens: 1 } },
+    { output: [], usage: "x" },
+  ])("rejects malformed Responses body %#", (payload) => {
+    expect(() =>
+      decodeResponsesResponse({ ...base, status: "completed", ...payload }),
+    ).toThrowError(
+      expect.objectContaining({
+        name: "OpenAIAdapterError",
+        code: "INVALID_OPENAI_RESPONSES_RESPONSE",
+      }),
+    );
+  });
+});
+describe("encodeResponsesRequest edge cases", () => {
+  it("rejects non-function-result content in tool messages", () => {
+    const overrides: Partial<CanonicalRequest>[] = [
+      { messages: [{ role: "tool", content: [{ type: "text", text: "x" }] }] },
+      { messages: [{ role: "tool", content: [{ type: "refusal", refusal: "no" }] }] },
+      {
+        messages: [
+          {
+            role: "tool",
+            content: [
+              {
+                type: "search_result",
+                title: "t",
+                source: "s",
+                content: "snippet",
+                citationsEnabled: false,
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    for (const extra of overrides) {
+      expect(() =>
+        encodeResponsesRequest(baseRequest(extra), { store: false, promptCache: noPromptCache }),
+      ).toThrowError(
+        expect.objectContaining({
+          name: "OpenAIAdapterError",
+          code: "INVALID_OPENAI_RESPONSES_REQUEST",
+        }),
+      );
+    }
+  });
+
+  it("encodes assistant refusals and user search results as text messages and passes through auto tool choice", () => {
+    const request = encodeResponsesRequest(
+      baseRequest({
+        toolChoice: { type: "auto" },
+        messages: [
+          { role: "assistant", content: [{ type: "refusal", refusal: "cannot" }] },
+          { role: "user", content: [{ type: "text", text: "keep me" }] },
+          {
+            role: "user",
+            content: [
+              {
+                type: "search_result",
+                title: "t",
+                source: "s",
+                content: "snippet",
+                citationsEnabled: true,
+              },
+            ],
+          },
+        ],
+      }),
+      { store: false, promptCache: noPromptCache },
+    );
+
+    expect(request.tool_choice).toBe("auto");
+    expect(request.input).toEqual([
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "input_text", text: "cannot" }],
+      },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "keep me" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "snippet" }] },
+    ]);
+  });
+});
+
+const messageText: CanonicalResponse["content"][number] = { type: "text", text: "x" };
+
+describe("encodeResponsesResponse edge cases", () => {
+  function canonical(
+    layout: Array<Record<string, unknown>>,
+    content: unknown[],
+  ): CanonicalResponse {
+    return {
+      id: "resp_1",
+      model: "gpt-test",
+      content: content as CanonicalResponse["content"],
+      finishReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 1 },
+      extensions: {
+        source: "openai-responses",
+        response: { status: "completed", output_layout: layout, usage: {} },
+      },
+    };
+  }
+
+  it("rejects content that does not match each layout item type", () => {
+    const image = { type: "image", source: { type: "url", url: "https://example.test/x.png" } };
+    const text = { type: "text", text: "x" };
+
+    expect(() =>
+      encodeResponsesResponse(canonical([{ type: "message", contentCount: 1 }], [image])),
+    ).toThrowError(expect.objectContaining({ name: "OpenAIAdapterError" }));
+
+    expect(() =>
+      encodeResponsesResponse(canonical([{ type: "reasoning", contentCount: 1 }], [text])),
+    ).toThrowError(expect.objectContaining({ name: "OpenAIAdapterError" }));
+
+    expect(() =>
+      encodeResponsesResponse(canonical([{ type: "function_call", contentCount: 1 }], [text])),
+    ).toThrowError(expect.objectContaining({ name: "OpenAIAdapterError" }));
+  });
+
+  it("rejects malformed preserved metadata fields", () => {
+    expect(() =>
+      encodeResponsesResponse(
+        canonical([{ type: "message", contentCount: 1, id: 42 }], [messageText]),
+      ),
+    ).toThrowError(expect.objectContaining({ name: "OpenAIAdapterError" }));
+
+    expect(() =>
+      encodeResponsesResponse({
+        id: "resp_1",
+        model: "gpt-test",
+        content: [messageText],
+        finishReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        extensions: {
+          source: "openai-responses",
+          response: {
+            status: "completed",
+            object: "response",
+            created_at: -1,
+            output_layout: [{ type: "message", contentCount: 1 }],
+            usage: {},
+          },
+        },
+      }),
+    ).toThrowError(expect.objectContaining({ name: "OpenAIAdapterError" }));
+  });
+});
+describe("decodeChatResponse hardening", () => {
+  const base = {
+    id: "chatcmpl_1",
+    model: "gpt-test",
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  };
+
+  it("decodes array content with text and refusal parts and maps finish reasons", () => {
+    const decoded = decodeChatResponse({
+      ...base,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "a" },
+              { type: "refusal", refusal: "r" },
+            ],
+          },
+          finish_reason: "content_filter",
+        },
+      ],
+    });
+    expect(decoded.content).toEqual([
+      { type: "text", text: "a" },
+      { type: "refusal", refusal: "r" },
+    ]);
+    expect(decoded.finishReason).toBe("refusal");
+  });
+
+  it("maps every finish reason", () => {
+    const wrap = (finishReason: string, content: unknown = "x") =>
+      decodeChatResponse({
+        id: "c",
+        model: "m",
+        choices: [{ index: 0, message: { content }, finish_reason: finishReason }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }).finishReason;
+
+    expect(wrap("length")).toBe("max_tokens");
+    expect(wrap("content_filter")).toBe("refusal");
+    expect(wrap("is_this_a_real_reason")).toBe("incomplete");
+    expect(wrap("stop", [{ type: "refusal", refusal: "no" }])).toBe("refusal");
+  });
+
+  it("rejects malformed Chat responses", () => {
+    const bad = (overrides: Record<string, unknown>) => {
+      expect(() =>
+        decodeChatResponse({
+          id: "chatcmpl_1",
+          model: "gpt-test",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "x" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+          ...overrides,
+        }),
+      ).toThrowError(
+        expect.objectContaining({
+          name: "OpenAIAdapterError",
+          code: "INVALID_OPENAI_CHAT_RESPONSE",
+        }),
+      );
+    };
+
+    bad({ id: 5 });
+    bad({ model: 5 });
+    bad({ usage: { prompt_tokens: -1, completion_tokens: 1 } });
+    bad({
+      choices: [{ index: 0, message: { content: 5 }, finish_reason: "stop" }],
+    });
+    bad({
+      choices: [{ index: 0, message: { content: [{ type: "text" }] }, finish_reason: "stop" }],
+    });
+    bad({
+      choices: [{ index: 0, message: { content: [{ type: "refusal" }] }, finish_reason: "stop" }],
+    });
+    bad({
+      choices: [
+        {
+          index: 0,
+          message: {
+            content: null,
+            tool_calls: "x",
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    });
+    bad({
+      choices: [
+        {
+          index: 0,
+          message: {
+            content: null,
+            tool_calls: [{ type: "custom", function: { name: "f", arguments: "{}" } }],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    });
+  });
+});
+
+describe("encodeChatRequest edge cases", () => {
+  it("encodes URL images and function tool choice", () => {
+    const request = encodeChatRequest(
+      baseRequest({
+        toolChoice: { type: "function", name: "weather" },
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "url", url: "https://example.test/i.png" } },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(request.tool_choice).toEqual({ type: "function", function: { name: "weather" } });
+    expect(request.messages[0]).toEqual({
+      role: "user",
+      content: [{ type: "image_url", image_url: { url: "https://example.test/i.png" } }],
+    });
+  });
+
+  it("rejects non-function-result content in Chat tool messages", () => {
+    expect(() =>
+      encodeChatRequest(
+        baseRequest({ messages: [{ role: "tool", content: [{ type: "text", text: "x" }] }] }),
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        name: "OpenAIAdapterError",
+        code: "INVALID_OPENAI_CHAT_REQUEST",
+      }),
+    );
+  });
+});
+it("decodes the top-level Chat refusal field and rejects non-object bodies", () => {
+  const decoded = decodeChatResponse({
+    id: "chatcmpl_1",
+    model: "gpt-test",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content: "sorry", refusal: "cannot help" },
+        finish_reason: "stop",
+      },
+    ],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  });
+  expect(decoded.content).toEqual([
+    { type: "text", text: "sorry" },
+    { type: "refusal", refusal: "cannot help" },
+  ]);
+
+  expect(() => decodeChatResponse(null)).toThrowError(
+    expect.objectContaining({ name: "OpenAIAdapterError", code: "INVALID_OPENAI_CHAT_RESPONSE" }),
+  );
+});
+
+it("decodes string tool_choice values on the Responses request", () => {
+  for (const value of ["auto", "none", "required"]) {
+    expect(decodeResponsesRequest({ model: "gpt-test", tool_choice: value })).toMatchObject({
+      toolChoice: { type: value },
+    });
+  }
+});

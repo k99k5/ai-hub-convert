@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AnthropicStreamEncoder } from "../../src/protocols/anthropic/stream-encode.js";
 
 const FIXED_UUID = "123e4567-e89b-42d3-a456-426614174000";
@@ -245,5 +245,268 @@ describe("AnthropicStreamEncoder", () => {
     expect(() => encoder.encode({ type: "text_delta", index: 0, delta: "invalid" })).toThrow(
       /not open/,
     );
+  });
+
+  it("emits citations_delta frames for citation deltas", () => {
+    const encoder = new AnthropicStreamEncoder();
+    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+    encoder.encode({ type: "content_start", index: 0, content: { type: "text", text: "" } });
+
+    expect(
+      encoder.encode({
+        type: "citation_delta",
+        index: 0,
+        citation: {
+          type: "url",
+          url: "https://example.test/source",
+          title: "Source",
+          startIndex: 0,
+          endIndex: 6,
+        },
+      }),
+    ).toEqual([
+      {
+        event: "content_block_delta",
+        data: {
+          type: "content_block_delta",
+          index: 0,
+          delta: {
+            type: "citations_delta",
+            citation: {
+              type: "web_search_result_location",
+              url: "https://example.test/source",
+              title: "Source",
+              cited_text_start: 0,
+              cited_text_end: 6,
+            },
+          },
+        },
+      },
+    ]);
+
+    expect(
+      encoder.encode({
+        type: "citation_delta",
+        index: 0,
+        citation: { type: "url", url: "https://example.test/bare" },
+      }),
+    ).toEqual([
+      {
+        event: "content_block_delta",
+        data: {
+          type: "content_block_delta",
+          index: 0,
+          delta: {
+            type: "citations_delta",
+            citation: {
+              type: "web_search_result_location",
+              url: "https://example.test/bare",
+            },
+          },
+        },
+      },
+    ]);
+  });
+
+  it("emits an api_error frame for response_error and rejects further events", () => {
+    const encoder = new AnthropicStreamEncoder();
+    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+
+    expect(
+      encoder.encode({
+        type: "response_error",
+        error: { status: 500, code: "upstream", message: "boom", retryable: true },
+      }),
+    ).toEqual([
+      {
+        event: "error",
+        data: { type: "error", error: { type: "api_error", message: "boom" } },
+      },
+    ]);
+
+    expect(() => encoder.encode({ type: "text_delta", index: 0, delta: "late" })).toThrow(
+      /already complete/,
+    );
+  });
+
+  it("ignores reasoning continuations", () => {
+    const encoder = new AnthropicStreamEncoder();
+    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+    encoder.encode({
+      type: "content_start",
+      index: 0,
+      content: { type: "reasoning", text: "", source: "openai-responses" },
+    });
+
+    expect(
+      encoder.encode({
+        type: "reasoning_continuation",
+        index: 0,
+        opaque: { provider: "openai-responses", kind: "reasoning", value: "encrypted" },
+      }),
+    ).toEqual([]);
+  });
+
+  it("enforces stream lifecycle ordering", () => {
+    const encoder = new AnthropicStreamEncoder();
+    expect(() =>
+      encoder.encode({ type: "content_start", index: 0, content: { type: "text", text: "" } }),
+    ).toThrow(/has not started/);
+    expect(() =>
+      encoder.encode({
+        type: "response_error",
+        error: { status: 500, code: "x", message: "m", retryable: false },
+      }),
+    ).toThrow(/has not started/);
+
+    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+    expect(() =>
+      encoder.encode({ type: "response_start", id: "resp_2", model: "model-a" }),
+    ).toThrow(/already started/);
+
+    expect(() => encoder.encode({ type: "content_stop", index: 3 })).toThrow(/not open/);
+
+    encoder.encode({ type: "content_start", index: 0, content: { type: "text", text: "" } });
+    expect(() =>
+      encoder.encode({
+        type: "response_complete",
+        finishReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+    ).toThrow(/open content blocks/);
+
+    encoder.encode({ type: "content_stop", index: 0 });
+    encoder.encode({
+      type: "response_complete",
+      finishReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    expect(() => encoder.encode({ type: "text_delta", index: 0, delta: "late" })).toThrow(
+      /already complete/,
+    );
+  });
+
+  it("encodes search_result, image, and refusal block starts and rejects function results", () => {
+    const encoder = new AnthropicStreamEncoder();
+    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+
+    expect(
+      encoder.encode({
+        type: "content_start",
+        index: 0,
+        content: {
+          type: "search_result",
+          title: "Result",
+          source: "https://example.test",
+          content: "snippet",
+          citationsEnabled: true,
+        },
+      }),
+    ).toEqual([
+      {
+        event: "content_block_start",
+        data: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "search_result",
+            title: "Result",
+            source: "https://example.test",
+            content: [{ type: "text", text: "snippet" }],
+            citations: { enabled: true },
+          },
+        },
+      },
+    ]);
+
+    expect(
+      encoder.encode({
+        type: "content_start",
+        index: 1,
+        content: { type: "image", source: { type: "url", url: "https://example.test/x.png" } },
+      })[0]?.data,
+    ).toMatchObject({
+      content_block: { type: "image", source: { type: "url", url: "https://example.test/x.png" } },
+    });
+
+    expect(
+      encoder.encode({
+        type: "content_start",
+        index: 2,
+        content: {
+          type: "image",
+          source: { type: "base64", mediaType: "image/png", data: "aGVsbG8=" },
+        },
+      })[0]?.data,
+    ).toMatchObject({
+      content_block: {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" },
+      },
+    });
+
+    expect(
+      encoder.encode({
+        type: "content_start",
+        index: 3,
+        content: { type: "refusal", refusal: "cannot" },
+      })[0]?.data,
+    ).toMatchObject({ content_block: { type: "text", text: "" } });
+
+    expect(() =>
+      encoder.encode({
+        type: "content_start",
+        index: 4,
+        content: { type: "function_result", callId: "call_1", output: "x", isError: false },
+      }),
+    ).toThrow(/Function results/);
+  });
+
+  it("emits the stop sequence and cache creation usage on completion", () => {
+    const encoder = new AnthropicStreamEncoder();
+    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+
+    expect(
+      encoder.encode({
+        type: "response_complete",
+        finishReason: "stop_sequence",
+        stopSequence: "STOP",
+        usage: { inputTokens: 10, outputTokens: 5, cacheWriteInputTokens: 4 },
+      }),
+    ).toEqual([
+      {
+        event: "message_delta",
+        data: {
+          type: "message_delta",
+          delta: { stop_reason: "stop_sequence", stop_sequence: "STOP" },
+          usage: { input_tokens: 6, output_tokens: 5, cache_creation_input_tokens: 4 },
+        },
+      },
+      { event: "message_stop", data: { type: "message_stop" } },
+    ]);
+  });
+
+  it("does not synthesize a signature for a pre-signed thinking block", () => {
+    const uuidFactory = vi.fn(() => FIXED_UUID);
+    const encoder = new AnthropicStreamEncoder({
+      syntheticThinkingSignatureEnabled: true,
+      uuidFactory,
+    });
+    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+    encoder.encode({
+      type: "content_start",
+      index: 0,
+      content: {
+        type: "reasoning",
+        text: "",
+        signature: "upstream-signature",
+        source: "openai-responses",
+      },
+    });
+
+    expect(encoder.encode({ type: "content_stop", index: 0 })).toEqual([
+      { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+    ]);
+    expect(uuidFactory).not.toHaveBeenCalled();
   });
 });

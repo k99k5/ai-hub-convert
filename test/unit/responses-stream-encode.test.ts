@@ -383,4 +383,198 @@ describe("ResponsesStreamEncoder", () => {
       }),
     ).toThrow(/item ID/);
   });
+  it("rejects lifecycle violations and unsupported events", () => {
+    expect(() =>
+      new ResponsesStreamEncoder().encode({ type: "text_delta", index: 0, delta: "x" }),
+    ).toThrow(/not open as text/);
+    expect(() =>
+      new ResponsesStreamEncoder().encode({
+        type: "response_complete",
+        finishReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+    ).toThrow(/has not started/);
+
+    const started = new ResponsesStreamEncoder();
+    started.encode({ type: "response_start", id: "resp_1", model: "m" });
+    expect(() => started.encode({ type: "response_start", id: "resp_2", model: "m" })).toThrow(
+      /already started/,
+    );
+
+    expect(() =>
+      started.encode({
+        type: "signature_delta",
+        index: 0,
+        delta: "sig",
+      }),
+    ).toThrow(/Anthropic signatures cannot be encoded/);
+
+    const dup = new ResponsesStreamEncoder();
+    dup.encode({ type: "response_start", id: "resp_1", model: "m" });
+    dup.encode({
+      type: "content_start",
+      index: 0,
+      itemId: "msg_1",
+      content: { type: "text", text: "" },
+    });
+    expect(() =>
+      dup.encode({
+        type: "content_start",
+        index: 0,
+        itemId: "other",
+        content: { type: "text", text: "" },
+      }),
+    ).toThrow(/already defined/);
+
+    expect(() =>
+      dup.encode({
+        type: "content_start",
+        index: 1,
+        itemId: "sr_1",
+        content: {
+          type: "search_result",
+          title: "t",
+          source: "s",
+          content: "c",
+          citationsEnabled: false,
+        },
+      }),
+    ).toThrow(/Unsupported Responses output content/);
+
+    const open = new ResponsesStreamEncoder();
+    open.encode({ type: "response_start", id: "resp_1", model: "m" });
+    open.encode({
+      type: "content_start",
+      index: 0,
+      itemId: "msg_1",
+      content: { type: "text", text: "" },
+    });
+    expect(() =>
+      open.encode({
+        type: "response_complete",
+        finishReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+    ).toThrow(/open output items/);
+
+    open.encode({ type: "content_stop", index: 0 });
+    open.encode({
+      type: "response_complete",
+      finishReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    expect(() => open.encode({ type: "text_delta", index: 0, delta: "late" })).toThrow(
+      /already complete/,
+    );
+  });
+
+  it("emits an error frame for response_error", () => {
+    const encoder = new ResponsesStreamEncoder();
+    encoder.encode({ type: "response_start", id: "resp_1", model: "m" });
+
+    expect(
+      encoder.encode({
+        type: "response_error",
+        error: { status: 500, code: "boom", message: "u fail", retryable: true },
+      }),
+    ).toMatchObject([
+      {
+        event: "error",
+        data: { code: "boom", message: "u fail", param: null },
+      },
+    ]);
+  });
+
+  it("rejects deltas and continuation targeted at the wrong item type", () => {
+    const textItem = () => {
+      const encoder = new ResponsesStreamEncoder();
+      encoder.encode({ type: "response_start", id: "resp_1", model: "m" });
+      encoder.encode({
+        type: "content_start",
+        index: 0,
+        itemId: "msg_1",
+        content: { type: "text", text: "" },
+      });
+      return encoder;
+    };
+
+    expect(() => textItem().encode({ type: "reasoning_delta", index: 0, delta: "x" })).toThrow(
+      /not open as reasoning/,
+    );
+    expect(() =>
+      textItem().encode({ type: "function_arguments_delta", index: 0, delta: "{}" }),
+    ).toThrow(/not open as function_call/);
+    expect(() =>
+      textItem().encode({
+        type: "reasoning_continuation",
+        index: 0,
+        opaque: { provider: "openai-responses", kind: "reasoning", value: "enc" },
+      }),
+    ).toThrow(/not open as reasoning/);
+    const reasoningItem = () => {
+      const encoder = new ResponsesStreamEncoder();
+      encoder.encode({ type: "response_start", id: "resp_1", model: "m" });
+      encoder.encode({
+        type: "content_start",
+        index: 0,
+        itemId: "r1",
+        content: { type: "reasoning", text: "", source: "openai-responses" },
+      });
+      return encoder;
+    };
+
+    expect(() =>
+      reasoningItem().encode({
+        type: "citation_delta",
+        index: 0,
+        citation: { type: "url", url: "https://x.test/s" },
+      }),
+    ).toThrow(/is not open as text/);
+    expect(() => textItem().encode({ type: "content_stop", index: 5 })).toThrow(/not open$/);
+  });
+  it("validates reasoning continuations", () => {
+    const reasoningItem = () => {
+      const encoder = new ResponsesStreamEncoder();
+      encoder.encode({ type: "response_start", id: "resp_1", model: "m" });
+      encoder.encode({
+        type: "content_start",
+        index: 0,
+        itemId: "r1",
+        content: { type: "reasoning", text: "", source: "openai-responses" },
+      });
+      return encoder;
+    };
+
+    const invalid = reasoningItem();
+    expect(() =>
+      invalid.encode({
+        type: "reasoning_continuation",
+        index: 0,
+        opaque: { provider: "anthropic", kind: "reasoning", value: "enc" },
+      }),
+    ).toThrow(/Invalid Responses reasoning continuation/);
+
+    const empty = reasoningItem();
+    expect(() =>
+      empty.encode({
+        type: "reasoning_continuation",
+        index: 0,
+        opaque: { provider: "openai-responses", kind: "reasoning", value: "" },
+      }),
+    ).toThrow(/Invalid Responses reasoning continuation/);
+
+    const twice = reasoningItem();
+    twice.encode({
+      type: "reasoning_continuation",
+      index: 0,
+      opaque: { provider: "openai-responses", kind: "reasoning", value: "enc" },
+    });
+    expect(() =>
+      twice.encode({
+        type: "reasoning_continuation",
+        index: 0,
+        opaque: { provider: "openai-responses", kind: "reasoning", value: "enc2" },
+      }),
+    ).toThrow(/already defined/);
+  });
 });
