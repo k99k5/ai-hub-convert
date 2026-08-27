@@ -11,3 +11,4 @@ coverage/
 Thumbs.db
 
 .pnpm-store/
+.zcode/
