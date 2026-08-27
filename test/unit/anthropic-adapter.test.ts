@@ -4,6 +4,7 @@ import {
   AnthropicDecodeError,
   decodeAnthropicRequest,
   decodeAnthropicRequestWithSidecar,
+  decodeAnthropicTokenCountRequest,
 } from "../../src/protocols/anthropic/decode.js";
 import {
   AnthropicEncodeError,
@@ -761,6 +762,533 @@ describe("decodeAnthropicRequest", () => {
       }),
     ).toThrowError(AnthropicDecodeError);
   });
+
+  it("rejects circular and non-JSON values in metadata, schemas, and tool inputs", () => {
+    const circularMetadata: Record<string, unknown> = {};
+    circularMetadata.self = circularMetadata;
+    expect(() =>
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 32,
+        messages: [],
+        metadata: circularMetadata,
+      }),
+    ).toThrowError(AnthropicDecodeError);
+
+    expect(() =>
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 32,
+        messages: [],
+        metadata: { callback: () => undefined },
+      }),
+    ).toThrowError(AnthropicDecodeError);
+
+    const circularSchema: Record<string, unknown> = { type: "object" };
+    circularSchema.properties = circularSchema;
+    expect(() =>
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 32,
+        messages: [],
+        tools: [{ name: "weather", input_schema: circularSchema }],
+      }),
+    ).toThrowError(AnthropicDecodeError);
+
+    const circularInput: Record<string, unknown> = {};
+    circularInput.nested = circularInput;
+    expect(() =>
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 32,
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "toolu_1", name: "weather", input: circularInput }],
+          },
+        ],
+      }),
+    ).toThrowError(AnthropicDecodeError);
+  });
+
+  it.each([
+    { type: "disabled" },
+    { type: "adaptive" },
+    { type: "adaptive", display: "summarized" },
+    { type: "adaptive", display: null },
+    { type: "enabled", budget_tokens: 128, display: "omitted" },
+  ])("preserves thinking config %# in the extension request", (thinking) => {
+    expect(
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 256,
+        messages: [{ role: "user", content: "Hello" }],
+        thinking,
+      }),
+    ).toMatchObject({ extensions: { source: "anthropic", request: { thinking } } });
+  });
+
+  it.each([
+    "enabled",
+    { type: "auto" },
+    { type: "enabled" },
+    { type: "enabled", budget_tokens: -1 },
+    { type: "enabled", budget_tokens: 1.5 },
+    { type: "enabled", budget_tokens: Number.NaN },
+    { type: "enabled", budget_tokens: 8, display: "verbose" },
+    { type: "adaptive", display: "full" },
+  ])("rejects malformed thinking config %#", (thinking) => {
+    expect(() =>
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 256,
+        messages: [{ role: "user", content: "Hello" }],
+        thinking,
+      }),
+    ).toThrowError(AnthropicDecodeError);
+  });
+
+  it("accepts fully specified Web Search options and rejects malformed ones", () => {
+    expect(
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 32,
+        messages: [],
+        tools: [
+          {
+            type: "web_search_20250305",
+            name: "web_search",
+            max_uses: 3,
+            strict: true,
+            defer_loading: true,
+            allowed_callers: ["direct", "code_execution_20250825"],
+            user_location: { type: "approximate", city: "Paris", country: "FR" },
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      }).tools,
+    ).toEqual([{ type: "web_search", provider: "web-search", version: "web_search_20250305" }]);
+
+    const malformedOptions: Record<string, unknown>[] = [
+      { name: "not_web_search" },
+      { user_location: "Paris" },
+      { user_location: { type: "exact" } },
+      { user_location: { type: "approximate", city: 7 } },
+      { allowed_callers: "direct" },
+      { allowed_callers: ["root"] },
+      { allowed_callers: ["direct", 42] },
+      { strict: "yes" },
+      { defer_loading: 1 },
+    ];
+    for (const overrides of malformedOptions) {
+      expect(() =>
+        decodeAnthropicRequest({
+          model: "claude-test",
+          max_tokens: 32,
+          messages: [],
+          tools: [{ type: "web_search_20250305", name: "web_search", ...overrides }],
+        }),
+      ).toThrowError(AnthropicDecodeError);
+    }
+  });
+
+  it.each([
+    { temperature: "hot" },
+    { temperature: Number.NaN },
+    { top_p: Number.POSITIVE_INFINITY },
+    { top_k: "10" },
+    { stop_sequences: "STOP" },
+    { stop_sequences: ["ok", 2] },
+    { stream: "yes" },
+    { messages: "hi" },
+    { messages: [42] },
+    { messages: [{ role: "user", content: 42 }] },
+    { tools: "weather" },
+    { model: "" },
+    { metadata: [] },
+    { metadata: "x" },
+  ])("rejects malformed request fields %#", (overrides) => {
+    expect(() =>
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "Hello" }],
+        ...overrides,
+      }),
+    ).toThrowError(AnthropicDecodeError);
+  });
+
+  it("rejects malformed image blocks", () => {
+    const malformedBlocks: Record<string, unknown>[] = [
+      { type: "image" },
+      { type: "image", source: "url" },
+      { type: "image", source: { type: "base64", media_type: "image/tiff", data: "AAAA" } },
+      { type: "image", source: { type: "base64", media_type: "image/png" } },
+      { type: "image", source: { type: "token", token: "abc" } },
+      { type: "image", source: { type: "url" } },
+    ];
+    for (const block of malformedBlocks) {
+      expect(() =>
+        decodeAnthropicRequest({
+          model: "claude-test",
+          max_tokens: 32,
+          messages: [{ role: "user", content: [block] }],
+        }),
+      ).toThrowError(AnthropicDecodeError);
+    }
+  });
+
+  it("accepts every supported base64 image media type", () => {
+    const request = decodeAnthropicRequest({
+      model: "claude-test",
+      max_tokens: 32,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/gif", data: "R2lm" } },
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/webp", data: "d2VicA==" },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(request.messages[0]?.content).toEqual([
+      { type: "image", source: { type: "base64", mediaType: "image/gif", data: "R2lm" } },
+      { type: "image", source: { type: "base64", mediaType: "image/webp", data: "d2VicA==" } },
+    ]);
+  });
+
+  it("rejects malformed regular blocks", () => {
+    for (const content of [[42], [{}], [{ type: "text" }]]) {
+      expect(() =>
+        decodeAnthropicRequest({
+          model: "claude-test",
+          max_tokens: 32,
+          messages: [{ role: "user", content }],
+        }),
+      ).toThrowError(AnthropicDecodeError);
+    }
+  });
+
+  it.each([
+    {
+      role: "assistant",
+      content: [{ type: "image", source: { type: "url", url: "https://example.test/x.png" } }],
+    },
+    { role: "user", content: [{ type: "thinking", thinking: "hmm" }] },
+    { role: "user", content: [{ type: "tool_use", id: "toolu_1", name: "weather", input: {} }] },
+    {
+      role: "assistant",
+      content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }],
+    },
+    { role: "assistant", content: [{ type: "thinking", thinking: "hmm", signature: 7 }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "", input: {} }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "weather" }] },
+  ])("rejects misplaced or malformed role content %#", (message) => {
+    expect(() =>
+      decodeAnthropicRequest({ model: "claude-test", max_tokens: 32, messages: [message] }),
+    ).toThrowError(AnthropicDecodeError);
+  });
+
+  it("rejects malformed search result blocks", () => {
+    const malformedBlocks: Record<string, unknown>[] = [
+      { type: "search_result", title: "t", source: "s" },
+      { type: "search_result", title: "t", source: "s", content: [{ type: "image" }] },
+      { type: "search_result", source: "s", content: [] },
+      { type: "search_result", title: "t", content: [] },
+      { type: "search_result", title: "t", source: "s", content: [], citations: "yes" },
+      {
+        type: "search_result",
+        title: "t",
+        source: "s",
+        content: [],
+        citations: { enabled: "true" },
+      },
+    ];
+    for (const block of malformedBlocks) {
+      expect(() =>
+        decodeAnthropicRequest({
+          model: "claude-test",
+          max_tokens: 32,
+          messages: [{ role: "user", content: [block] }],
+        }),
+      ).toThrowError(AnthropicDecodeError);
+    }
+  });
+
+  it("decodes search results with default citation state", () => {
+    const request = decodeAnthropicRequest({
+      model: "claude-test",
+      max_tokens: 32,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "search_result",
+              title: "Doc",
+              source: "https://example.test",
+              content: [{ type: "text", text: "snippet" }],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(request.messages[0]?.content).toEqual([
+      {
+        type: "search_result",
+        title: "Doc",
+        source: "https://example.test",
+        content: "snippet",
+        citationsEnabled: false,
+      },
+    ]);
+  });
+
+  it.each([
+    5,
+    null,
+    ["text"],
+    [{ type: "image", source: { type: "url", url: "https://example.test/x.png" } }],
+    [{ type: "text" }],
+  ])("rejects malformed system prompts %#", (system) => {
+    expect(() =>
+      decodeAnthropicRequest({ model: "claude-test", max_tokens: 32, messages: [], system }),
+    ).toThrowError(AnthropicDecodeError);
+  });
+
+  it("rejects malformed custom tools", () => {
+    const malformedTools: unknown[][] = [
+      [42],
+      [{ name: "weather" }],
+      [{ name: "weather", input_schema: [] }],
+      [{ name: "weather", input_schema: {}, description: 1 }],
+      [{ name: "weather", input_schema: {}, strict: "yes" }],
+      [{ name: "weather", input_schema: {}, type: "other" }],
+    ];
+    for (const tools of malformedTools) {
+      expect(() =>
+        decodeAnthropicRequest({ model: "claude-test", max_tokens: 32, messages: [], tools }),
+      ).toThrowError(AnthropicDecodeError);
+    }
+  });
+
+  it("rejects malformed tool result payloads", () => {
+    const malformedBlocks: Record<string, unknown>[] = [
+      { type: "tool_result", tool_use_id: "toolu_1", is_error: "yes" },
+      { type: "tool_result", tool_use_id: "toolu_1", content: 5 },
+      { type: "tool_result", tool_use_id: "toolu_1", content: [42] },
+      { type: "tool_result", tool_use_id: "toolu_1", content: [{ type: "text" }] },
+      { type: "tool_result", tool_use_id: "toolu_1", content: [{ type: "document" }] },
+    ];
+    for (const block of malformedBlocks) {
+      expect(() =>
+        decodeAnthropicRequest({
+          model: "claude-test",
+          max_tokens: 32,
+          messages: [{ role: "user", content: [block] }],
+        }),
+      ).toThrowError(AnthropicDecodeError);
+    }
+  });
+
+  it("decodes tool results with defaults and nested search results", () => {
+    const request = decodeAnthropicRequest({
+      model: "claude-test",
+      max_tokens: 32,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1" },
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_2",
+              content: [
+                {
+                  type: "search_result",
+                  title: "Doc",
+                  source: "https://example.test",
+                  content: [{ type: "text", text: "snippet" }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(request.messages).toEqual([
+      {
+        role: "tool",
+        content: [{ type: "function_result", callId: "toolu_1", output: "", isError: false }],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "function_result", callId: "toolu_2", output: "", isError: false },
+          {
+            type: "search_result",
+            title: "Doc",
+            source: "https://example.test",
+            content: "snippet",
+            citationsEnabled: false,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it.each([
+    "auto",
+    { type: "none", disable_parallel_tool_use: true },
+    { type: "auto", disable_parallel_tool_use: "no" },
+    { type: "tool" },
+    { type: "sometimes" },
+  ])("rejects malformed tool choice %#", (toolChoice) => {
+    expect(() =>
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 32,
+        messages: [],
+        tool_choice: toolChoice,
+      }),
+    ).toThrowError(AnthropicDecodeError);
+  });
+
+  it.each([
+    [{ type: "auto" }, { toolChoice: { type: "auto" } }],
+    [{ type: "none" }, { toolChoice: { type: "none" } }],
+    [{ type: "any" }, { toolChoice: { type: "required" } }],
+    [
+      { type: "any", disable_parallel_tool_use: true },
+      { toolChoice: { type: "required" }, parallelToolCalls: false },
+    ],
+  ])("decodes tool choice variants %#", (toolChoice, expected) => {
+    expect(
+      decodeAnthropicRequest({
+        model: "claude-test",
+        max_tokens: 32,
+        messages: [],
+        tool_choice: toolChoice,
+      }),
+    ).toMatchObject(expected);
+  });
+
+  it.each([
+    "32",
+    -1,
+    1.5,
+    undefined,
+  ])("rejects invalid max_tokens %s in sidecar decode", (maxTokens) => {
+    expect(() =>
+      decodeAnthropicRequestWithSidecar({
+        model: "claude-test",
+        max_tokens: maxTokens,
+        messages: [],
+      }),
+    ).toThrowError(AnthropicDecodeError);
+  });
+
+  it("rejects non-record requests in sidecar decode", () => {
+    expect(() => decodeAnthropicRequestWithSidecar(null)).toThrowError(AnthropicDecodeError);
+    expect(() => decodeAnthropicRequestWithSidecar([1, 2])).toThrowError(AnthropicDecodeError);
+  });
+
+  it("rejects cache markers on thinking blocks and non-terminal blocks", () => {
+    expect(() =>
+      decodeAnthropicRequestWithSidecar({
+        model: "claude-test",
+        max_tokens: 128,
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "hmm", cache_control: { type: "ephemeral" } }],
+          },
+        ],
+      }),
+    ).toThrowError(AnthropicDecodeError);
+
+    expect(() =>
+      decodeAnthropicRequestWithSidecar({
+        model: "claude-test",
+        max_tokens: 128,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "cached", cache_control: { type: "ephemeral" } },
+              { type: "text", text: "uncached tail" },
+            ],
+          },
+        ],
+      }),
+    ).toThrowError(AnthropicDecodeError);
+
+    expect(() =>
+      decodeAnthropicRequestWithSidecar({
+        model: "claude-test",
+        max_tokens: 128,
+        system: [{ type: "text", text: "sys", cache_control: "ephemeral" }],
+        messages: [],
+      }),
+    ).toThrowError(AnthropicDecodeError);
+  });
+
+  it("counts empty-content messages without producing markers", () => {
+    const decoded = decodeAnthropicRequestWithSidecar({
+      model: "claude-test",
+      max_tokens: 128,
+      messages: [
+        { role: "user", content: [] },
+        { role: "user", content: "Hello" },
+      ],
+    });
+
+    expect(decoded.request.messages).toHaveLength(2);
+    expect(decoded.promptCache.explicitMarkers).toEqual([]);
+  });
+});
+
+describe("decodeAnthropicTokenCountRequest", () => {
+  it("decodes count requests without requiring max_tokens", () => {
+    const request = decodeAnthropicTokenCountRequest({
+      model: "claude-test",
+      system: "Be concise.",
+      messages: [{ role: "user", content: "Hello" }],
+      tools: [{ name: "weather", input_schema: { type: "object" } }],
+    });
+
+    expect(request).toMatchObject({
+      source: "anthropic",
+      model: "claude-test",
+      messages: [
+        { role: "system", content: [{ type: "text", text: "Be concise." }] },
+        { role: "user", content: [{ type: "text", text: "Hello" }] },
+      ],
+      tools: [{ type: "function", name: "weather" }],
+      stream: false,
+    });
+    expect(request).not.toHaveProperty("maxOutputTokens");
+  });
+
+  it("rejects non-record and malformed count requests", () => {
+    expect(() => decodeAnthropicTokenCountRequest(null)).toThrowError(AnthropicDecodeError);
+    expect(() => decodeAnthropicTokenCountRequest({ model: "claude-test" })).toThrowError(
+      AnthropicDecodeError,
+    );
+    expect(() =>
+      decodeAnthropicTokenCountRequest({
+        model: "claude-test",
+        messages: [{ role: "user", content: [{ type: "audio", data: "x" }] }],
+      }),
+    ).toThrowError(AnthropicDecodeError);
+  });
 });
 
 describe("encodeAnthropicResponse", () => {
@@ -957,5 +1485,154 @@ describe("encodeAnthropicResponse", () => {
     };
 
     expect(() => encodeAnthropicResponse(response)).toThrowError(AnthropicEncodeError);
+  });
+
+  it("encodes citations without optional fields as explicit nulls", () => {
+    const response: CanonicalResponse = {
+      id: "msg_bare_cite",
+      model: "claude-test",
+      content: [
+        {
+          type: "text",
+          text: "answer",
+          citations: [{ type: "url", url: "https://example.test/source" }],
+        },
+      ],
+      finishReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 2 },
+    };
+
+    expect(encodeAnthropicResponse(response).content).toEqual([
+      {
+        type: "text",
+        text: "answer",
+        citations: [
+          {
+            type: "web_search_result_location",
+            url: "https://example.test/source",
+            title: null,
+            cited_text: "answer",
+            encrypted_index: "",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("encodes base64 image content", () => {
+    const response: CanonicalResponse = {
+      id: "msg_img",
+      model: "claude-test",
+      content: [
+        { type: "image", source: { type: "base64", mediaType: "image/png", data: "aGVsbG8=" } },
+      ],
+      finishReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 2 },
+    };
+
+    expect(encodeAnthropicResponse(response).content).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+    ]);
+  });
+
+  it.each([
+    { startIndex: -1 },
+    { endIndex: 100 },
+    { startIndex: 3, endIndex: 1 },
+    { startIndex: 0.5, endIndex: 2 },
+  ])("rejects out-of-range citation spans %#", (span) => {
+    const response: CanonicalResponse = {
+      id: "msg_cite",
+      model: "claude-test",
+      content: [
+        {
+          type: "text",
+          text: "answer",
+          citations: [{ type: "url", url: "https://example.test/source", ...span }],
+        },
+      ],
+      finishReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 2 },
+    };
+
+    expect(() => encodeAnthropicResponse(response)).toThrowError(
+      expect.objectContaining({ code: "invalid_response" }),
+    );
+  });
+
+  it("rejects refusal content and maps incomplete to pause_turn", () => {
+    const base: CanonicalResponse = {
+      id: "msg_ref",
+      model: "claude-test",
+      content: [],
+      finishReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 2 },
+    };
+
+    expect(() =>
+      encodeAnthropicResponse({ ...base, content: [{ type: "refusal", refusal: "cannot" }] }),
+    ).toThrowError(expect.objectContaining({ code: "unsupported_content" }));
+
+    const incomplete = encodeAnthropicResponse({ ...base, finishReason: "incomplete" });
+    expect(incomplete.stop_reason).toBe("pause_turn");
+    expect(incomplete.stop_sequence).toBeNull();
+  });
+
+  it.each([
+    { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: -1 },
+    { inputTokens: 5, outputTokens: 1, cacheWriteInputTokens: Number.NaN },
+    { inputTokens: 1, outputTokens: -1 },
+    { inputTokens: Number.NaN, outputTokens: 1 },
+  ])("rejects non-finite or negative usage %#", (usage) => {
+    const response: CanonicalResponse = {
+      id: "msg_usage",
+      model: "claude-test",
+      content: [],
+      finishReason: "end_turn",
+      usage,
+    };
+
+    expect(() => encodeAnthropicResponse(response)).toThrowError(
+      expect.objectContaining({ code: "invalid_response" }),
+    );
+  });
+
+  it.each([
+    { id: "", model: "claude-test" },
+    { id: "msg_1", model: "" },
+  ])("requires a response id and model %#", ({ id, model }) => {
+    const response: CanonicalResponse = {
+      id,
+      model,
+      content: [],
+      finishReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+
+    expect(() => encodeAnthropicResponse(response)).toThrowError(
+      expect.objectContaining({ code: "invalid_response" }),
+    );
+  });
+
+  it("rejects malformed thinking finalizer results", () => {
+    const response: CanonicalResponse = {
+      id: "msg_think",
+      model: "claude-test",
+      content: [{ type: "reasoning", text: "reason", source: "openai-responses" }],
+      finishReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 2 },
+    };
+
+    expect(() =>
+      encodeAnthropicResponse(response, {
+        finalizeThinking: () => ({ text: 42 as unknown as string }),
+      }),
+    ).toThrowError(expect.objectContaining({ code: "invalid_response" }));
+
+    expect(() =>
+      encodeAnthropicResponse(response, {
+        finalizeThinking: () => ({ text: "ok", signature: 7 as unknown as string }),
+      }),
+    ).toThrowError(expect.objectContaining({ code: "invalid_response" }));
   });
 });
