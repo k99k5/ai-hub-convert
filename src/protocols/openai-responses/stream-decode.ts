@@ -25,6 +25,7 @@ interface StreamItem {
 
 interface ParsedMessageBody {
   text: string;
+  refusalText: string;
   annotations: Array<{
     hashValue: string;
     citation: Extract<CanonicalEvent, { type: "citation_delta" }>["citation"];
@@ -48,6 +49,7 @@ export class ResponsesStreamDecoder {
   #started = false;
   #terminal = false;
   #hasFunctionCall = false;
+  #hasRefusal = false;
   readonly #items = new Map<number, StreamItem>();
   readonly #seenIndices = new Set<number>();
   readonly #argumentLimiter: ToolArgumentStreamLimiter;
@@ -295,13 +297,17 @@ export class ResponsesStreamDecoder {
       throw new Error(`Responses output item ${index} is not open`);
     }
     const doneItem = readObject(payload, "item");
-    this.#assertDoneItemMatches(index, openItem, doneItem);
+    const doneBody = this.#assertDoneItemMatches(index, openItem, doneItem);
     this.#items.delete(index);
     if (openItem.type === "function_call") {
       this.#argumentLimiter.finish(index);
     }
 
     const events: CanonicalEvent[] = [];
+    if (openItem.type === "message" && doneBody !== undefined && doneBody.refusalText.length > 0) {
+      this.#hasRefusal = true;
+      events.push({ type: "text_delta", index, delta: doneBody.refusalText });
+    }
     if (openItem.type === "reasoning") {
       const encrypted = doneItem.encrypted_content;
       if (encrypted !== undefined && encrypted !== null) {
@@ -327,7 +333,7 @@ export class ResponsesStreamDecoder {
     index: number,
     openItem: StreamItem,
     doneItem: Record<string, unknown>,
-  ): void {
+  ): ParsedMessageBody | undefined {
     if (
       readString(doneItem, "id") !== openItem.itemId ||
       readString(doneItem, "type") !== openItem.type
@@ -337,11 +343,12 @@ export class ResponsesStreamDecoder {
 
     let doneBody: string;
     let doneAnnotations: string[] = [];
+    let message: ParsedMessageBody | undefined;
     if (openItem.type === "message") {
       if (doneItem.role !== "assistant") {
         throw new Error(`Responses output item ${index} done role does not match`);
       }
-      const message = readMessageBody(doneItem, index);
+      message = readMessageBody(doneItem, index);
       doneBody = message.text;
       doneAnnotations = message.annotations.map((annotation) => annotation.hashValue);
     } else if (openItem.type === "reasoning") {
@@ -370,6 +377,7 @@ export class ResponsesStreamDecoder {
     ) {
       throw new Error(`Responses output item ${index} done annotations do not match`);
     }
+    return message;
   }
 
   #decodeCompleted(payload: Record<string, unknown>): CanonicalEvent[] {
@@ -379,7 +387,11 @@ export class ResponsesStreamDecoder {
     return [
       {
         type: "response_complete",
-        finishReason: this.#hasFunctionCall ? "tool_use" : inferFinishReason(response),
+        finishReason: this.#hasFunctionCall
+          ? "tool_use"
+          : this.#hasRefusal
+            ? "refusal"
+            : inferFinishReason(response),
         usage: decodeUsage(response.usage),
       },
     ];
@@ -430,19 +442,27 @@ function readMessageBody(item: Record<string, unknown>, index: number): ParsedMe
     throw new Error(`Responses output item ${index} content does not match`);
   }
   const annotations: ParsedMessageBody["annotations"] = [];
-  const text = item.content
-    .map((rawPart) => {
-      if (!isObject(rawPart) || rawPart.type !== "output_text") {
-        throw new Error(`Responses output item ${index} content does not match`);
-      }
+  const textParts: string[] = [];
+  const refusalParts: string[] = [];
+  for (const rawPart of item.content) {
+    if (!isObject(rawPart)) {
+      throw new Error(`Responses output item ${index} content does not match`);
+    }
+    if (rawPart.type === "output_text") {
       if (!Array.isArray(rawPart.annotations)) {
         throw new Error(`Responses output item ${index} annotations do not match`);
       }
       annotations.push(...rawPart.annotations.map((value) => parseAnnotationValue(value)));
-      return readString(rawPart, "text");
-    })
-    .join("");
-  return { text, annotations };
+      textParts.push(readString(rawPart, "text"));
+      continue;
+    }
+    if (rawPart.type === "refusal") {
+      refusalParts.push(readString(rawPart, "refusal"));
+      continue;
+    }
+    throw new Error(`Responses output item ${index} content does not match`);
+  }
+  return { text: textParts.join(""), refusalText: refusalParts.join(""), annotations };
 }
 
 function readReasoningText(item: Record<string, unknown>, index: number): string {

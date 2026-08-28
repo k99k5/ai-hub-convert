@@ -86,6 +86,7 @@ export class ChatStreamDecoder {
     this.#validateRole(delta.role);
     events.push(...this.#decodeReasoning(delta));
     events.push(...this.#decodeText(delta.content));
+    events.push(...this.#decodeText(delta.refusal));
     events.push(...this.#decodeTools(delta.tool_calls));
 
     if (choice.finish_reason !== undefined && choice.finish_reason !== null) {

@@ -28,12 +28,15 @@
 | URL image | 支持 | 支持 | 支持 |
 | Base64 image | 支持 | 支持 | 支持 |
 | function tools | 支持 | 支持 | 支持 |
-| tool calls/results | 支持 | 支持 | 支持 |
+| tool calls/results | 支持；`tool_result` 中的 image/search_result 内容返回 HTTP 400 | 同上；不触发 Chat 回退 | 支持 |
 | parallel/interleaved calls | 支持 | 支持 | 支持 |
 | reasoning/thinking | Anthropic thinking 可返回客户端；历史 thinking 不伪造成 Responses reasoning continuation | 支持常见 Chat reasoning 扩展 | 支持；真实 item `id` 与 `encrypted_content` 只作同协议 continuation |
 | `output_config.effort` | `reasoning.effort` | `reasoning_effort` | 不适用；完整 `reasoning` 对象同协议回放 |
+| `stop_sequences` | 丢弃（Responses 无对应参数） | `stop` | 不支持（无对应字段） |
+| `top_k` | 丢弃（无对应参数） | 丢弃（无对应参数） | 不适用 |
 | usage/cache-read/reasoning tokens | 支持已报告字段 | 支持已报告字段 | 支持已报告字段 |
-| existing search_result | 支持 | 受目标协议表达能力限制 | 支持规范化表示 |
+| existing search_result | content 退化为 text | content 退化为 text | 支持规范化表示 |
+| upstream refusal | 折为 text 块 + `stop_reason:"refusal"`；SSE 流中 refusal part 在 `output_item.done` 时并入文本块 | 同上 | JSON 保留原生 refusal part；SSE 流中折叠为 text delta |
 | URL citations/annotations | JSON/SSE 支持 | 受 Chat 扩展能力限制 | JSON/SSE 支持 |
 | built-in Web Search execution | HTTP 501，零上游 | 不触发 Chat 回退 | HTTP 501，零上游 |
 | ordinary function `web_search` | 普通 function | 普通 function | 普通 function |
@@ -84,7 +87,9 @@ Claude Code cache policy 只有 strict SemVer 识别成功且范围内才启用�
 ## 已知有损语义
 
 - canonical `incomplete` 映射 Anthropic `pause_turn`；`max_output_tokens` 映射 `max_tokens`。
-- OpenAI `content_filter` 没有一一对应的 Anthropic stop reason，映射为 canonical `incomplete` 再输出 `pause_turn`。
+- OpenAI `content_filter` 与上游 refusal 映射为 canonical `refusal`；Anthropic 出口将 refusal 折为 text 块并输出 `stop_reason:"refusal"`，Responses 流式透传中折叠为 text delta（非流式保留原生 refusal part）。
+- Anthropic `tool_result` 中的 image/search_result 内容无法映射到 Responses `function_call_output` 或 Chat tool 消息，请求在调用上游前返回 HTTP 400，且不触发 Chat 回退。
+- Anthropic `stop_sequences` 仅 Chat fallback 可表达（`stop`）；发往 Responses 上游时被丢弃。Anthropic `top_k` 在两条上游路径都无可表达字段，不转发。
 - Anthropic citation 不伪造 encrypted index；仅保留可表达的 URL、title 与文本区间。
 - Chat-compatible upstream 的 reasoning、citation 和 usage 扩展并非统一标准，只有已识别字段进入 canonical 表示。
 - generic profile 不声明显式 prompt-cache 能力，因此依赖上游自动 prefix caching（如有），不伪造 breakpoint 等价关系。

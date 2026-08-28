@@ -1813,6 +1813,36 @@ describe("encodeChatRequest edge cases", () => {
       }),
     );
   });
+
+  it("degrades user search_result blocks to plain text instead of dropping them", () => {
+    const request = encodeChatRequest(
+      baseRequest({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "search_result",
+                title: "Doc",
+                source: "https://example.test",
+                content: "snippet text",
+                citationsEnabled: false,
+              },
+              { type: "text", text: "question" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(request.messages[0]).toEqual({
+      role: "user",
+      content: [
+        { type: "text", text: "snippet text" },
+        { type: "text", text: "question" },
+      ],
+    });
+  });
 });
 it("decodes the top-level Chat refusal field and rejects non-object bodies", () => {
   const decoded = decodeChatResponse({

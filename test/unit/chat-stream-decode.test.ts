@@ -384,6 +384,40 @@ describe("ChatStreamDecoder", () => {
     ]);
   });
 
+  it("streams refusal deltas as text and finishes with refusal", () => {
+    const decoder = new ChatStreamDecoder();
+    const events = [
+      ...chunk(decoder, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 0, delta: { role: "assistant" } }],
+      }),
+      ...chunk(decoder, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 0, delta: { refusal: "I cannot " } }],
+      }),
+      ...chunk(decoder, {
+        id: "s",
+        model: "m",
+        choices: [{ index: 0, delta: { refusal: "help" }, finish_reason: "content_filter" }],
+      }),
+      ...decoder.decode({ event: "message", data: "[DONE]" }),
+    ];
+
+    expect(events.map((event) => event.type)).toEqual([
+      "response_start",
+      "content_start",
+      "text_delta",
+      "text_delta",
+      "content_stop",
+      "response_complete",
+    ]);
+    expect(events[2]).toEqual({ type: "text_delta", index: 0, delta: "I cannot " });
+    expect(events[3]).toEqual({ type: "text_delta", index: 0, delta: "help" });
+    expect(events.at(-1)).toMatchObject({ finishReason: "refusal" });
+  });
+
   it("handles upstream error frames and lifecycle violations", () => {
     const normal = () => {
       const decoder = new ChatStreamDecoder();
