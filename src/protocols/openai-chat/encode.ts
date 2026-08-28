@@ -23,6 +23,8 @@ function encodeContent(content: readonly Content[]): ChatContentPart[] {
       encoded.push({ type: "text", text: part.text });
     } else if (part.type === "image") {
       encoded.push({ type: "image_url", image_url: { url: imageUrl(part) } });
+    } else if (part.type === "search_result") {
+      encoded.push({ type: "text", text: part.content });
     }
   }
   return encoded;

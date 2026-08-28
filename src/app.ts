@@ -65,6 +65,7 @@ import {
   decodeResponsesInputTokensResponse,
   encodeResponsesInputTokensRequest,
 } from "./protocols/openai-responses/input-tokens.js";
+import { OpenAIAdapterError as ChatAdapterError } from "./protocols/openai-chat/types.js";
 import { OpenAIAdapterError } from "./protocols/openai-responses/types.js";
 import { ActiveStreamRegistry } from "./stream/active-streams.js";
 import { StreamOutputLimitError, type StreamOutputLimits } from "./stream/output-limits.js";
@@ -121,6 +122,10 @@ function routeProtocol(url: string): RouteProtocol {
 
 function isBoundaryError(error: unknown): error is FastifyBoundaryError {
   return error instanceof Error;
+}
+
+function isProtocolAdapterError(error: unknown): boolean {
+  return error instanceof OpenAIAdapterError || error instanceof ChatAdapterError;
 }
 
 export function buildApp(options: BuildAppOptions): FastifyInstance {
@@ -263,6 +268,14 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           } catch (error) {
             abortScope.abort(error);
             if (!reply.raw.headersSent) {
+              if (isProtocolAdapterError(error)) {
+                return sendAnthropicError(
+                  reply,
+                  400,
+                  "invalid_request_error",
+                  "The request contains content that is not supported for protocol conversion",
+                );
+              }
               const mapped = mapUpstreamError("anthropic", error, request.id);
               return reply.code(mapped.status).send(mapped.body);
             }
@@ -304,6 +317,14 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             }),
           );
         } catch (error) {
+          if (isProtocolAdapterError(error)) {
+            return sendAnthropicError(
+              reply,
+              400,
+              "invalid_request_error",
+              "The request contains content that is not supported for protocol conversion",
+            );
+          }
           const mapped = mapUpstreamError("anthropic", error, request.id);
           return reply.code(mapped.status).send(mapped.body);
         } finally {
@@ -372,6 +393,14 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             input_tokens: decodeResponsesInputTokensResponse(upstreamResponse),
           });
         } catch (error) {
+          if (isProtocolAdapterError(error)) {
+            return sendAnthropicError(
+              reply,
+              400,
+              "invalid_request_error",
+              "The request contains content that is not supported for protocol conversion",
+            );
+          }
           const mapped = mapUpstreamError("anthropic", error, request.id);
           return reply.code(mapped.status).send(mapped.body);
         } finally {

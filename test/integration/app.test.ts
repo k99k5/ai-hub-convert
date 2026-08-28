@@ -1097,6 +1097,112 @@ describe("Anthropic Messages conversion", () => {
     });
   });
 
+  it("returns a clean 400 without calling upstream for image content in tool results", async () => {
+    const upstreamFetch = vi.fn(async () => {
+      throw new Error("upstream must not be called");
+    });
+    const app = createApp({}, upstreamFetch);
+
+    const payload = {
+      model: "vendor/model-1",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                { type: "text", text: "screenshot" },
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const nonStream = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: { "content-type": "application/json", "x-api-key": "caller-key" },
+      payload,
+    });
+    expect(nonStream.statusCode).toBe(400);
+    expect(nonStream.json()).toMatchObject({
+      type: "error",
+      error: { type: "invalid_request_error" },
+    });
+
+    const stream = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: { "content-type": "application/json", "x-api-key": "caller-key" },
+      payload: { ...payload, stream: true },
+    });
+    expect(stream.statusCode).toBe(400);
+    expect(stream.json()).toMatchObject({
+      type: "error",
+      error: { type: "invalid_request_error" },
+    });
+
+    const counted = await app.inject({
+      method: "POST",
+      url: "/v1/messages/count_tokens",
+      headers: { "content-type": "application/json", "x-api-key": "caller-key" },
+      payload: { model: payload.model, messages: payload.messages },
+    });
+    expect(counted.statusCode).toBe(400);
+    expect(counted.json()).toMatchObject({
+      type: "error",
+      error: { type: "invalid_request_error" },
+    });
+
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it("converts an upstream refusal to text with a refusal stop reason", async () => {
+    const app = createApp({}, async () =>
+      Response.json({
+        id: "resp_refusal",
+        model: "vendor/model-1",
+        status: "completed",
+        output: [
+          {
+            id: "msg_1",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "refusal", refusal: "I cannot help with that" }],
+          },
+        ],
+        usage: { input_tokens: 4, output_tokens: 6 },
+      }),
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: { "content-type": "application/json", "x-api-key": "caller-key" },
+      payload: {
+        model: "vendor/model-1",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      content: [{ type: "text", text: "I cannot help with that" }],
+      stop_reason: "refusal",
+      stop_sequence: null,
+    });
+  });
+
   it("omits unsigned Anthropic thinking while forwarding matched Responses call items", async () => {
     let upstreamBody: Record<string, unknown> | undefined;
     const app = createApp({}, async (input, init) => {
@@ -1218,6 +1324,39 @@ describe("Anthropic Messages conversion", () => {
       store: false,
       reasoning: { effort: "high" },
     });
+  });
+
+  it("converts a Responses stream refusal into an Anthropic text block with refusal stop reason", async () => {
+    const app = createApp({}, async () => {
+      const body = [
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_refusal","model":"vendor/model-1"}}\n\n',
+        'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_refusal","role":"assistant","status":"in_progress","content":[]}}\n\n',
+        'event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_refusal","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I cannot help with that"}]}}\n\n',
+        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_refusal","model":"vendor/model-1","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":7}}}\n\n',
+        "data: [DONE]\n\n",
+      ].join("");
+      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: { "content-type": "application/json", "x-api-key": "caller-key" },
+      payload: {
+        model: "vendor/model-1",
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/event-stream");
+    expect(response.body).toContain("event: message_start");
+    expect(response.body).toContain('"type":"text_delta","text":"I cannot help with that"');
+    expect(response.body).toContain('"stop_reason":"refusal"');
+    expect(response.body).toContain("event: message_stop");
+    expect(response.body).not.toContain("event: error");
   });
 
   it.each([

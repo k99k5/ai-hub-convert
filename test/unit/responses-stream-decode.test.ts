@@ -79,6 +79,94 @@ describe("ResponsesStreamDecoder", () => {
     });
   });
 
+  it("folds a refusal part into the open text block and reports a refusal finish", () => {
+    const decoder = new ResponsesStreamDecoder();
+    const events = [
+      ...decode(decoder, "response.created", {
+        response: { id: "resp_1", model: "model-a" },
+      }),
+      ...decode(decoder, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "msg_1", type: "message", role: "assistant", content: [] },
+      }),
+      ...decode(decoder, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "refusal", refusal: "I cannot help with that" }],
+        },
+      }),
+      ...decode(decoder, "response.completed", {
+        response: {
+          status: "completed",
+          usage: { input_tokens: 3, output_tokens: 5 },
+        },
+      }),
+    ];
+
+    expect(events.map((event) => event.type)).toEqual([
+      "response_start",
+      "content_start",
+      "text_delta",
+      "content_stop",
+      "response_complete",
+    ]);
+    expect(events[2]).toEqual({
+      type: "text_delta",
+      index: 0,
+      delta: "I cannot help with that",
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "response_complete",
+      finishReason: "refusal",
+    });
+    expect(() => decoder.finish()).not.toThrow();
+  });
+
+  it("keeps output_text alongside a trailing refusal part in output_item.done", () => {
+    const decoder = new ResponsesStreamDecoder();
+    const events = [
+      ...decode(decoder, "response.created", {
+        response: { id: "resp_1", model: "model-a" },
+      }),
+      ...decode(decoder, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "msg_1", type: "message", role: "assistant", content: [] },
+      }),
+      ...decode(decoder, "response.output_text.delta", { output_index: 0, delta: "partial" }),
+      ...decode(decoder, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [
+            { type: "output_text", text: "partial", annotations: [] },
+            { type: "refusal", refusal: "rest refused" },
+          ],
+        },
+      }),
+      ...decode(decoder, "response.completed", {
+        response: { status: "completed", usage: { input_tokens: 1, output_tokens: 2 } },
+      }),
+    ];
+
+    expect(events.map((event) => event.type)).toEqual([
+      "response_start",
+      "content_start",
+      "text_delta",
+      "text_delta",
+      "content_stop",
+      "response_complete",
+    ]);
+    expect(events[3]).toEqual({ type: "text_delta", index: 0, delta: "rest refused" });
+    expect(events.at(-1)).toMatchObject({ finishReason: "refusal" });
+  });
+
   it("decodes URL annotation events and accepts DONE after the terminal event", () => {
     const decoder = new ResponsesStreamDecoder();
     decode(decoder, "response.created", {

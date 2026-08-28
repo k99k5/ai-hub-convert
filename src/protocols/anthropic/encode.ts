@@ -36,10 +36,6 @@ const invalidResponse = (): never => {
   throw new AnthropicEncodeError("invalid_response", "Invalid canonical response");
 };
 
-const unsupportedContent = (): never => {
-  throw new AnthropicEncodeError("unsupported_content", "Unsupported assistant response content");
-};
-
 function parseArguments(value: string): Record<string, unknown> {
   let parsed: unknown;
   try {
@@ -163,7 +159,7 @@ function encodeContent(
         "Function results are not valid assistant response content",
       );
     case "refusal":
-      return unsupportedContent();
+      return { type: "text", text: content.refusal };
   }
 }
 

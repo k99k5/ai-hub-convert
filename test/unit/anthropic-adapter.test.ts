@@ -1560,7 +1560,7 @@ describe("encodeAnthropicResponse", () => {
     );
   });
 
-  it("rejects refusal content and maps incomplete to pause_turn", () => {
+  it("converts refusal content to a text block and maps incomplete to pause_turn", () => {
     const base: CanonicalResponse = {
       id: "msg_ref",
       model: "claude-test",
@@ -1569,9 +1569,13 @@ describe("encodeAnthropicResponse", () => {
       usage: { inputTokens: 1, outputTokens: 2 },
     };
 
-    expect(() =>
-      encodeAnthropicResponse({ ...base, content: [{ type: "refusal", refusal: "cannot" }] }),
-    ).toThrowError(expect.objectContaining({ code: "unsupported_content" }));
+    const refusal = encodeAnthropicResponse({
+      ...base,
+      content: [{ type: "refusal", refusal: "cannot" }],
+      finishReason: "refusal",
+    });
+    expect(refusal.content).toEqual([{ type: "text", text: "cannot" }]);
+    expect(refusal.stop_reason).toBe("refusal");
 
     const incomplete = encodeAnthropicResponse({ ...base, finishReason: "incomplete" });
     expect(incomplete.stop_reason).toBe("pause_turn");

@@ -174,12 +174,18 @@ export class AnthropicStreamEncoder {
       deltas: [],
       signature: content.type === "reasoning" ? (content.signature ?? "") : "",
     });
-    return [
+    const frames: AnthropicSseFrame[] = [
       {
         event: "content_block_start",
         data: { type: "content_block_start", index, content_block: contentBlock },
       },
     ];
+    if (content.type === "refusal" && content.refusal.length > 0) {
+      frames.push(
+        frame("content_block_delta", index, { type: "text_delta", text: content.refusal }),
+      );
+    }
+    return frames;
   }
 
   #stopContent(index: number): AnthropicSseFrame[] {

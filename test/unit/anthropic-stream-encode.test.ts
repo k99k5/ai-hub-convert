@@ -450,8 +450,25 @@ describe("AnthropicStreamEncoder", () => {
         type: "content_start",
         index: 3,
         content: { type: "refusal", refusal: "cannot" },
-      })[0]?.data,
-    ).toMatchObject({ content_block: { type: "text", text: "" } });
+      }),
+    ).toEqual([
+      {
+        event: "content_block_start",
+        data: {
+          type: "content_block_start",
+          index: 3,
+          content_block: { type: "text", text: "" },
+        },
+      },
+      {
+        event: "content_block_delta",
+        data: {
+          type: "content_block_delta",
+          index: 3,
+          delta: { type: "text_delta", text: "cannot" },
+        },
+      },
+    ]);
 
     expect(() =>
       encoder.encode({

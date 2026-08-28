@@ -124,7 +124,7 @@ system attribution 与 User-Agent 冲突时以前者为准。只有严格、有�
 
 支持 JSON 与 SSE：text、system、URL/Base64 image、function tool、tool call/result、并行与交错工具调用、reasoning/thinking、usage、已有 search result、URL citation/annotation。Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 会转为 Responses `reasoning.effort`，token counting 同样保留，Chat fallback 转为 `reasoning_effort`。
 
-首版不支持 document/PDF、audio、file upload、background Responses 生命周期、非空 `output_config.format` 或主动 Web Search。非空 `output_config.format` 会在上游调用前返回 Anthropic 400；`background:true` 会被拒绝。完整矩阵和有损语义见 [docs/compatibility.md](docs/compatibility.md)。
+首版不支持 document/PDF、audio、file upload、background Responses 生命周期、非空 `output_config.format` 或主动 Web Search。非空 `output_config.format` 会在上游调用前返回 Anthropic 400；`background:true` 会被拒绝。Anthropic `tool_result` 中的 image/search_result 内容同样在上游调用前返回 Anthropic 400。上游 refusal 在 Anthropic 出口折为 text 块并输出 `stop_reason:"refusal"`。完整矩阵和有损语义见 [docs/compatibility.md](docs/compatibility.md)。
 
 ## Docker
 
