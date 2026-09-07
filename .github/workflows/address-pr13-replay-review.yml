@@ -1,0 +1,61 @@
+name: Address PR 13 Replay Review
+
+on:
+  push:
+    branches:
+      - debug/web-search-usage-logs
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-usage-logs
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Patch replay-only assistant turn and test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          decode = Path('src/protocols/anthropic/decode.ts')
+          text = decode.read_text()
+          old = '''  flushCurrent();\n  if (record.content.length === 0) {\n    messages.push({ role, content: [] });\n  }\n  return messages;\n}\n'''
+          new = '''  flushCurrent();\n  if (messages.length === 0) {\n    messages.push({ role, content: [] });\n  }\n  return messages;\n}\n'''
+          if old not in text:
+              raise SystemExit('decode anchor not found')
+          decode.write_text(text.replace(old, new, 1))
+
+          test_file = Path('test/unit/anthropic-web-search-replay.test.ts')
+          tests = test_file.read_text()
+          marker = '\n  it("still rejects malformed or non-assistant server search blocks", () => {'
+          test = '''\n  it("preserves an empty assistant turn when history contains only server search replay blocks", () => {\n    const decoded = decodeAnthropicRequest({\n      model: "claude-test",\n      max_tokens: 128,\n      messages: [\n        { role: "user", content: "search first" },\n        {\n          role: "assistant",\n          content: [\n            {\n              type: "server_tool_use",\n              id: "srvtoolu_ai_hub_0",\n              name: "web_search",\n              input: { query: "current info" },\n            },\n            {\n              type: "web_search_tool_result",\n              tool_use_id: "srvtoolu_ai_hub_0",\n              content: [],\n            },\n          ],\n        },\n        { role: "user", content: "continue" },\n      ],\n    });\n\n    expect(decoded.messages).toEqual([\n      { role: "user", content: [{ type: "text", text: "search first" }] },\n      { role: "assistant", content: [] },\n      { role: "user", content: [{ type: "text", text: "continue" }] },\n    ]);\n  });\n'''
+          if marker not in tests:
+              raise SystemExit('test anchor not found')
+          test_file.write_text(tests.replace(marker, test + marker, 1))
+          PY
+
+          pnpm format
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+          pnpm test:coverage
+          pnpm build
+
+          rm .github/workflows/address-pr13-replay-review.yml
+          git config user.name "TigerKK"
+          git config user.email "545551320@qq.com"
+          git add -A
+          git commit -m "fix: preserve replay-only Anthropic assistant turns"
+          git push origin HEAD:debug/web-search-usage-logs
