@@ -27,6 +27,47 @@ const DEFAULT_JSON_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
 const DEFAULT_ERROR_BODY_LIMIT_BYTES = 64 * 1024;
 const MAX_WEB_SEARCH_ROUNDS = 8;
 
+function webSearchDebug(event: string, fields: Record<string, unknown> = {}): void {
+  console.error(
+    `[web-search-debug] ${JSON.stringify({
+      event,
+      ts: new Date().toISOString(),
+      ...fields,
+    })}`,
+  );
+}
+
+function webSearchToolNames(path: CompletionPath, body: unknown): string[] {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return [];
+  }
+  const tools = (body as Record<string, unknown>).tools;
+  if (!Array.isArray(tools)) {
+    return [];
+  }
+  const names: string[] = [];
+  for (const rawTool of tools) {
+    if (typeof rawTool !== "object" || rawTool === null || Array.isArray(rawTool)) {
+      continue;
+    }
+    const tool = rawTool as Record<string, unknown>;
+    if (path === "responses") {
+      if (typeof tool.name === "string") {
+        names.push(tool.name);
+      }
+      continue;
+    }
+    const fn = tool.function;
+    if (typeof fn === "object" && fn !== null && !Array.isArray(fn)) {
+      const name = (fn as Record<string, unknown>).name;
+      if (typeof name === "string") {
+        names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
 interface UpstreamErrorEnvelope {
   error?: {
     code?: string | number;
@@ -81,8 +122,15 @@ export class UpstreamClient {
     apiKey: string,
     signal: AbortSignal,
   ): Promise<unknown> {
-    if (path !== "responses/input_tokens" && hasInternalWebSearchTool(path, body)) {
-      return this.#postJsonWithWebSearchLoop(path, body, apiKey, signal);
+    if (path !== "responses/input_tokens") {
+      const toolNames = webSearchToolNames(path, body);
+      const internal = hasInternalWebSearchTool(path, body);
+      if (internal || toolNames.some((name) => /web.?search/i.test(name))) {
+        webSearchDebug("request.inspect", { path, mode: "json", internal, toolNames });
+      }
+      if (internal) {
+        return this.#postJsonWithWebSearchLoop(path, body, apiKey, signal);
+      }
     }
     const response = await this.#post(path, body, apiKey, signal);
     return readJsonBody(response, this.#jsonBodyLimitBytes);
@@ -94,13 +142,19 @@ export class UpstreamClient {
     apiKey: string,
     signal: AbortSignal,
   ): Promise<Response> {
-    if (hasInternalWebSearchTool(path, body)) {
+    const toolNames = webSearchToolNames(path, body);
+    const internal = hasInternalWebSearchTool(path, body);
+    if (internal || toolNames.some((name) => /web.?search/i.test(name))) {
+      webSearchDebug("request.inspect", { path, mode: "stream", internal, toolNames });
+    }
+    if (internal) {
       const response = await this.#postJsonWithWebSearchLoop(
         path,
         forceNonStreamingBody(path, body),
         apiKey,
         signal,
       );
+      webSearchDebug("stream.synthesize", { path });
       return synthesizeCompletionStream(path, response);
     }
 
@@ -118,16 +172,43 @@ export class UpstreamClient {
     apiKey: string,
     signal: AbortSignal,
   ): Promise<unknown> {
+    const traceId = crypto.randomUUID();
     let currentBody = forceNonStreamingBody(path, body);
+    webSearchDebug("loop.start", {
+      traceId,
+      path,
+      toolNames: webSearchToolNames(path, currentBody),
+    });
     for (let round = 0; round < MAX_WEB_SEARCH_ROUNDS; round += 1) {
+      webSearchDebug("round.request", {
+        traceId,
+        path,
+        round,
+        toolNames: webSearchToolNames(path, currentBody),
+      });
       const response = await this.#post(path, currentBody, apiKey, signal);
       const upstreamRequestId = response.headers.get("x-request-id") ?? `web_search_round_${round}`;
       const responseBody = await readJsonBody(response, this.#jsonBodyLimitBytes);
       const calls = extractInternalToolCalls(path, responseBody);
+      webSearchDebug("round.response", {
+        traceId,
+        path,
+        round,
+        upstreamRequestId,
+        webSearchCalls: calls.webSearch.length,
+        hasOtherToolCalls: calls.hasOtherToolCalls,
+      });
       if (calls.webSearch.length === 0) {
+        webSearchDebug("loop.done", { traceId, path, round, reason: "no_web_search_call" });
         return responseBody;
       }
       if (calls.hasOtherToolCalls) {
+        webSearchDebug("loop.error", {
+          traceId,
+          path,
+          round,
+          reason: "mixed_client_and_web_search_tools",
+        });
         throw new UpstreamProtocolError(
           "Upstream mixed internal Web Search with client-executed tool calls in one turn",
         );
@@ -137,9 +218,24 @@ export class UpstreamClient {
       const provider = this.#webSearchProviders.get("web-search");
       let allResultsEmpty = true;
       for (const call of calls.webSearch) {
-        const results = await provider.execute(decodeWebSearchRequest(call.arguments), {
+        const decodedRequest = decodeWebSearchRequest(call.arguments);
+        webSearchDebug("provider.execute.start", {
+          traceId,
+          path,
+          round,
+          callId: call.id,
+          queryLength: decodedRequest.query.length,
+        });
+        const results = await provider.execute(decodedRequest, {
           requestId: upstreamRequestId,
           signal,
+        });
+        webSearchDebug("provider.execute.done", {
+          traceId,
+          path,
+          round,
+          callId: call.id,
+          resultCount: results.length,
         });
         if (results.length > 0) {
           allResultsEmpty = false;
@@ -147,10 +243,24 @@ export class UpstreamClient {
         outputs.set(call.id, encodeWebSearchResults(results));
       }
       currentBody = appendWebSearchResults(path, currentBody, responseBody, outputs);
+      webSearchDebug("round.results_appended", {
+        traceId,
+        path,
+        round,
+        allResultsEmpty,
+        toolNames: webSearchToolNames(path, currentBody),
+      });
       if (allResultsEmpty) {
         currentBody = disableInternalWebSearchTool(path, currentBody);
+        webSearchDebug("round.search_disabled", {
+          traceId,
+          path,
+          round,
+          nextToolNames: webSearchToolNames(path, currentBody),
+        });
       }
     }
+    webSearchDebug("loop.error", { traceId, path, reason: "max_rounds" });
     throw new UpstreamProtocolError("Web Search tool loop exceeded the maximum number of rounds");
   }
 
