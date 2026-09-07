@@ -25,4 +25,22 @@ describe("Anthropic Web Search output limits", () => {
       encoder.encode({ type: "response_start", id: "msg_test", model: "test-model" }),
     ).toThrowError(expect.objectContaining({ scope: "item", code: "STREAM_OUTPUT_TOO_LARGE" }));
   });
+
+  it("charges outer JSON escaping for streamed search query deltas", () => {
+    const escapedQuery = ['"', "\\", "\n"].join("").repeat(1_000);
+    const encoder = new AnthropicStreamEncoder({
+      outputLimits: { perItemBytes: 8_000, perStreamBytes: 30_000 },
+      webSearchExecutions: [
+        {
+          id: "call_search",
+          query: escapedQuery,
+          results: [],
+        },
+      ],
+    });
+
+    expect(() =>
+      encoder.encode({ type: "response_start", id: "msg_test", model: "test-model" }),
+    ).toThrowError(expect.objectContaining({ scope: "item", code: "STREAM_OUTPUT_TOO_LARGE" }));
+  });
 });
