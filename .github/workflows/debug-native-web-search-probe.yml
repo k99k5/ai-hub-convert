@@ -125,6 +125,23 @@ jobs:
           }
           '''
           path.write_text(text[:start] + replacement + text[end:])
+
+          test_path = Path('test/unit/web-search-usage.test.ts')
+          test_text = test_path.read_text()
+          old = '''    expect(frames[0]?.data.usage).toEqual({
+              input_tokens: 10,
+              output_tokens: 2,
+              server_tool_use: { web_search_requests: 2 },
+            });'''
+          new = '''    const messageDelta = frames.find((frame) => frame.event === "message_delta");
+            expect(messageDelta?.data.usage).toEqual({
+              input_tokens: 10,
+              output_tokens: 2,
+              server_tool_use: { web_search_requests: 2 },
+            });'''
+          if old not in test_text:
+              raise RuntimeError('streaming usage assertion not found')
+          test_path.write_text(test_text.replace(old, new, 1))
           PY
           rm .github/workflows/debug-native-web-search-probe.yml
 
@@ -132,7 +149,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Format
-        run: pnpm exec biome format --write src/protocols/anthropic/stream-encode.ts
+        run: pnpm exec biome format --write src/protocols/anthropic/stream-encode.ts test/unit/web-search-usage.test.ts
 
       - name: Typecheck
         run: pnpm typecheck
