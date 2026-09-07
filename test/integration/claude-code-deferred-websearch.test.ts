@@ -47,7 +47,7 @@ it("owns Claude Code deferred WebSearch and completes an empty search without le
             type: "message",
             role: "assistant",
             status: "completed",
-            content: [{ type: "output_text", text: "搜索没有返回结果。", annotations: [] }],
+            content: [{ type: "output_text", text: "搜索没有返回结果。" }],
           },
         ],
         usage: { input_tokens: 8, output_tokens: 4 },
@@ -101,7 +101,12 @@ it("owns Claude Code deferred WebSearch and completes an empty search without le
       expect.objectContaining({
         type: "function_call_output",
         call_id: "call_search",
-        output: "[]",
+        output: JSON.stringify({
+          ok: true,
+          result_count: 0,
+          results: [],
+          message: "Web search completed successfully with 0 results. This is not an API error.",
+        }),
       }),
     ]),
   );

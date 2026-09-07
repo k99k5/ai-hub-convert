@@ -449,10 +449,12 @@ function readMessageBody(item: Record<string, unknown>, index: number): ParsedMe
       throw new Error(`Responses output item ${index} content does not match`);
     }
     if (rawPart.type === "output_text") {
-      if (!Array.isArray(rawPart.annotations)) {
+      const rawAnnotations = rawPart.annotations;
+      if (rawAnnotations !== undefined && !Array.isArray(rawAnnotations)) {
         throw new Error(`Responses output item ${index} annotations do not match`);
       }
-      annotations.push(...rawPart.annotations.map((value) => parseAnnotationValue(value)));
+      const partAnnotations = Array.isArray(rawAnnotations) ? rawAnnotations : [];
+      annotations.push(...partAnnotations.map((value) => parseAnnotationValue(value)));
       textParts.push(readString(rawPart, "text"));
       continue;
     }
