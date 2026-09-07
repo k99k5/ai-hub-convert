@@ -2,6 +2,7 @@ import { createDefaultWebSearchRegistry } from "../providers/web-search/prefligh
 import {
   appendWebSearchResults,
   decodeWebSearchRequest,
+  disableInternalWebSearchTool,
   encodeWebSearchResults,
   extractInternalToolCalls,
   forceNonStreamingBody,
@@ -134,14 +135,21 @@ export class UpstreamClient {
 
       const outputs = new Map<string, string>();
       const provider = this.#webSearchProviders.get("web-search");
+      let allResultsEmpty = true;
       for (const call of calls.webSearch) {
         const results = await provider.execute(decodeWebSearchRequest(call.arguments), {
           requestId: upstreamRequestId,
           signal,
         });
+        if (results.length > 0) {
+          allResultsEmpty = false;
+        }
         outputs.set(call.id, encodeWebSearchResults(results));
       }
       currentBody = appendWebSearchResults(path, currentBody, responseBody, outputs);
+      if (allResultsEmpty) {
+        currentBody = disableInternalWebSearchTool(path, currentBody);
+      }
     }
     throw new UpstreamProtocolError("Web Search tool loop exceeded the maximum number of rounds");
   }

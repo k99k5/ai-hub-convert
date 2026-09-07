@@ -17,20 +17,52 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function hasInternalWebSearchTool(path: CompletionPath, body: unknown): boolean {
-  if (!isRecord(body) || !Array.isArray(body.tools)) {
+function isInternalWebSearchTool(path: CompletionPath, rawTool: unknown): boolean {
+  if (!isRecord(rawTool)) {
     return false;
   }
-  return body.tools.some((rawTool) => {
-    if (!isRecord(rawTool)) {
-      return false;
+  if (path === "responses") {
+    return rawTool.type === "function" && rawTool.name === INTERNAL_WEB_SEARCH_TOOL_NAME;
+  }
+  const fn = rawTool.function;
+  return rawTool.type === "function" && isRecord(fn) && fn.name === INTERNAL_WEB_SEARCH_TOOL_NAME;
+}
+
+export function hasInternalWebSearchTool(path: CompletionPath, body: unknown): boolean {
+  return isRecord(body) && Array.isArray(body.tools)
+    ? body.tools.some((rawTool) => isInternalWebSearchTool(path, rawTool))
+    : false;
+}
+
+export function disableInternalWebSearchTool(
+  path: CompletionPath,
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const tools = Array.isArray(body.tools)
+    ? body.tools.filter((rawTool) => !isInternalWebSearchTool(path, rawTool))
+    : undefined;
+  const next: Record<string, unknown> = {
+    ...body,
+    ...(tools === undefined ? {} : { tools }),
+  };
+  const toolChoice = next.tool_choice;
+  if (path === "responses") {
+    if (
+      isRecord(toolChoice) &&
+      toolChoice.type === "function" &&
+      toolChoice.name === INTERNAL_WEB_SEARCH_TOOL_NAME
+    ) {
+      next.tool_choice = "auto";
     }
-    if (path === "responses") {
-      return rawTool.type === "function" && rawTool.name === INTERNAL_WEB_SEARCH_TOOL_NAME;
-    }
-    const fn = rawTool.function;
-    return rawTool.type === "function" && isRecord(fn) && fn.name === INTERNAL_WEB_SEARCH_TOOL_NAME;
-  });
+  } else if (
+    isRecord(toolChoice) &&
+    toolChoice.type === "function" &&
+    isRecord(toolChoice.function) &&
+    toolChoice.function.name === INTERNAL_WEB_SEARCH_TOOL_NAME
+  ) {
+    next.tool_choice = "auto";
+  }
+  return next;
 }
 
 export function forceNonStreamingBody(
