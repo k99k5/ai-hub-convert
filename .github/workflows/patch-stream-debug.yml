@@ -1,0 +1,212 @@
+name: Patch Stream Failure Diagnostics
+
+on:
+  push:
+    branches:
+      - debug/web-search-trace-v2
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-trace-v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Patch and test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/protocols/anthropic/decode.ts')
+          s = p.read_text()
+          old = '''function normalizeAnthropicToolSearchForConversion(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(input.tools)) {
+    return input;
+  }
+
+  let changed = false;
+'''
+          new = '''function normalizeAnthropicToolSearchForConversion(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(input.tools)) {
+    return input;
+  }
+
+  const rawWebSearchTools = input.tools.flatMap((rawTool) => {
+    if (!isRecord(rawTool) || rawTool.name !== "WebSearch") {
+      return [];
+    }
+    return [
+      {
+        type: typeof rawTool.type === "string" ? rawTool.type : null,
+        defer_loading:
+          typeof rawTool.defer_loading === "boolean" ? rawTool.defer_loading : null,
+        has_input_schema: isRecord(rawTool.input_schema),
+      },
+    ];
+  });
+  if (rawWebSearchTools.length > 0) {
+    const hasToolSearch = input.tools.some(
+      (rawTool) => isRecord(rawTool) && isAnthropicToolSearchTool(rawTool),
+    );
+    console.error(
+      `[web-search-debug] ${JSON.stringify({
+        event: "anthropic.websearch.raw",
+        ts: new Date().toISOString(),
+        hasToolSearch,
+        tools: rawWebSearchTools,
+      })}`,
+    );
+  }
+
+  let changed = false;
+'''
+          if old not in s:
+              raise SystemExit('decode anchor not found')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('src/app.ts')
+          s = p.read_text()
+          old = '''          } catch (error) {
+            abortScope.abort(error);
+            if (!reply.raw.headersSent) {
+'''
+          new = '''          } catch (error) {
+            console.error(
+              `[stream-debug] ${JSON.stringify({
+                event: "anthropic.route.error",
+                ts: new Date().toISOString(),
+                requestId: request.id,
+                headersSent: reply.raw.headersSent,
+                name: error instanceof Error ? error.name : typeof error,
+                message: error instanceof Error ? error.message : String(error),
+                code:
+                  typeof error === "object" &&
+                  error !== null &&
+                  "code" in error &&
+                  typeof error.code === "string"
+                    ? error.code
+                    : null,
+              })}`,
+            );
+            abortScope.abort(error);
+            if (!reply.raw.headersSent) {
+'''
+          if old not in s:
+              raise SystemExit('route catch anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''  const encoder = new AnthropicStreamEncoder(encoderOptions);
+  const frames = parseSseStream(response.body, timeoutOptions, signal, {
+    maxFrameBytes: timeoutOptions.maxFrameBytes,
+  })[Symbol.asyncIterator]();
+  const pinged = new PingedIterator(frames, pingIntervalMs);
+  try {
+    while (true) {
+      const next = await pinged.next();
+      if (next.type === "done") {
+        break;
+      }
+      if (next.type === "ping") {
+        await send({ event: "ping", data: { type: "ping" } });
+        pinged.markClientWrite();
+        continue;
+      }
+      for (const event of decoder.decode(next.value)) {
+        for (const encoded of encoder.encode(event)) {
+          await send(encoded);
+          pinged.markClientWrite();
+        }
+      }
+    }
+    decoder.finish();
+  } finally {
+    pinged.close();
+  }
+'''
+          new = '''  const encoder = new AnthropicStreamEncoder(encoderOptions);
+  const frames = parseSseStream(response.body, timeoutOptions, signal, {
+    maxFrameBytes: timeoutOptions.maxFrameBytes,
+  })[Symbol.asyncIterator]();
+  const pinged = new PingedIterator(frames, pingIntervalMs);
+  const decoderKind = decoder instanceof ResponsesStreamDecoder ? "responses" : "chat";
+  let stage = "read_frame";
+  let lastFrameEvent: string | null = null;
+  try {
+    while (true) {
+      stage = "read_frame";
+      const next = await pinged.next();
+      if (next.type === "done") {
+        break;
+      }
+      if (next.type === "ping") {
+        stage = "send_ping";
+        await send({ event: "ping", data: { type: "ping" } });
+        pinged.markClientWrite();
+        continue;
+      }
+      lastFrameEvent = next.value.event;
+      stage = "decoder.decode";
+      for (const event of decoder.decode(next.value)) {
+        stage = `encoder.encode:${event.type}`;
+        for (const encoded of encoder.encode(event)) {
+          stage = `client.send:${encoded.event}`;
+          await send(encoded);
+          pinged.markClientWrite();
+        }
+      }
+    }
+    stage = "decoder.finish";
+    decoder.finish();
+  } catch (error) {
+    console.error(
+      `[stream-debug] ${JSON.stringify({
+        event: "anthropic.transform.error",
+        ts: new Date().toISOString(),
+        decoder: decoderKind,
+        stage,
+        lastFrameEvent,
+        name: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message : String(error),
+        code:
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          typeof error.code === "string"
+            ? error.code
+            : null,
+      })}`,
+    );
+    throw error;
+  } finally {
+    pinged.close();
+  }
+'''
+          if old not in s:
+              raise SystemExit('stream loop anchor not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+          pnpm exec biome format --write src/app.ts src/protocols/anthropic/decode.ts
+          pnpm typecheck
+          pnpm test
+          rm .github/workflows/patch-stream-debug.yml
+          git config user.name "TigerKK"
+          git config user.email "545551320@qq.com"
+          git add src/app.ts src/protocols/anthropic/decode.ts .github/workflows/patch-stream-debug.yml
+          git commit -m "debug: trace Anthropic stream conversion failures"
+          git push origin HEAD:debug/web-search-trace-v2
