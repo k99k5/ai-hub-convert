@@ -14,43 +14,42 @@ const toolSearchVariants = [
 ] as const;
 
 describe("Anthropic Tool Search compatibility", () => {
-  it.each(toolSearchVariants)(
-    "drops %s while keeping deferred function tools resident",
-    (type, name) => {
-      const decoded = decodeAnthropicRequest({
-        model: "deepseek-v4-flash",
-        max_tokens: 1024,
-        messages: [{ role: "user", content: "hi" }],
-        tools: [
-          { type, name },
-          {
-            name: "Read",
-            description: "Read a file",
-            input_schema: {
-              type: "object",
-              properties: { file_path: { type: "string" } },
-              required: ["file_path"],
-            },
-            defer_loading: true,
-          },
-        ],
-      });
-
-      expect(decoded.tools).toEqual([
+  it.each(
+    toolSearchVariants,
+  )("drops %s while keeping deferred function tools resident", (type, name) => {
+    const decoded = decodeAnthropicRequest({
+      model: "deepseek-v4-flash",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        { type, name },
         {
-          type: "function",
           name: "Read",
           description: "Read a file",
-          inputSchema: {
+          input_schema: {
             type: "object",
             properties: { file_path: { type: "string" } },
             required: ["file_path"],
           },
-          strict: false,
+          defer_loading: true,
         },
-      ]);
-    },
-  );
+      ],
+    });
+
+    expect(decoded.tools).toEqual([
+      {
+        type: "function",
+        name: "Read",
+        description: "Read a file",
+        inputSchema: {
+          type: "object",
+          properties: { file_path: { type: "string" } },
+          required: ["file_path"],
+        },
+        strict: false,
+      },
+    ]);
+  });
 
   it("keeps prompt-cache tool positions aligned after dropping Tool Search", () => {
     const decoded = decodeAnthropicRequestWithSidecar({
