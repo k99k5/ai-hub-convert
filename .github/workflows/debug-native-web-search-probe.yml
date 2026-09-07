@@ -123,7 +123,7 @@ jobs:
               { event: "message_stop", data: { type: "message_stop" } },
             ];
           }
-'''
+          '''
           path.write_text(text[:start] + replacement + text[end:])
           PY
           rm .github/workflows/debug-native-web-search-probe.yml
