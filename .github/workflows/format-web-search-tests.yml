@@ -1,0 +1,36 @@
+name: Format Web Search Tests
+
+on:
+  push:
+    branches:
+      - fix/web-search-noop-provider
+    paths:
+      - .github/workflows/format-web-search-tests.yml
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/web-search-noop-provider
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec biome format --write test/integration/app.test.ts test/unit/openai-adapter.test.ts
+      - name: Commit formatting
+        run: |
+          rm .github/workflows/format-web-search-tests.yml
+          git config user.name "TigerKK"
+          git config user.email "545551320@qq.com"
+          git add test/integration/app.test.ts test/unit/openai-adapter.test.ts .github/workflows/format-web-search-tests.yml
+          git commit -m "style: format Web Search tests"
+          git push origin HEAD:fix/web-search-noop-provider
