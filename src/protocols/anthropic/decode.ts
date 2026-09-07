@@ -302,6 +302,54 @@ function parseMessage(record: Record<string, unknown>): Message[] {
   };
 
   for (const block of record.content) {
+    if (
+      isRecord(block) &&
+      (block.type === "server_tool_use" || block.type === "web_search_tool_result")
+    ) {
+      if (role !== "assistant") {
+        return invalidRequest();
+      }
+      if (block.type === "server_tool_use") {
+        const input = block.input;
+        if (
+          block.name !== "web_search" ||
+          typeof block.id !== "string" ||
+          block.id.length === 0 ||
+          !isRecord(input) ||
+          typeof input.query !== "string"
+        ) {
+          return invalidRequest();
+        }
+      } else {
+        if (typeof block.tool_use_id !== "string" || block.tool_use_id.length === 0) {
+          return invalidRequest();
+        }
+        const content = block.content;
+        if (
+          !Array.isArray(content) &&
+          !(
+            isRecord(content) &&
+            content.type === "web_search_tool_result_error" &&
+            typeof content.error_code === "string"
+          )
+        ) {
+          return invalidRequest();
+        }
+        if (
+          Array.isArray(content) &&
+          !content.every(
+            (item) =>
+              isRecord(item) &&
+              item.type === "web_search_result" &&
+              typeof item.url === "string" &&
+              typeof item.title === "string",
+          )
+        ) {
+          return invalidRequest();
+        }
+      }
+      continue;
+    }
     if (isRecord(block) && block.type === "tool_result") {
       if (role !== "user") {
         return invalidRequest();

@@ -1,93 +1,8 @@
-from pathlib import Path
-
-
-def replace_once(path: str, old: str, new: str) -> None:
-    p = Path(path)
-    text = p.read_text()
-    if old not in text:
-        raise RuntimeError(f"marker not found in {path}: {old[:160]!r}")
-    p.write_text(text.replace(old, new, 1))
-
-
-replace_once(
-    "src/protocols/anthropic/decode.ts",
-    '''  for (const block of record.content) {
-    if (isRecord(block) && block.type === "tool_result") {
-      if (role !== "user") {
-        return invalidRequest();
-      }
-      flushCurrent();
-      messages.push(parseToolResult(block));
-    } else {
-      current.push(parseRegularBlock(block, role));
-    }
-  }
-''',
-    '''  for (const block of record.content) {
-    if (
-      isRecord(block) &&
-      (block.type === "server_tool_use" || block.type === "web_search_tool_result")
-    ) {
-      if (role !== "assistant") {
-        return invalidRequest();
-      }
-      if (block.type === "server_tool_use") {
-        const input = block.input;
-        if (
-          block.name !== "web_search" ||
-          typeof block.id !== "string" ||
-          block.id.length === 0 ||
-          !isRecord(input) ||
-          typeof input.query !== "string"
-        ) {
-          return invalidRequest();
-        }
-      } else {
-        if (typeof block.tool_use_id !== "string" || block.tool_use_id.length === 0) {
-          return invalidRequest();
-        }
-        const content = block.content;
-        if (
-          !Array.isArray(content) &&
-          !(
-            isRecord(content) &&
-            content.type === "web_search_tool_result_error" &&
-            typeof content.error_code === "string"
-          )
-        ) {
-          return invalidRequest();
-        }
-        if (
-          Array.isArray(content) &&
-          !content.every(
-            (item) =>
-              isRecord(item) &&
-              item.type === "web_search_result" &&
-              typeof item.url === "string" &&
-              typeof item.title === "string",
-          )
-        ) {
-          return invalidRequest();
-        }
-      }
-      continue;
-    }
-    if (isRecord(block) && block.type === "tool_result") {
-      if (role !== "user") {
-        return invalidRequest();
-      }
-      flushCurrent();
-      messages.push(parseToolResult(block));
-    } else {
-      current.push(parseRegularBlock(block, role));
-    }
-  }
-''',
-)
-
-Path("test/unit/anthropic-web-search-replay.test.ts").write_text(
-    '''import { describe, expect, it } from "vitest";
-import { AnthropicDecodeError, decodeAnthropicRequest } from "../../src/protocols/anthropic/decode.js";
+import { describe, expect, it } from "vitest";
+import {
+  AnthropicDecodeError,
+  decodeAnthropicRequest,
+} from "../../src/protocols/anthropic/decode.js";
 
 describe("Anthropic Web Search history replay", () => {
   it("accepts assistant server web search history and keeps surrounding text", () => {
@@ -226,5 +141,3 @@ describe("Anthropic Web Search history replay", () => {
     }
   });
 });
-'''
-)
