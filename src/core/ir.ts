@@ -129,6 +129,7 @@ export interface Usage {
   cacheReadInputTokens?: number;
   cacheWriteInputTokens?: number;
   reasoningTokens?: number;
+  webSearchRequests?: number;
 }
 
 export type FinishReason =

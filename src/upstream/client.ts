@@ -3,6 +3,7 @@ import { createDefaultWebSearchRegistry } from "../providers/web-search/prefligh
 import type { WebSearchProvider } from "../providers/web-search/types.js";
 import {
   appendWebSearchResults,
+  attachWebSearchRequestCount,
   decodeWebSearchRequest,
   disableInternalWebSearchTool,
   encodeWebSearchResults,
@@ -126,13 +127,14 @@ export class UpstreamClient {
     signal: AbortSignal,
   ): Promise<unknown> {
     let currentBody = forceNonStreamingBody(path, body);
+    let webSearchRequests = 0;
     for (let round = 0; round < MAX_WEB_SEARCH_ROUNDS; round += 1) {
       const response = await this.#post(path, currentBody, apiKey, signal);
       const upstreamRequestId = response.headers.get("x-request-id") ?? `web_search_round_${round}`;
       const responseBody = await readJsonBody(response, this.#jsonBodyLimitBytes);
       const calls = extractInternalToolCalls(path, responseBody);
       if (calls.webSearch.length === 0) {
-        return responseBody;
+        return attachWebSearchRequestCount(responseBody, webSearchRequests);
       }
       if (calls.hasOtherToolCalls) {
         throw new UpstreamProtocolError(
@@ -148,6 +150,7 @@ export class UpstreamClient {
           requestId: upstreamRequestId,
           signal,
         });
+        webSearchRequests += 1;
         if (results.length > 0) {
           allResultsEmpty = false;
         }
