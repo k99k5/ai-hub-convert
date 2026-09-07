@@ -186,6 +186,7 @@ describe("Web Search usage reporting", () => {
       server_tool_use: { web_search_requests: 2 },
     });
   });
+
   it("emits native Anthropic web search blocks with real query and result URLs", () => {
     const encoder = new AnthropicStreamEncoder({
       webSearchExecutions: [
@@ -202,12 +203,14 @@ describe("Web Search usage reporting", () => {
         },
       ],
     });
-    encoder.encode({ type: "response_start", id: "msg_test", model: "test-model" });
-    const frames = encoder.encode({
-      type: "response_complete",
-      finishReason: "end_turn",
-      usage: { inputTokens: 10, outputTokens: 2, webSearchRequests: 1 },
-    });
+    const frames = [
+      ...encoder.encode({ type: "response_start", id: "msg_test", model: "test-model" }),
+      ...encoder.encode({
+        type: "response_complete",
+        finishReason: "end_turn",
+        usage: { inputTokens: 10, outputTokens: 2, webSearchRequests: 1 },
+      }),
+    ];
 
     expect(frames).toContainEqual({
       event: "content_block_delta",
