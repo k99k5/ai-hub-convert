@@ -835,28 +835,28 @@ describe("OpenAI Responses adapter", () => {
   });
 
   it("materializes built-in Web Search as the reserved upstream Responses function", () => {
-  const request = baseRequest({
-    tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
-    toolChoice: { type: "function", name: "web_search" },
-  });
+    const request = baseRequest({
+      tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
+      toolChoice: { type: "function", name: "web_search" },
+    });
 
-  const encoded = encodeResponsesRequest(request, {
-    store: false,
-    promptCache: noPromptCache,
-  });
-  expect(encoded.tools).toEqual([
-    expect.objectContaining({
+    const encoded = encodeResponsesRequest(request, {
+      store: false,
+      promptCache: noPromptCache,
+    });
+    expect(encoded.tools).toEqual([
+      expect.objectContaining({
+        type: "function",
+        name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+        parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
+        strict: true,
+      }),
+    ]);
+    expect(encoded.tool_choice).toEqual({
       type: "function",
       name: INTERNAL_WEB_SEARCH_TOOL_NAME,
-      parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
-      strict: true,
-    }),
-  ]);
-  expect(encoded.tool_choice).toEqual({
-    type: "function",
-    name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+    });
   });
-});
 
   it("replays only genuine Responses opaque reasoning and drops cross-protocol reasoning", () => {
     const encoded = encodeResponsesRequest(
@@ -1120,28 +1120,28 @@ describe("OpenAI Chat adapter", () => {
   });
 
   it("materializes built-in Web Search as the reserved upstream Chat function", () => {
-  const encoded = encodeChatRequest(
-    baseRequest({
-      tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
-      toolChoice: { type: "function", name: "web_search" },
-    }),
-  );
-
-  expect(encoded.tools).toEqual([
-    expect.objectContaining({
-      type: "function",
-      function: expect.objectContaining({
-        name: INTERNAL_WEB_SEARCH_TOOL_NAME,
-        parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
-        strict: true,
+    const encoded = encodeChatRequest(
+      baseRequest({
+        tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
+        toolChoice: { type: "function", name: "web_search" },
       }),
-    }),
-  ]);
-  expect(encoded.tool_choice).toEqual({
-    type: "function",
-    function: { name: INTERNAL_WEB_SEARCH_TOOL_NAME },
+    );
+
+    expect(encoded.tools).toEqual([
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({
+          name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+          parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
+          strict: true,
+        }),
+      }),
+    ]);
+    expect(encoded.tool_choice).toEqual({
+      type: "function",
+      function: { name: INTERNAL_WEB_SEARCH_TOOL_NAME },
+    });
   });
-});
 
   it("encodes multimodal messages, reasoning extension, parallel tools, results, and stop", () => {
     const encoded = encodeChatRequest(

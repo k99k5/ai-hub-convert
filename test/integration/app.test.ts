@@ -889,96 +889,94 @@ describe("stream lifecycle", () => {
 });
 
 describe("Web Search execution", () => {
-  it.each([false, true])(
-    "executes Anthropic built-in search with an empty provider result for stream=%s",
-    async (stream) => {
-      const upstreamBodies: Record<string, unknown>[] = [];
-      let round = 0;
-      const app = createApp({}, async (input, init) => {
-        const request = new Request(input, init);
-        upstreamBodies.push((await request.json()) as Record<string, unknown>);
-        round += 1;
-        if (round === 1) {
-          return Response.json({
-            id: "resp_search",
-            model: "vendor/model-1",
-            status: "completed",
-            output: [
-              {
-                id: "fc_search",
-                type: "function_call",
-                status: "completed",
-                call_id: "call_search",
-                name: INTERNAL_WEB_SEARCH_TOOL_NAME,
-                arguments: '{"query":"latest news"}',
-              },
-            ],
-            usage: { input_tokens: 5, output_tokens: 1 },
-          });
-        }
+  it.each([
+    false,
+    true,
+  ])("executes Anthropic built-in search with an empty provider result for stream=%s", async (stream) => {
+    const upstreamBodies: Record<string, unknown>[] = [];
+    let round = 0;
+    const app = createApp({}, async (input, init) => {
+      const request = new Request(input, init);
+      upstreamBodies.push((await request.json()) as Record<string, unknown>);
+      round += 1;
+      if (round === 1) {
         return Response.json({
-          id: "resp_final",
+          id: "resp_search",
           model: "vendor/model-1",
           status: "completed",
           output: [
             {
-              id: "msg_final",
-              type: "message",
-              role: "assistant",
+              id: "fc_search",
+              type: "function_call",
               status: "completed",
-              content: [
-                { type: "output_text", text: "No results found.", annotations: [] },
-              ],
+              call_id: "call_search",
+              name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+              arguments: '{"query":"latest news"}',
             },
           ],
-          usage: { input_tokens: 8, output_tokens: 4 },
-        });
-      });
-
-      const response = await app.inject({
-        method: "POST",
-        url: "/v1/messages",
-        headers: { "content-type": "application/json", "x-api-key": "caller-key" },
-        payload: {
-          model: "vendor/model-1",
-          max_tokens: 64,
-          stream,
-          messages: [{ role: "user", content: "search" }],
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-        },
-      });
-
-      expect(response.statusCode, response.body).toBe(200);
-      expect(upstreamBodies).toHaveLength(2);
-      expect(upstreamBodies[0]?.tools).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: "function",
-            name: INTERNAL_WEB_SEARCH_TOOL_NAME,
-          }),
-        ]),
-      );
-      expect(upstreamBodies[1]?.input).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: "function_call_output",
-            call_id: "call_search",
-            output: "[]",
-          }),
-        ]),
-      );
-      if (stream) {
-        expect(response.headers["content-type"]).toContain("text/event-stream");
-        expect(response.body).toContain("No results found.");
-        expect(response.body).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
-      } else {
-        expect(response.json()).toMatchObject({
-          content: [{ type: "text", text: "No results found." }],
-          stop_reason: "end_turn",
+          usage: { input_tokens: 5, output_tokens: 1 },
         });
       }
-    },
-  );
+      return Response.json({
+        id: "resp_final",
+        model: "vendor/model-1",
+        status: "completed",
+        output: [
+          {
+            id: "msg_final",
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "No results found.", annotations: [] }],
+          },
+        ],
+        usage: { input_tokens: 8, output_tokens: 4 },
+      });
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: { "content-type": "application/json", "x-api-key": "caller-key" },
+      payload: {
+        model: "vendor/model-1",
+        max_tokens: 64,
+        stream,
+        messages: [{ role: "user", content: "search" }],
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+      },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(upstreamBodies).toHaveLength(2);
+    expect(upstreamBodies[0]?.tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "function",
+          name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+        }),
+      ]),
+    );
+    expect(upstreamBodies[1]?.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "function_call_output",
+          call_id: "call_search",
+          output: "[]",
+        }),
+      ]),
+    );
+    if (stream) {
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(response.body).toContain("No results found.");
+      expect(response.body).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
+    } else {
+      expect(response.json()).toMatchObject({
+        content: [{ type: "text", text: "No results found." }],
+        stop_reason: "end_turn",
+      });
+    }
+  });
 
   it("keeps built-in Web Search in Anthropic input token counting", async () => {
     let upstreamBody: Record<string, unknown> | undefined;
