@@ -1,4 +1,16 @@
+import { createDefaultWebSearchRegistry } from "../providers/web-search/preflight.js";
+import {
+  appendWebSearchResults,
+  decodeWebSearchRequest,
+  encodeWebSearchResults,
+  extractInternalToolCalls,
+  forceNonStreamingBody,
+  hasInternalWebSearchTool,
+  synthesizeCompletionStream,
+} from "./web-search-loop.js";
+
 type UpstreamPath = "responses" | "responses/input_tokens" | "chat/completions";
+type CompletionPath = Exclude<UpstreamPath, "responses/input_tokens">;
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -12,6 +24,7 @@ interface UpstreamClientOptions {
 
 const DEFAULT_JSON_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
 const DEFAULT_ERROR_BODY_LIMIT_BYTES = 64 * 1024;
+const MAX_WEB_SEARCH_ROUNDS = 8;
 
 interface UpstreamErrorEnvelope {
   error?: {
@@ -51,6 +64,7 @@ export class UpstreamClient {
   readonly #jsonBodyLimitBytes: number;
   readonly #errorBodyLimitBytes: number;
   readonly #fetch: Fetch;
+  readonly #webSearchProviders = createDefaultWebSearchRegistry();
 
   constructor(options: UpstreamClientOptions) {
     this.#baseUrl = new URL(options.baseUrl);
@@ -66,22 +80,70 @@ export class UpstreamClient {
     apiKey: string,
     signal: AbortSignal,
   ): Promise<unknown> {
+    if (path !== "responses/input_tokens" && hasInternalWebSearchTool(path, body)) {
+      return this.#postJsonWithWebSearchLoop(path, body, apiKey, signal);
+    }
     const response = await this.#post(path, body, apiKey, signal);
     return readJsonBody(response, this.#jsonBodyLimitBytes);
   }
 
   async postStream(
-    path: Exclude<UpstreamPath, "responses/input_tokens">,
+    path: CompletionPath,
     body: unknown,
     apiKey: string,
     signal: AbortSignal,
   ): Promise<Response> {
+    if (hasInternalWebSearchTool(path, body)) {
+      const response = await this.#postJsonWithWebSearchLoop(
+        path,
+        forceNonStreamingBody(path, body),
+        apiKey,
+        signal,
+      );
+      return synthesizeCompletionStream(path, response);
+    }
+
     const response = await this.#post(path, body, apiKey, signal);
     const contentType = response.headers.get("content-type")?.toLowerCase();
     if (!response.body || !contentType?.startsWith("text/event-stream")) {
       throw new UpstreamProtocolError("Upstream did not return an event stream");
     }
     return response;
+  }
+
+  async #postJsonWithWebSearchLoop(
+    path: CompletionPath,
+    body: unknown,
+    apiKey: string,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    let currentBody = forceNonStreamingBody(path, body);
+    for (let round = 0; round < MAX_WEB_SEARCH_ROUNDS; round += 1) {
+      const response = await this.#post(path, currentBody, apiKey, signal);
+      const upstreamRequestId = response.headers.get("x-request-id") ?? `web_search_round_${round}`;
+      const responseBody = await readJsonBody(response, this.#jsonBodyLimitBytes);
+      const calls = extractInternalToolCalls(path, responseBody);
+      if (calls.webSearch.length === 0) {
+        return responseBody;
+      }
+      if (calls.hasOtherToolCalls) {
+        throw new UpstreamProtocolError(
+          "Upstream mixed internal Web Search with client-executed tool calls in one turn",
+        );
+      }
+
+      const outputs = new Map<string, string>();
+      const provider = this.#webSearchProviders.get("web-search");
+      for (const call of calls.webSearch) {
+        const results = await provider.execute(decodeWebSearchRequest(call.arguments), {
+          requestId: upstreamRequestId,
+          signal,
+        });
+        outputs.set(call.id, encodeWebSearchResults(results));
+      }
+      currentBody = appendWebSearchResults(path, currentBody, responseBody, outputs);
+    }
+    throw new UpstreamProtocolError("Web Search tool loop exceeded the maximum number of rounds");
   }
 
   async #post(
