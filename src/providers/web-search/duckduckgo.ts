@@ -24,10 +24,7 @@ export class DuckDuckGoWebSearchProvider implements WebSearchProvider {
     return { execute: true, citations: false, streaming: false };
   }
 
-  async execute(
-    request: WebSearchRequest,
-    context: WebSearchContext,
-  ): Promise<WebSearchResult[]> {
+  async execute(request: WebSearchRequest, context: WebSearchContext): Promise<WebSearchResult[]> {
     const query = request.query.trim();
     const maxResults = normalizeMaxResults(request.maxResults);
     if (!query || maxResults === 0) {
@@ -154,7 +151,9 @@ function normalizeResultUrl(href: string): string | undefined {
 }
 
 function stripHtml(value: string): string {
-  return decodeHtmlEntities(value.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+  return decodeHtmlEntities(value.replace(/<[^>]*>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -194,7 +193,10 @@ function matchesDomain(url: string, domains: readonly string[]): boolean {
     return false;
   }
   return domains.some((rawDomain) => {
-    const domain = rawDomain.trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+    const domain = rawDomain
+      .trim()
+      .toLowerCase()
+      .replace(/^\.+|\.+$/g, "");
     return domain !== "" && (hostname === domain || hostname.endsWith(`.${domain}`));
   });
 }
