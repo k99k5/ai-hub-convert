@@ -259,8 +259,29 @@ function parseToolResult(block: Record<string, unknown>): Message {
   };
 }
 
+function parseMidConversationSystemMessage(record: Record<string, unknown>): Message {
+  if (typeof record.content === "string") {
+    return { role: "system", content: [{ type: "text", text: record.content }] };
+  }
+  if (!Array.isArray(record.content)) {
+    return invalidRequest();
+  }
+  return {
+    role: "system",
+    content: record.content.map((block) => {
+      if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") {
+        return invalidRequest();
+      }
+      return { type: "text", text: block.text };
+    }),
+  };
+}
+
 function parseMessage(record: Record<string, unknown>): Message[] {
   const role = record.role;
+  if (role === "system") {
+    return [parseMidConversationSystemMessage(record)];
+  }
   if (role !== "user" && role !== "assistant") {
     return invalidRequest();
   }
