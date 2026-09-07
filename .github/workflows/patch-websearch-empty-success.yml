@@ -1,0 +1,203 @@
+name: Patch WebSearch Empty Success
+
+on:
+  push:
+    branches:
+      - debug/web-search-trace-v2
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'fix: treat empty WebSearch as successful'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-trace-v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Patch WebSearch compatibility
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # 1. Promote deferred Claude Code WebSearch even when Tool Search is no longer
+          # repeated in a follow-up request after the tool has been unlocked.
+          p = Path('src/protocols/anthropic/decode.ts')
+          s = p.read_text()
+          old = '''// Anthropic executes Tool Search server-side. OpenAI-compatible upstreams cannot service it,
+// so omit only the search declaration and keep deferred tools resident as normal functions.
+function isDeferredClaudeCodeWebSearchTool(tool: Record<string, unknown>): boolean {
+  return tool.name === "WebSearch" && tool.defer_loading === true;
+}
+
+function normalizeAnthropicToolSearchForConversion(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(input.tools)) {
+    return input;
+  }
+
+  const hasToolSearch = input.tools.some(
+    (rawTool) => isRecord(rawTool) && isAnthropicToolSearchTool(rawTool),
+  );
+  if (!hasToolSearch) {
+    return input;
+  }
+
+  let changed = false;
+'''
+          new = '''// Anthropic executes Tool Search server-side. OpenAI-compatible upstreams cannot service it,
+// so omit the search declaration. Claude Code can keep sending a previously unlocked deferred
+// WebSearch tool without repeating the Tool Search declaration, so recognize that tool on its own.
+function isDeferredClaudeCodeWebSearchTool(tool: Record<string, unknown>): boolean {
+  return tool.name === "WebSearch" && tool.defer_loading === true;
+}
+
+function normalizeAnthropicToolSearchForConversion(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(input.tools)) {
+    return input;
+  }
+
+  let changed = false;
+'''
+          if old not in s:
+              raise SystemExit('decode normalization anchor not found')
+          p.write_text(s.replace(old, new, 1))
+
+          # 2. Explicitly tell the upstream model that [] means a successful zero-result search.
+          p = Path('src/upstream/web-search-loop.ts')
+          s = p.read_text()
+          old = '''export function encodeWebSearchResults(results: readonly WebSearchResult[]): string {
+  return JSON.stringify(
+    results.map((result) => ({
+      title: result.title,
+      url: result.url,
+      content: result.content,
+    })),
+  );
+}
+'''
+          new = '''export function encodeWebSearchResults(results: readonly WebSearchResult[]): string {
+  return JSON.stringify({
+    ok: true,
+    result_count: results.length,
+    results: results.map((result) => ({
+      title: result.title,
+      url: result.url,
+      content: result.content,
+    })),
+    ...(results.length === 0
+      ? { message: "Web search completed successfully with 0 results. This is not an API error." }
+      : {}),
+  });
+}
+'''
+          if old not in s:
+              raise SystemExit('encodeWebSearchResults anchor not found')
+          p.write_text(s.replace(old, new, 1))
+
+          # 3. Add regression coverage for follow-up requests without Tool Search declarations.
+          p = Path('test/unit/anthropic-tool-search-compat.test.ts')
+          s = p.read_text()
+          anchor = '''  it("keeps prompt-cache tool positions aligned after dropping Tool Search", () => {
+'''
+          insert = '''  it("promotes an already-unlocked deferred WebSearch without a Tool Search declaration", () => {
+    const decoded = decodeAnthropicRequest({
+      model: "deepseek-v4-flash",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "continue" }],
+      tools: [
+        {
+          name: "WebSearch",
+          description: "Search the web",
+          input_schema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+          defer_loading: true,
+        },
+        { name: "Read", input_schema: { type: "object" }, defer_loading: true },
+      ],
+    });
+
+    expect(decoded.tools).toEqual([
+      {
+        type: "web_search",
+        provider: "web-search",
+        version: "web_search_20250305",
+      },
+      {
+        type: "function",
+        name: "Read",
+        inputSchema: { type: "object" },
+        strict: false,
+      },
+    ]);
+  });
+
+  it("keeps a non-deferred custom WebSearch as a client function", () => {
+    const decoded = decodeAnthropicRequest({
+      model: "deepseek-v4-flash",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "search" }],
+      tools: [
+        {
+          name: "WebSearch",
+          input_schema: { type: "object" },
+        },
+      ],
+    });
+
+    expect(decoded.tools).toEqual([
+      {
+        type: "function",
+        name: "WebSearch",
+        inputSchema: { type: "object" },
+        strict: false,
+      },
+    ]);
+  });
+
+'''
+          if anchor not in s:
+              raise SystemExit('anthropic test anchor not found')
+          p.write_text(s.replace(anchor, insert + anchor, 1))
+
+          # 4. Update loop expectations to assert the explicit successful envelope.
+          p = Path('test/unit/upstream-web-search-loop.test.ts')
+          s = p.read_text()
+          s = s.replace(
+              '          output: "[]",',
+              '          output: JSON.stringify({\n            ok: true,\n            result_count: 0,\n            results: [],\n            message: "Web search completed successfully with 0 results. This is not an API error.",\n          }),',
+              1,
+          )
+          s = s.replace(
+              '        expect.objectContaining({ role: "tool", tool_call_id: "call_search", content: "[]" }),',
+              '        expect.objectContaining({\n          role: "tool",\n          tool_call_id: "call_search",\n          content: JSON.stringify({\n            ok: true,\n            result_count: 0,\n            results: [],\n            message: "Web search completed successfully with 0 results. This is not an API error.",\n          }),\n        }),',
+              1,
+          )
+          p.write_text(s)
+          PY
+
+          pnpm exec biome format --write src/protocols/anthropic/decode.ts src/upstream/web-search-loop.ts test/unit/anthropic-tool-search-compat.test.ts test/unit/upstream-web-search-loop.test.ts
+          pnpm typecheck
+          pnpm test -- --run test/unit/anthropic-tool-search-compat.test.ts test/unit/upstream-web-search-loop.test.ts
+
+          rm .github/workflows/patch-websearch-empty-success.yml
+          git config user.name "TigerKK"
+          git config user.email "545551320@qq.com"
+          git add src/protocols/anthropic/decode.ts src/upstream/web-search-loop.ts test/unit/anthropic-tool-search-compat.test.ts test/unit/upstream-web-search-loop.test.ts .github/workflows/patch-websearch-empty-success.yml
+          git commit -m "fix: treat empty WebSearch as successful"
+          git push origin HEAD:debug/web-search-trace-v2
