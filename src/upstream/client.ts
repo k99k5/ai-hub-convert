@@ -9,6 +9,7 @@ import {
   encodeWebSearchResults,
   extractInternalToolCalls,
   forceNonStreamingBody,
+  getWebSearchRequestCount,
   hasInternalWebSearchTool,
   synthesizeCompletionStream,
 } from "./web-search-loop.js";
@@ -30,6 +31,10 @@ interface UpstreamClientOptions {
 const DEFAULT_JSON_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
 const DEFAULT_ERROR_BODY_LIMIT_BYTES = 64 * 1024;
 const MAX_WEB_SEARCH_ROUNDS = 8;
+
+function debugWebSearch(event: string, details: Record<string, unknown> = {}): void {
+  process.stderr.write(`[web-search-debug] ${JSON.stringify({ event, ...details })}\n`);
+}
 
 interface UpstreamErrorEnvelope {
   error?: {
@@ -90,6 +95,7 @@ export class UpstreamClient {
     signal: AbortSignal,
   ): Promise<unknown> {
     if (path !== "responses/input_tokens" && hasInternalWebSearchTool(path, body)) {
+      debugWebSearch("loop_start", { mode: "json", path });
       return this.#postJsonWithWebSearchLoop(path, body, apiKey, signal);
     }
     const response = await this.#post(path, body, apiKey, signal);
@@ -103,13 +109,20 @@ export class UpstreamClient {
     signal: AbortSignal,
   ): Promise<Response> {
     if (hasInternalWebSearchTool(path, body)) {
+      debugWebSearch("loop_start", { mode: "stream", path });
       const response = await this.#postJsonWithWebSearchLoop(
         path,
         forceNonStreamingBody(path, body),
         apiKey,
         signal,
       );
-      return synthesizeCompletionStream(path, response);
+      const stream = synthesizeCompletionStream(path, response);
+      debugWebSearch("synthesized_stream", {
+        path,
+        attachedCount: getWebSearchRequestCount(response),
+        headerCount: stream.headers.get("x-ai-hub-web-search-requests"),
+      });
+      return stream;
     }
 
     const response = await this.#post(path, body, apiKey, signal);
@@ -133,8 +146,23 @@ export class UpstreamClient {
       const upstreamRequestId = response.headers.get("x-request-id") ?? `web_search_round_${round}`;
       const responseBody = await readJsonBody(response, this.#jsonBodyLimitBytes);
       const calls = extractInternalToolCalls(path, responseBody);
+      debugWebSearch("upstream_round", {
+        path,
+        round,
+        upstreamRequestId,
+        webSearchCalls: calls.webSearch.length,
+        hasOtherToolCalls: calls.hasOtherToolCalls,
+        executedCount: webSearchRequests,
+      });
       if (calls.webSearch.length === 0) {
-        return attachWebSearchRequestCount(responseBody, webSearchRequests);
+        const finalBody = attachWebSearchRequestCount(responseBody, webSearchRequests);
+        debugWebSearch("loop_complete", {
+          path,
+          round,
+          executedCount: webSearchRequests,
+          attachedCount: getWebSearchRequestCount(finalBody),
+        });
+        return finalBody;
       }
       if (calls.hasOtherToolCalls) {
         throw new UpstreamProtocolError(
@@ -146,18 +174,44 @@ export class UpstreamClient {
       const provider = this.#webSearchProviders.get("web-search");
       let allResultsEmpty = true;
       for (const call of calls.webSearch) {
-        const results = await provider.execute(decodeWebSearchRequest(call.arguments), {
-          requestId: upstreamRequestId,
-          signal,
+        const searchRequest = decodeWebSearchRequest(call.arguments);
+        debugWebSearch("provider_execute_start", {
+          path,
+          round,
+          callId: call.id,
+          queryPreview: searchRequest.query.slice(0, 160),
         });
-        webSearchRequests += 1;
-        if (results.length > 0) {
-          allResultsEmpty = false;
+        try {
+          const results = await provider.execute(searchRequest, {
+            requestId: upstreamRequestId,
+            signal,
+          });
+          webSearchRequests += 1;
+          debugWebSearch("provider_execute_done", {
+            path,
+            round,
+            callId: call.id,
+            resultCount: results.length,
+            executedCount: webSearchRequests,
+          });
+          if (results.length > 0) {
+            allResultsEmpty = false;
+          }
+          outputs.set(call.id, encodeWebSearchResults(results));
+        } catch (error) {
+          debugWebSearch("provider_execute_error", {
+            path,
+            round,
+            callId: call.id,
+            errorName: error instanceof Error ? error.name : typeof error,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
         }
-        outputs.set(call.id, encodeWebSearchResults(results));
       }
       currentBody = appendWebSearchResults(path, currentBody, responseBody, outputs);
       if (allResultsEmpty) {
+        debugWebSearch("disable_internal_tool", { path, round, executedCount: webSearchRequests });
         currentBody = disableInternalWebSearchTool(path, currentBody);
       }
     }
