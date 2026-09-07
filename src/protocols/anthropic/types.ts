@@ -175,6 +175,7 @@ export interface AnthropicResponseWebSearchResult {
   type: "web_search_result";
   title: string;
   url: string;
+  encrypted_content: string;
 }
 
 export interface AnthropicResponseWebSearchToolResultBlock {

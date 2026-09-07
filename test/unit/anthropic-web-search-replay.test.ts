@@ -28,6 +28,7 @@ describe("Anthropic Web Search history replay", () => {
                   type: "web_search_result",
                   title: "国务院办公厅通知",
                   url: "https://example.test/holiday",
+                  encrypted_content: "ai_hub_replay_v1:test",
                 },
               ],
             },

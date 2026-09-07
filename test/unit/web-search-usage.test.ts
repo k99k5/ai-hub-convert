@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { encodeAnthropicResponse } from "../../src/protocols/anthropic/encode.js";
 import { AnthropicStreamEncoder } from "../../src/protocols/anthropic/stream-encode.js";
-import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
+import {
+  createWebSearchReplayToken,
+  INTERNAL_WEB_SEARCH_TOOL_NAME,
+} from "../../src/providers/web-search/internal.js";
 import type { WebSearchProvider } from "../../src/providers/web-search/types.js";
 import { UpstreamClient } from "../../src/upstream/client.js";
 import {
@@ -170,6 +173,37 @@ describe("Web Search usage reporting", () => {
     expect(response.usage.server_tool_use).toEqual({ web_search_requests: 1 });
   });
 
+  it("emits replayable encrypted_content in non-streaming Anthropic Web Search results", () => {
+    const query = "2026年10月1日 国庆节 星期几";
+    const result = {
+      title: "2026年国庆节",
+      url: "https://example.com/national-day",
+    };
+    const expectedReplayToken = createWebSearchReplayToken(0, 0, query, result);
+    const response = encodeAnthropicResponse(
+      {
+        id: "msg_test",
+        model: "test-model",
+        content: [{ type: "text", text: "done" }],
+        finishReason: "end_turn",
+        usage: { inputTokens: 10, outputTokens: 2, webSearchRequests: 1 },
+      },
+      { webSearchExecutions: [{ query, results: [result] }] },
+    );
+
+    expect(response.content[1]).toMatchObject({
+      type: "web_search_tool_result",
+      content: [
+        {
+          type: "web_search_result",
+          title: result.title,
+          url: result.url,
+          encrypted_content: expectedReplayToken,
+        },
+      ],
+    });
+  });
+
   it("emits server_tool_use.web_search_requests in streaming Anthropic usage", () => {
     const encoder = new AnthropicStreamEncoder();
     encoder.encode({ type: "response_start", id: "msg_test", model: "test-model" });
@@ -256,6 +290,10 @@ describe("Web Search usage reporting", () => {
               type: "web_search_result",
               title: "2026年国庆节",
               url: "https://example.com/national-day",
+              encrypted_content: createWebSearchReplayToken(0, 0, "2026年10月1日 国庆节 星期几", {
+                title: "2026年国庆节",
+                url: "https://example.com/national-day",
+              }),
             },
           ],
         },

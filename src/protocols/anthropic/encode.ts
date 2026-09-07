@@ -1,4 +1,5 @@
 import type { CanonicalResponse, Citation, FinishReason, ReasoningContent } from "../../core/ir.js";
+import { createWebSearchReplayToken } from "../../providers/web-search/internal.js";
 import type {
   AnthropicImageBlock,
   AnthropicMessageResponse,
@@ -221,10 +222,16 @@ function encodeWebSearchBlocks(
       {
         type: "web_search_tool_result" as const,
         tool_use_id: toolUseId,
-        content: execution.results.map((result) => ({
+        content: execution.results.map((result, resultIndex) => ({
           type: "web_search_result" as const,
           title: result.title,
           url: result.url,
+          encrypted_content: createWebSearchReplayToken(
+            index,
+            resultIndex,
+            execution.query,
+            result,
+          ),
         })),
       },
     ];

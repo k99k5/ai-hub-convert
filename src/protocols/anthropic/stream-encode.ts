@@ -1,5 +1,6 @@
 import type { CanonicalEvent } from "../../core/events.js";
 import type { Content, Usage } from "../../core/ir.js";
+import { createWebSearchReplayToken } from "../../providers/web-search/internal.js";
 import { normalizeReadToolArguments } from "../../policies/read-tool.js";
 import { finalizeThinkingBlock } from "../../policies/thinking-signature.js";
 import {
@@ -315,10 +316,16 @@ export class AnthropicStreamEncoder {
         },
       );
 
-      const resultContent = execution.results.map((result) => ({
+      const resultContent = execution.results.map((result, resultIndex) => ({
         type: "web_search_result",
         title: result.title,
         url: result.url,
+        encrypted_content: createWebSearchReplayToken(
+          searchIndex,
+          resultIndex,
+          execution.query,
+          result,
+        ),
       }));
       const resultBlock = {
         type: "web_search_tool_result",
