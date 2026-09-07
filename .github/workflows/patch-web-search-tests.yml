@@ -22,22 +22,22 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
+          def replace_between(text: str, start_marker: str, end_marker: str, replacement: str) -> str:
+              start = text.index(start_marker)
+              end = text.index(end_marker, start)
+              return text[:start] + replacement + text[end:]
+
           unit = Path("test/unit/openai-adapter.test.ts")
           text = unit.read_text()
           text = text.replace(
               'import { WebSearchUnsupportedError } from "../../src/providers/web-search/unsupported.js";',
               'import {\n  INTERNAL_WEB_SEARCH_TOOL_NAME,\n  INTERNAL_WEB_SEARCH_TOOL_SCHEMA,\n} from "../../src/providers/web-search/internal.js";',
           )
-          old = '''  it("fails closed when a built-in Web Search tool reaches an upstream encoder", () => {
-            const request = baseRequest({
-              tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
-            });
-
-            expect(() =>
-              encodeResponsesRequest(request, { store: false, promptCache: noPromptCache }),
-            ).toThrowError(WebSearchUnsupportedError);
-          });'''
-          new = '''  it("materializes built-in Web Search as the reserved upstream Responses function", () => {
+          text = replace_between(
+              text,
+              '  it("fails closed when a built-in Web Search tool reaches an upstream encoder", () => {',
+              '\n\n  it("replays only genuine Responses opaque reasoning and drops cross-protocol reasoning"',
+              '''  it("materializes built-in Web Search as the reserved upstream Responses function", () => {
             const request = baseRequest({
               tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
               toolChoice: { type: "function", name: "web_search" },
@@ -59,20 +59,13 @@ jobs:
               type: "function",
               name: INTERNAL_WEB_SEARCH_TOOL_NAME,
             });
-          });'''
-          if old not in text:
-              raise SystemExit("Responses Web Search unit block not found")
-          text = text.replace(old, new)
-          old = '''  it("fails closed when a built-in Web Search tool reaches the Chat encoder", () => {
-            expect(() =>
-              encodeChatRequest(
-                baseRequest({
-                  tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
-                }),
-              ),
-            ).toThrowError(WebSearchUnsupportedError);
-          });'''
-          new = '''  it("materializes built-in Web Search as the reserved upstream Chat function", () => {
+          });''',
+          )
+          text = replace_between(
+              text,
+              '  it("fails closed when a built-in Web Search tool reaches the Chat encoder", () => {',
+              '\n\n  it("encodes multimodal messages, reasoning extension, parallel tools, results, and stop"',
+              '''  it("materializes built-in Web Search as the reserved upstream Chat function", () => {
             const encoded = encodeChatRequest(
               baseRequest({
                 tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
@@ -94,21 +87,18 @@ jobs:
               type: "function",
               function: { name: INTERNAL_WEB_SEARCH_TOOL_NAME },
             });
-          });'''
-          if old not in text:
-              raise SystemExit("Chat Web Search unit block not found")
+          });''',
+          )
           unit.write_text(text)
 
           integration = Path("test/integration/app.test.ts")
           text = integration.read_text()
           import_anchor = 'import { loadConfig } from "../../src/config.js";'
-          if 'INTERNAL_WEB_SEARCH_TOOL_NAME' not in text:
+          if 'from "../../src/providers/web-search/internal.js"' not in text:
               text = text.replace(
                   import_anchor,
                   import_anchor + '\nimport { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";',
               )
-          start = text.index('describe("Web Search preflight", () => {')
-          end = text.index('describe("Anthropic Messages conversion", () => {', start)
           block = '''describe("Web Search execution", () => {
             it.each([false, true])(
               "executes Anthropic built-in search with an empty provider result for stream=%s",
@@ -262,6 +252,8 @@ jobs:
           });
 
           '''
+          start = text.index('describe("Web Search preflight", () => {')
+          end = text.index('describe("Anthropic Messages conversion", () => {', start)
           integration.write_text(text[:start] + block + text[end:])
           PY
           rm .github/workflows/patch-web-search-tests.yml
