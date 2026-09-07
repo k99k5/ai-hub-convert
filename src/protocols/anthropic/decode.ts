@@ -362,7 +362,7 @@ function parseMessage(record: Record<string, unknown>): Message[] {
     }
   }
   flushCurrent();
-  if (record.content.length === 0) {
+  if (messages.length === 0) {
     messages.push({ role, content: [] });
   }
   return messages;

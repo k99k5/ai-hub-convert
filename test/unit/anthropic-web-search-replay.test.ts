@@ -96,6 +96,39 @@ describe("Anthropic Web Search history replay", () => {
     ]);
   });
 
+  it("preserves an empty assistant turn when history contains only server search replay blocks", () => {
+    const decoded = decodeAnthropicRequest({
+      model: "claude-test",
+      max_tokens: 128,
+      messages: [
+        { role: "user", content: "search first" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_ai_hub_0",
+              name: "web_search",
+              input: { query: "current info" },
+            },
+            {
+              type: "web_search_tool_result",
+              tool_use_id: "srvtoolu_ai_hub_0",
+              content: [],
+            },
+          ],
+        },
+        { role: "user", content: "continue" },
+      ],
+    });
+
+    expect(decoded.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "search first" }] },
+      { role: "assistant", content: [] },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ]);
+  });
+
   it("still rejects malformed or non-assistant server search blocks", () => {
     for (const message of [
       {
