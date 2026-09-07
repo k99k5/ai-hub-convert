@@ -26,7 +26,11 @@ jobs:
           cache: pnpm
 
       - name: Apply implementation patch
-        run: python3 .github/debug-implement-native-web-search.py
+        shell: bash
+        run: |
+          python3 .github/fix-native-web-search-patcher.py
+          python3 .github/debug-implement-native-web-search.py
+          rm .github/fix-native-web-search-patcher.py
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
