@@ -962,7 +962,12 @@ describe("Web Search execution", () => {
         expect.objectContaining({
           type: "function_call_output",
           call_id: "call_search",
-          output: "[]",
+          output: JSON.stringify({
+            ok: true,
+            result_count: 0,
+            results: [],
+            message: "Web search completed successfully with 0 results. This is not an API error.",
+          }),
         }),
       ]),
     );

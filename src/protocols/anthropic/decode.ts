@@ -637,7 +637,8 @@ function isAnthropicToolSearchTool(tool: Record<string, unknown>): boolean {
 }
 
 // Anthropic executes Tool Search server-side. OpenAI-compatible upstreams cannot service it,
-// so omit only the search declaration and keep deferred tools resident as normal functions.
+// so omit the search declaration. Claude Code can keep sending a previously unlocked deferred
+// WebSearch tool without repeating the Tool Search declaration, so recognize that tool on its own.
 function isDeferredClaudeCodeWebSearchTool(tool: Record<string, unknown>): boolean {
   return tool.name === "WebSearch" && tool.defer_loading === true;
 }
@@ -646,13 +647,6 @@ function normalizeAnthropicToolSearchForConversion(
   input: Record<string, unknown>,
 ): Record<string, unknown> {
   if (!Array.isArray(input.tools)) {
-    return input;
-  }
-
-  const hasToolSearch = input.tools.some(
-    (rawTool) => isRecord(rawTool) && isAnthropicToolSearchTool(rawTool),
-  );
-  if (!hasToolSearch) {
     return input;
   }
 

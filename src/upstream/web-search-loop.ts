@@ -149,13 +149,18 @@ export function decodeWebSearchRequest(argumentsJson: string): WebSearchRequest 
 }
 
 export function encodeWebSearchResults(results: readonly WebSearchResult[]): string {
-  return JSON.stringify(
-    results.map((result) => ({
+  return JSON.stringify({
+    ok: true,
+    result_count: results.length,
+    results: results.map((result) => ({
       title: result.title,
       url: result.url,
       content: result.content,
     })),
-  );
+    ...(results.length === 0
+      ? { message: "Web search completed successfully with 0 results. This is not an API error." }
+      : {}),
+  });
 }
 
 export function appendWebSearchResults(

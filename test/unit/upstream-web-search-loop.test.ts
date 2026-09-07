@@ -98,7 +98,12 @@ describe("Upstream Web Search tool loop", () => {
         expect.objectContaining({
           type: "function_call_output",
           call_id: "call_search",
-          output: "[]",
+          output: JSON.stringify({
+            ok: true,
+            result_count: 0,
+            results: [],
+            message: "Web search completed successfully with 0 results. This is not an API error.",
+          }),
         }),
       ]),
     );
@@ -259,7 +264,16 @@ describe("Upstream Web Search tool loop", () => {
     expect(bodies).toHaveLength(2);
     expect(bodies[1]?.messages).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ role: "tool", tool_call_id: "call_search", content: "[]" }),
+        expect.objectContaining({
+          role: "tool",
+          tool_call_id: "call_search",
+          content: JSON.stringify({
+            ok: true,
+            result_count: 0,
+            results: [],
+            message: "Web search completed successfully with 0 results. This is not an API error.",
+          }),
+        }),
       ]),
     );
   });

@@ -82,6 +82,64 @@ describe("Anthropic Tool Search compatibility", () => {
     ]);
   });
 
+  it("promotes an already-unlocked deferred WebSearch without a Tool Search declaration", () => {
+    const decoded = decodeAnthropicRequest({
+      model: "deepseek-v4-flash",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "continue" }],
+      tools: [
+        {
+          name: "WebSearch",
+          description: "Search the web",
+          input_schema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+          defer_loading: true,
+        },
+        { name: "Read", input_schema: { type: "object" }, defer_loading: true },
+      ],
+    });
+
+    expect(decoded.tools).toEqual([
+      {
+        type: "web_search",
+        provider: "web-search",
+        version: "web_search_20250305",
+      },
+      {
+        type: "function",
+        name: "Read",
+        inputSchema: { type: "object" },
+        strict: false,
+      },
+    ]);
+  });
+
+  it("keeps a non-deferred custom WebSearch as a client function", () => {
+    const decoded = decodeAnthropicRequest({
+      model: "deepseek-v4-flash",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "search" }],
+      tools: [
+        {
+          name: "WebSearch",
+          input_schema: { type: "object" },
+        },
+      ],
+    });
+
+    expect(decoded.tools).toEqual([
+      {
+        type: "function",
+        name: "WebSearch",
+        inputSchema: { type: "object" },
+        strict: false,
+      },
+    ]);
+  });
+
   it("keeps prompt-cache tool positions aligned after dropping Tool Search", () => {
     const decoded = decodeAnthropicRequestWithSidecar({
       model: "deepseek-v4-flash",
