@@ -92,6 +92,7 @@ describe("Upstream Web Search tool loop", () => {
     expect(result).toMatchObject({ id: "resp_final" });
     expect(bodies).toHaveLength(2);
     expect(bodies[1]?.stream).toBe(false);
+    expect(JSON.stringify(bodies[1]?.tools)).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
     expect(bodies[1]?.input).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

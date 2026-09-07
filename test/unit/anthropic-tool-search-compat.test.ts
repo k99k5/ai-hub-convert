@@ -51,6 +51,37 @@ describe("Anthropic Tool Search compatibility", () => {
     ]);
   });
 
+  it.each(
+    toolSearchVariants,
+  )("promotes deferred Claude Code WebSearch to gateway-owned Web Search for %s", (type, name) => {
+    const decoded = decodeAnthropicRequest({
+      model: "deepseek-v4-flash",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "search" }],
+      tools: [
+        { type, name },
+        {
+          name: "WebSearch",
+          description: "Search the web",
+          input_schema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+          defer_loading: true,
+        },
+      ],
+    });
+
+    expect(decoded.tools).toEqual([
+      {
+        type: "web_search",
+        provider: "web-search",
+        version: "web_search_20250305",
+      },
+    ]);
+  });
+
   it("keeps prompt-cache tool positions aligned after dropping Tool Search", () => {
     const decoded = decodeAnthropicRequestWithSidecar({
       model: "deepseek-v4-flash",

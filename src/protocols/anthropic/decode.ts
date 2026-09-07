@@ -638,6 +638,10 @@ function isAnthropicToolSearchTool(tool: Record<string, unknown>): boolean {
 
 // Anthropic executes Tool Search server-side. OpenAI-compatible upstreams cannot service it,
 // so omit only the search declaration and keep deferred tools resident as normal functions.
+function isDeferredClaudeCodeWebSearchTool(tool: Record<string, unknown>): boolean {
+  return tool.name === "WebSearch" && tool.defer_loading === true;
+}
+
 function normalizeAnthropicToolSearchForConversion(
   input: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -645,13 +649,46 @@ function normalizeAnthropicToolSearchForConversion(
     return input;
   }
 
+  const hasToolSearch = input.tools.some(
+    (rawTool) => isRecord(rawTool) && isAnthropicToolSearchTool(rawTool),
+  );
+  if (!hasToolSearch) {
+    return input;
+  }
+
   let changed = false;
-  const tools = input.tools.filter((rawTool) => {
-    if (!isRecord(rawTool) || !isAnthropicToolSearchTool(rawTool)) {
-      return true;
+  const tools = input.tools.flatMap((rawTool) => {
+    if (!isRecord(rawTool)) {
+      return [rawTool];
     }
-    changed = true;
-    return false;
+    if (isAnthropicToolSearchTool(rawTool)) {
+      changed = true;
+      return [];
+    }
+    if (isDeferredClaudeCodeWebSearchTool(rawTool)) {
+      if (!isRecord(rawTool.input_schema) || !isJsonValue(rawTool.input_schema)) {
+        return invalidRequest();
+      }
+      if (rawTool.type !== undefined && rawTool.type !== "custom") {
+        return invalidRequest();
+      }
+      if (rawTool.description !== undefined && typeof rawTool.description !== "string") {
+        return invalidRequest();
+      }
+      if (rawTool.strict !== undefined && typeof rawTool.strict !== "boolean") {
+        return invalidRequest();
+      }
+      changed = true;
+      return [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          defer_loading: true,
+          ...(rawTool.cache_control === undefined ? {} : { cache_control: rawTool.cache_control }),
+        },
+      ];
+    }
+    return [rawTool];
   });
 
   return changed ? { ...input, tools } : input;
