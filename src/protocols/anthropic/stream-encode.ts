@@ -15,7 +15,6 @@ import {
 
 const OUTPUT_ITEM_OVERHEAD_BYTES = 256;
 const CITATION_OVERHEAD_BYTES = 128;
-const WEB_SEARCH_RESULT_OVERHEAD_BYTES = 128;
 
 export interface AnthropicSseFrame {
   event: string;
@@ -316,28 +315,25 @@ export class AnthropicStreamEncoder {
         },
       );
 
+      const resultContent = execution.results.map((result) => ({
+        type: "web_search_result",
+        title: result.title,
+        url: result.url,
+      }));
+      const resultBlock = {
+        type: "web_search_tool_result",
+        tool_use_id: toolUseId,
+        content: resultContent,
+      };
       this.#outputLimiter.addBytes(resultIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
-      this.#outputLimiter.addUnrelated(resultIndex, toolUseId);
-      for (const result of execution.results) {
-        this.#outputLimiter.addBytes(resultIndex, WEB_SEARCH_RESULT_OVERHEAD_BYTES);
-        this.#outputLimiter.addUnrelated(resultIndex, result.title);
-        this.#outputLimiter.addUnrelated(resultIndex, result.url);
-      }
+      this.#outputLimiter.addUnrelated(resultIndex, JSON.stringify(resultBlock));
       frames.push(
         {
           event: "content_block_start",
           data: {
             type: "content_block_start",
             index: resultIndex,
-            content_block: {
-              type: "web_search_tool_result",
-              tool_use_id: toolUseId,
-              content: execution.results.map((result) => ({
-                type: "web_search_result",
-                title: result.title,
-                url: result.url,
-              })),
-            },
+            content_block: resultBlock,
           },
         },
         {
