@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
 import { UpstreamClient } from "../../src/upstream/client.js";
 
+// The default provider intentionally returns zero results until a real search provider is wired in.
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
