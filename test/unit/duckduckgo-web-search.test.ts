@@ -41,8 +41,8 @@ describe("DuckDuckGo Web Search provider", () => {
   });
 
   it("filters results by requested domains", async () => {
-    const provider = new DuckDuckGoWebSearchProvider(async () =>
-      new Response(RESULT_HTML, { status: 200 }),
+    const provider = new DuckDuckGoWebSearchProvider(
+      async () => new Response(RESULT_HTML, { status: 200 }),
     );
 
     await expect(
@@ -60,8 +60,8 @@ describe("DuckDuckGo Web Search provider", () => {
   });
 
   it("returns no results when DuckDuckGo rejects the request", async () => {
-    const provider = new DuckDuckGoWebSearchProvider(async () =>
-      new Response("rate limited", { status: 429 }),
+    const provider = new DuckDuckGoWebSearchProvider(
+      async () => new Response("rate limited", { status: 429 }),
     );
 
     await expect(
@@ -83,10 +83,7 @@ describe("DuckDuckGo Web Search provider", () => {
     });
 
     await expect(
-      provider.execute(
-        { query: "docs" },
-        { requestId: "req_test", signal: controller.signal },
-      ),
+      provider.execute({ query: "docs" }, { requestId: "req_test", signal: controller.signal }),
     ).rejects.toThrow("cancelled");
   });
 });
