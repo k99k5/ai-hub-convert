@@ -187,7 +187,7 @@ describe("Web Search usage reporting", () => {
     });
   });
 
-  it("emits native Anthropic web search blocks with real query and result URLs", () => {
+  it("emits native Anthropic web search blocks before final answer content", () => {
     const encoder = new AnthropicStreamEncoder({
       webSearchExecutions: [
         {
@@ -205,6 +205,13 @@ describe("Web Search usage reporting", () => {
     });
     const frames = [
       ...encoder.encode({ type: "response_start", id: "msg_test", model: "test-model" }),
+      ...encoder.encode({
+        type: "content_start",
+        index: 0,
+        content: { type: "text", text: "" },
+      }),
+      ...encoder.encode({ type: "text_delta", index: 0, delta: "final answer" }),
+      ...encoder.encode({ type: "content_stop", index: 0 }),
       ...encoder.encode({
         type: "response_complete",
         finishReason: "end_turn",
@@ -241,5 +248,19 @@ describe("Web Search usage reporting", () => {
         },
       },
     });
+
+    const searchStart = frames.findIndex(
+      (frame) =>
+        frame.event === "content_block_start" &&
+        (frame.data.content_block as { type?: string } | undefined)?.type === "server_tool_use",
+    );
+    const answerStart = frames.findIndex(
+      (frame) =>
+        frame.event === "content_block_start" &&
+        (frame.data.content_block as { type?: string } | undefined)?.type === "text",
+    );
+    expect(searchStart).toBeGreaterThanOrEqual(0);
+    expect(answerStart).toBeGreaterThan(searchStart);
+    expect(frames[answerStart]?.data.index).toBe(2);
   });
 });
