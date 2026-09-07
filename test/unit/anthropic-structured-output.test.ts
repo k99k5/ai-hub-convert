@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { decodeAnthropicRequest } from "../../src/protocols/anthropic/decode.js";
 import { encodeChatRequest } from "../../src/protocols/openai-chat/encode.js";
 import { encodeResponsesRequest } from "../../src/protocols/openai-responses/encode.js";
+import { encodeResponsesInputTokensRequest } from "../../src/protocols/openai-responses/input-tokens.js";
 
 const schema = {
   type: "object",
@@ -14,7 +15,7 @@ const schema = {
 };
 
 describe("Anthropic structured output conversion", () => {
-  it("decodes output_config.format and maps it to Responses and Chat", () => {
+  it("decodes output_config.format and maps it to Responses, token counting, and Chat", () => {
     const decoded = decodeAnthropicRequest({
       model: "test-model",
       max_tokens: 65000,
@@ -29,18 +30,23 @@ describe("Anthropic structured output conversion", () => {
     expect(decoded.reasoningEffort).toBe("high");
     expect(decoded.outputFormat).toEqual({ type: "json_schema", schema });
 
+    const expectedTextFormat = {
+      format: {
+        type: "json_schema" as const,
+        name: "response",
+        schema,
+        strict: true as const,
+      },
+    };
+
     const responses = encodeResponsesRequest(decoded, {
       store: false,
       promptCache: { kind: "none" },
     });
-    expect(responses.text).toEqual({
-      format: {
-        type: "json_schema",
-        name: "response",
-        schema,
-        strict: true,
-      },
-    });
+    expect(responses.text).toEqual(expectedTextFormat);
+
+    const inputTokens = encodeResponsesInputTokensRequest(decoded);
+    expect(inputTokens.text).toEqual(expectedTextFormat);
 
     const chat = encodeChatRequest(decoded);
     expect(chat.response_format).toEqual({
