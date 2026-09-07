@@ -57,13 +57,31 @@ export interface AnthropicToolResultBlock {
   is_error?: boolean;
 }
 
+export interface AnthropicWebSearchResultBlock {
+  type: "web_search_result";
+  title: string;
+  url: string;
+  encrypted_content?: string;
+  page_age?: string | null;
+}
+
+export interface AnthropicWebSearchToolResultBlock {
+  type: "web_search_tool_result";
+  tool_use_id: string;
+  content:
+    | AnthropicWebSearchResultBlock[]
+    | { type: "web_search_tool_result_error"; error_code: string };
+}
+
 export type AnthropicRequestContentBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock
   | AnthropicThinkingBlock
-  | AnthropicSearchResultBlock;
+  | AnthropicSearchResultBlock
+  | AnthropicResponseServerToolUseBlock
+  | AnthropicWebSearchToolResultBlock;
 
 export interface AnthropicMessageParam {
   role: "user" | "assistant";
@@ -97,9 +115,14 @@ export type AnthropicToolChoice =
 
 export type AnthropicReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max" | null;
 
+export interface AnthropicJsonSchemaOutputFormat {
+  type: "json_schema";
+  schema: Record<string, unknown>;
+}
+
 export interface AnthropicOutputConfig {
   effort?: AnthropicReasoningEffort;
-  format?: null;
+  format?: AnthropicJsonSchemaOutputFormat | null;
 }
 
 export type AnthropicThinkingConfig =
@@ -164,12 +187,34 @@ export interface AnthropicResponseSearchResultBlock {
   citations: { enabled: boolean };
 }
 
+export interface AnthropicResponseServerToolUseBlock {
+  type: "server_tool_use";
+  id: string;
+  name: "web_search";
+  input: { query: string };
+}
+
+export interface AnthropicResponseWebSearchResult {
+  type: "web_search_result";
+  title: string;
+  url: string;
+  encrypted_content: string;
+}
+
+export interface AnthropicResponseWebSearchToolResultBlock {
+  type: "web_search_tool_result";
+  tool_use_id: string;
+  content: AnthropicResponseWebSearchResult[];
+}
+
 export type AnthropicResponseContentBlock =
   | AnthropicResponseTextBlock
   | AnthropicImageBlock
   | AnthropicResponseToolUseBlock
   | AnthropicResponseThinkingBlock
-  | AnthropicResponseSearchResultBlock;
+  | AnthropicResponseSearchResultBlock
+  | AnthropicResponseServerToolUseBlock
+  | AnthropicResponseWebSearchToolResultBlock;
 
 export type AnthropicStopReason =
   | "end_turn"

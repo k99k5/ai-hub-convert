@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
+import { synthesizeCompletionStream } from "../../src/upstream/web-search-loop.js";
 
 const apps: Array<ReturnType<typeof buildApp>> = [];
 
@@ -34,6 +35,7 @@ async function createAnthropicClient(upstreamFetch: typeof globalThis.fetch, use
 
   return new Anthropic({
     apiKey: "caller-key",
+    authToken: null,
     baseURL: `http://127.0.0.1:${address.port}`,
     maxRetries: 0,
     ...(userAgent === undefined ? {} : { defaultHeaders: { "user-agent": userAgent } }),
@@ -45,6 +47,62 @@ afterEach(async () => {
 });
 
 describe("Anthropic SDK 兼容性", () => {
+  it("通过高级流聚合完整的 Web Search 引用", async () => {
+    const client = await createAnthropicClient(async () =>
+      synthesizeCompletionStream("responses", {
+        id: "resp_sdk_citation",
+        model: "vendor/model-1",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            id: "msg_sdk_citation",
+            role: "assistant",
+            content: [
+              {
+                type: "output_text",
+                text: "A cited answer.",
+                annotations: [
+                  {
+                    type: "url_citation",
+                    url: "https://example.test/source",
+                    title: "Source",
+                    start_index: 2,
+                    end_index: 7,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        usage: { input_tokens: 2, output_tokens: 3 },
+      }),
+    );
+    const message = await client.messages
+      .stream({
+        model: "vendor/model-1",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "answer with a citation" }],
+      })
+      .finalMessage();
+
+    expect(message.content).toEqual([
+      {
+        type: "text",
+        text: "A cited answer.",
+        citations: [
+          {
+            type: "web_search_result_location",
+            url: "https://example.test/source",
+            title: "Source",
+            cited_text: "cited",
+            encrypted_index: "",
+          },
+        ],
+      },
+    ]);
+  });
+
   it("通过 SDK messages.create 处理工具请求和响应", async () => {
     let upstreamRequest: Request | undefined;
     const client = await createAnthropicClient(async (input, init) => {

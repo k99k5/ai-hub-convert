@@ -3,6 +3,7 @@ import { createDefaultWebSearchRegistry } from "../providers/web-search/prefligh
 import type { WebSearchProvider } from "../providers/web-search/types.js";
 import {
   appendWebSearchResults,
+  attachWebSearchExecutions,
   attachWebSearchRequestCount,
   decodeWebSearchRequest,
   disableInternalWebSearchTool,
@@ -11,6 +12,7 @@ import {
   forceNonStreamingBody,
   hasInternalWebSearchTool,
   synthesizeCompletionStream,
+  type WebSearchExecution,
 } from "./web-search-loop.js";
 
 type UpstreamPath = "responses" | "responses/input_tokens" | "chat/completions";
@@ -128,13 +130,17 @@ export class UpstreamClient {
   ): Promise<unknown> {
     let currentBody = forceNonStreamingBody(path, body);
     let webSearchRequests = 0;
+    const webSearchExecutions: WebSearchExecution[] = [];
     for (let round = 0; round < MAX_WEB_SEARCH_ROUNDS; round += 1) {
       const response = await this.#post(path, currentBody, apiKey, signal);
       const upstreamRequestId = response.headers.get("x-request-id") ?? `web_search_round_${round}`;
       const responseBody = await readJsonBody(response, this.#jsonBodyLimitBytes);
       const calls = extractInternalToolCalls(path, responseBody);
       if (calls.webSearch.length === 0) {
-        return attachWebSearchRequestCount(responseBody, webSearchRequests);
+        return attachWebSearchExecutions(
+          attachWebSearchRequestCount(responseBody, webSearchRequests),
+          webSearchExecutions,
+        );
       }
       if (calls.hasOtherToolCalls) {
         throw new UpstreamProtocolError(
@@ -146,11 +152,17 @@ export class UpstreamClient {
       const provider = this.#webSearchProviders.get("web-search");
       let allResultsEmpty = true;
       for (const call of calls.webSearch) {
-        const results = await provider.execute(decodeWebSearchRequest(call.arguments), {
+        const searchRequest = decodeWebSearchRequest(call.arguments);
+        const results = await provider.execute(searchRequest, {
           requestId: upstreamRequestId,
           signal,
         });
         webSearchRequests += 1;
+        webSearchExecutions.push({
+          id: call.id,
+          query: searchRequest.query,
+          results: results.map((result) => ({ ...result })),
+        });
         if (results.length > 0) {
           allResultsEmpty = false;
         }

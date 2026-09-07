@@ -144,6 +144,18 @@ export function encodeChatRequest(request: CanonicalRequest): ChatRequest {
       ? {}
       : { max_completion_tokens: request.maxOutputTokens }),
     ...(request.reasoningEffort === undefined ? {} : { reasoning_effort: request.reasoningEffort }),
+    ...(request.outputFormat === undefined
+      ? {}
+      : {
+          response_format: {
+            type: "json_schema" as const,
+            json_schema: {
+              name: "response",
+              strict: true as const,
+              schema: request.outputFormat.schema,
+            },
+          },
+        }),
     stream: request.stream,
     ...(request.stream ? { stream_options: { include_usage: true } } : {}),
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),

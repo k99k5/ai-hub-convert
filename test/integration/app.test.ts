@@ -2,7 +2,10 @@ import { request as httpRequest, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
-import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
+import {
+  createWebSearchToolUseId,
+  INTERNAL_WEB_SEARCH_TOOL_NAME,
+} from "../../src/providers/web-search/internal.js";
 import { ActiveStreamRegistry } from "../../src/stream/active-streams.js";
 
 const apps: Array<ReturnType<typeof buildApp>> = [];
@@ -975,10 +978,31 @@ describe("Web Search execution", () => {
       expect(response.headers["content-type"]).toContain("text/event-stream");
       expect(response.body).toContain("No results found.");
       expect(response.body).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
+      const searchPosition = response.body.indexOf('"type":"server_tool_use"');
+      const resultPosition = response.body.indexOf('"type":"web_search_tool_result"');
+      const answerPosition = response.body.indexOf("No results found.");
+      expect(searchPosition).toBeGreaterThan(-1);
+      expect(resultPosition).toBeGreaterThan(searchPosition);
+      expect(answerPosition).toBeGreaterThan(resultPosition);
     } else {
+      const expectedToolUseId = createWebSearchToolUseId("resp_final", "call_search", 0);
       expect(response.json()).toMatchObject({
-        content: [{ type: "text", text: "No results found." }],
+        content: [
+          {
+            type: "server_tool_use",
+            id: expectedToolUseId,
+            name: "web_search",
+            input: { query: "latest news" },
+          },
+          {
+            type: "web_search_tool_result",
+            tool_use_id: expectedToolUseId,
+            content: [],
+          },
+          { type: "text", text: "No results found." },
+        ],
         stop_reason: "end_turn",
+        usage: { server_tool_use: { web_search_requests: 1 } },
       });
     }
   });
@@ -1168,6 +1192,34 @@ describe("Anthropic Messages conversion", () => {
     });
 
     expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not log malformed output_config values", async () => {
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const app = createApp({}, async () => {
+        throw new Error("upstream must not be called");
+      });
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/messages",
+        headers: { "content-type": "application/json", "x-api-key": "caller-key" },
+        payload: {
+          model: "vendor/model-1",
+          max_tokens: 64,
+          output_config: {
+            effort: { secret: "private-output-effort" },
+            format: { type: "private-format-kind" },
+          },
+          messages: [{ role: "user", content: "hello" }],
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      write.mockRestore();
+    }
   });
 
   it("converts an upstream refusal to text with a refusal stop reason", async () => {

@@ -32,13 +32,14 @@
 | parallel/interleaved calls | 支持 | 支持 | 支持 |
 | reasoning/thinking | Anthropic thinking 可返回客户端；历史 thinking 不伪造成 Responses reasoning continuation | 支持常见 Chat reasoning 扩展 | 支持；真实 item `id` 与 `encrypted_content` 只作同协议 continuation |
 | `output_config.effort` | `reasoning.effort` | `reasoning_effort` | 不适用；完整 `reasoning` 对象同协议回放 |
+| `output_config.format` | `{type:"json_schema", schema}` → `text.format`；`responses/input_tokens` 同样保留；`null` 不发送格式约束 | → `response_format.json_schema` | 不适用 |
 | `stop_sequences` | 丢弃（Responses 无对应参数） | `stop` | 不支持（无对应字段） |
 | `top_k` | 丢弃（无对应参数） | 丢弃（无对应参数） | 不适用 |
 | usage/cache-read/reasoning tokens | 支持已报告字段 | 支持已报告字段 | 支持已报告字段 |
 | existing search_result | content 退化为 text | content 退化为 text | 支持规范化表示 |
 | upstream refusal | 折为 text 块 + `stop_reason:"refusal"`；SSE 流中 refusal part 在 `output_item.done` 时并入文本块 | 同上 | JSON 保留原生 refusal part；SSE 流中折叠为 text delta |
-| URL citations/annotations | JSON/SSE 支持 | 受 Chat 扩展能力限制 | JSON/SSE 支持 |
-| built-in Web Search execution | HTTP 501，零上游 | 不触发 Chat 回退 | HTTP 501，零上游 |
+| URL citations/annotations | JSON/SSE 支持；SSE 引用在文本块结束前输出，字段与 JSON 一致 | 受 Chat 扩展能力限制 | JSON/SSE 支持 |
+| built-in Web Search execution | 网关 provider 执行；Anthropic 出口生成 `server_tool_use` / `web_search_tool_result` 并报告 `web_search_requests` | 网关 provider 执行；内部 function/tool-result round 后继续生成 | 网关 provider 执行；内部 function-result round 后继续生成 |
 | ordinary function `web_search` | 普通 function | 普通 function | 普通 function |
 | document/PDF | 不支持 | 不支持 | 不支持 |
 | audio | 不支持 | 不支持 | 不支持 |
@@ -54,6 +55,8 @@
 
 不使用 prefix matching。Anthropic `response_inclusion` 仅在 `web_search_20260318` 接受 `full | excluded`；OpenAI preview 只接受 preview contract 的 `search_content_types`，stable/versioned 类型使用 `filters.allowed_domains`。
 
+内置 Web Search 由独立 provider registry 执行，当前 provider 为 DuckDuckGo。请求进入 canonical Web Search 后会 materialize 为网关保留的内部 function；上游模型发起该调用时，网关执行搜索、回填结果并继续 completion。Anthropic JSON/SSE 出口会把执行轨迹表示为原生 `server_tool_use` / `web_search_tool_result`，并同步 `usage.server_tool_use.web_search_requests`。网关自身生成的 server-search replay block 在后续 Anthropic 请求中会被识别并过滤，普通名为 `web_search` 的自定义 function 不会被当作内置搜索。
+
 ## Prompt cache
 
 Anthropic `cache_control` 只进入 request-local positional sidecar，不进入 canonical IR extension bag。只有恰好落在 canonical tool/system/message 节点末端的 marker 才能保存；非终端、同节点重复、malformed、unsupported block marker 返回固定安全错误。
@@ -65,7 +68,7 @@ Claude Code cache policy 只有 strict SemVer 识别成功且范围内才启用�
 ## Reasoning 与 signature
 
 - Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 进入 canonical 请求：Responses 与 `responses/input_tokens` 编码为 `reasoning.effort`，Chat fallback 编码为 `reasoning_effort`；字段缺失时不发送。网关不预判目标模型支持的等级，也不从旧 `thinking.budget_tokens` 推断 effort。
-- 非空 `output_config.format` 不属于当前兼容范围，会在上游调用前返回 Anthropic HTTP 400；`format: null` 视为无格式约束。未知的 `output_config` 子字段同样 fail-closed，不会静默丢弃。
+- Anthropic `output_config.format` 接受 `null` 或 `{ type: "json_schema", schema: {...} }`。非 null 时 schema 进入 canonical structured-output 配置：Responses 与 `responses/input_tokens` 编码到 `text.format`，Chat fallback 编码到 `response_format.json_schema`。未知的 `output_config` 子字段、未知 format 类型、额外 format 字段或非 JSON object schema 都 fail-closed，返回 Anthropic HTTP 400。
 - Anthropic 历史真实 signature 原样作为 opaque compatibility data 处理；缺失或空 signature 可由普通 Anthropic 客户端回传，不会导致请求被拒绝。
 - Claude Code synthetic signature 是 UUID v4 文本的标准 Base64，不是 provider continuation。
 - synthetic signature 不会写入 OpenAI `encrypted_content`。

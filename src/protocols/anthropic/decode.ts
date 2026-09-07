@@ -3,6 +3,7 @@ import type {
   CanonicalTool,
   Content,
   ImageContent,
+  JsonSchemaOutputFormat,
   Message,
   ReasoningEffort,
   SearchResultContent,
@@ -302,6 +303,54 @@ function parseMessage(record: Record<string, unknown>): Message[] {
   };
 
   for (const block of record.content) {
+    if (
+      isRecord(block) &&
+      (block.type === "server_tool_use" || block.type === "web_search_tool_result")
+    ) {
+      if (role !== "assistant") {
+        return invalidRequest();
+      }
+      if (block.type === "server_tool_use") {
+        const input = block.input;
+        if (
+          block.name !== "web_search" ||
+          typeof block.id !== "string" ||
+          block.id.length === 0 ||
+          !isRecord(input) ||
+          typeof input.query !== "string"
+        ) {
+          return invalidRequest();
+        }
+      } else {
+        if (typeof block.tool_use_id !== "string" || block.tool_use_id.length === 0) {
+          return invalidRequest();
+        }
+        const content = block.content;
+        if (
+          !Array.isArray(content) &&
+          !(
+            isRecord(content) &&
+            content.type === "web_search_tool_result_error" &&
+            typeof content.error_code === "string"
+          )
+        ) {
+          return invalidRequest();
+        }
+        if (
+          Array.isArray(content) &&
+          !content.every(
+            (item) =>
+              isRecord(item) &&
+              item.type === "web_search_result" &&
+              typeof item.url === "string" &&
+              typeof item.title === "string",
+          )
+        ) {
+          return invalidRequest();
+        }
+      }
+      continue;
+    }
     if (isRecord(block) && block.type === "tool_result") {
       if (role !== "user") {
         return invalidRequest();
@@ -313,7 +362,7 @@ function parseMessage(record: Record<string, unknown>): Message[] {
     }
   }
   flushCurrent();
-  if (record.content.length === 0) {
+  if (messages.length === 0) {
     messages.push({ role, content: [] });
   }
   return messages;
@@ -545,9 +594,12 @@ function parseMetadata(value: unknown): Record<string, unknown> | undefined {
   return value;
 }
 
-function parseOutputConfig(value: unknown): ReasoningEffort | undefined {
+function parseOutputConfig(value: unknown): {
+  reasoningEffort?: ReasoningEffort;
+  outputFormat?: JsonSchemaOutputFormat;
+} {
   if (value === undefined) {
-    return undefined;
+    return {};
   }
   if (!isRecord(value)) {
     return invalidRequest();
@@ -557,14 +609,10 @@ function parseOutputConfig(value: unknown): ReasoningEffort | undefined {
       return invalidRequest();
     }
   }
-  if (value.format !== undefined && value.format !== null) {
-    return invalidRequest();
-  }
+
   const effort = value.effort;
-  if (effort === undefined) {
-    return undefined;
-  }
   if (
+    effort !== undefined &&
     effort !== null &&
     effort !== "low" &&
     effort !== "medium" &&
@@ -574,7 +622,26 @@ function parseOutputConfig(value: unknown): ReasoningEffort | undefined {
   ) {
     return invalidRequest();
   }
-  return effort;
+
+  let outputFormat: JsonSchemaOutputFormat | undefined;
+  const format = value.format;
+  if (format !== undefined && format !== null) {
+    if (
+      !isRecord(format) ||
+      format.type !== "json_schema" ||
+      !isRecord(format.schema) ||
+      !isJsonValue(format.schema) ||
+      Object.keys(format).some((key) => key !== "type" && key !== "schema")
+    ) {
+      return invalidRequest();
+    }
+    outputFormat = { type: "json_schema", schema: format.schema };
+  }
+
+  return {
+    ...(effort === undefined ? {} : { reasoningEffort: effort }),
+    ...(outputFormat === undefined ? {} : { outputFormat }),
+  };
 }
 
 function parseThinking(value: unknown): Record<string, unknown> | undefined {
@@ -893,7 +960,7 @@ function decodeRequest(input: Record<string, unknown>, maxTokens?: number): Cano
   const topK = optionalNumber(input, "top_k");
   const stopSequences = optionalStringArray(input, "stop_sequences");
   const metadata = parseMetadata(input.metadata);
-  const reasoningEffort = parseOutputConfig(input.output_config);
+  const outputConfig = parseOutputConfig(input.output_config);
   const thinking = parseThinking(input.thinking);
   const extensionRequest = {
     ...(topK !== undefined ? { top_k: topK } : {}),
@@ -904,7 +971,10 @@ function decodeRequest(input: Record<string, unknown>, maxTokens?: number): Cano
     source: "anthropic",
     model,
     ...(maxTokens === undefined ? {} : { maxOutputTokens: maxTokens }),
-    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(outputConfig.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: outputConfig.reasoningEffort }),
+    ...(outputConfig.outputFormat === undefined ? {} : { outputFormat: outputConfig.outputFormat }),
     messages: [...(system ? [system] : []), ...messages],
     tools: parseTools(input.tools),
     ...toolChoice,

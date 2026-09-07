@@ -58,6 +58,14 @@ export interface ResponsesRequest {
   store: boolean | null;
   previous_response_id?: string | null;
   reasoning?: Record<string, unknown> | null;
+  text?: {
+    format: {
+      type: "json_schema";
+      name: string;
+      schema: Record<string, unknown>;
+      strict: true;
+    };
+  };
   prompt_cache_key?: string | null;
 }
 

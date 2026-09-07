@@ -69,6 +69,8 @@ function encodeMessage(message: Message): ResponsesInputItem[] {
       );
     }
     items.push({ type: "message", role: message.role, content: messageContent });
+  } else if (message.role === "assistant" && message.content.length === 0) {
+    items.push({ type: "message", role: "assistant", content: [] });
   }
 
   for (const part of message.content) {
@@ -211,6 +213,18 @@ export function encodeResponsesRequest(
     ...(reasoning === null || (typeof reasoning === "object" && !Array.isArray(reasoning))
       ? { reasoning: reasoning as Record<string, unknown> | null }
       : {}),
+    ...(request.outputFormat === undefined
+      ? {}
+      : {
+          text: {
+            format: {
+              type: "json_schema" as const,
+              name: "response",
+              schema: request.outputFormat.schema,
+              strict: true as const,
+            },
+          },
+        }),
     ...(options.promptCache.kind === "prompt-cache-key"
       ? options.promptCacheKey !== undefined
         ? { prompt_cache_key: options.promptCacheKey }

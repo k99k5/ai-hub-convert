@@ -1,4 +1,8 @@
 import type { CanonicalResponse, Citation, FinishReason, ReasoningContent } from "../../core/ir.js";
+import {
+  createWebSearchReplayToken,
+  createWebSearchToolUseId,
+} from "../../providers/web-search/internal.js";
 import type {
   AnthropicImageBlock,
   AnthropicMessageResponse,
@@ -30,6 +34,11 @@ export interface AnthropicEncodeOptions {
     signature?: string;
     synthetic?: boolean;
   };
+  webSearchExecutions?: readonly {
+    id: string;
+    query: string;
+    results: readonly { title: string; url: string }[];
+  }[];
 }
 
 const invalidResponse = (): never => {
@@ -55,7 +64,7 @@ function parseArguments(value: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function encodeCitation(citation: Citation, text: string): AnthropicUrlCitation {
+export function encodeAnthropicCitation(citation: Citation, text: string): AnthropicUrlCitation {
   const startIndex = citation.startIndex ?? 0;
   const endIndex = citation.endIndex ?? text.length;
   if (
@@ -129,7 +138,7 @@ function encodeContent(
         ...(content.citations && content.citations.length > 0
           ? {
               citations: content.citations.map((citation) =>
-                encodeCitation(citation, content.text),
+                encodeAnthropicCitation(citation, content.text),
               ),
             }
           : {}),
@@ -202,6 +211,38 @@ function encodeUsage(response: CanonicalResponse): AnthropicUsage {
   };
 }
 
+function encodeWebSearchBlocks(
+  responseId: string,
+  executions: NonNullable<AnthropicEncodeOptions["webSearchExecutions"]>,
+): AnthropicResponseContentBlock[] {
+  return executions.flatMap((execution, index) => {
+    const toolUseId = createWebSearchToolUseId(responseId, execution.id, index);
+    return [
+      {
+        type: "server_tool_use" as const,
+        id: toolUseId,
+        name: "web_search" as const,
+        input: { query: execution.query },
+      },
+      {
+        type: "web_search_tool_result" as const,
+        tool_use_id: toolUseId,
+        content: execution.results.map((result, resultIndex) => ({
+          type: "web_search_result" as const,
+          title: result.title,
+          url: result.url,
+          encrypted_content: createWebSearchReplayToken(
+            index,
+            resultIndex,
+            execution.query,
+            result,
+          ),
+        })),
+      },
+    ];
+  });
+}
+
 export function encodeAnthropicResponse(
   response: CanonicalResponse,
   options: AnthropicEncodeOptions = {},
@@ -215,7 +256,10 @@ export function encodeAnthropicResponse(
     type: "message",
     role: "assistant",
     model: response.model,
-    content: response.content.map((content) => encodeContent(content, options)),
+    content: [
+      ...encodeWebSearchBlocks(response.id, options.webSearchExecutions ?? []),
+      ...response.content.map((content) => encodeContent(content, options)),
+    ],
     stop_reason: stopReason,
     stop_sequence:
       stopReason === "stop_sequence" && response.stopSequence !== undefined
