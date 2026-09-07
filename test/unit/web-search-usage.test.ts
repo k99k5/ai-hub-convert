@@ -220,6 +220,19 @@ describe("Web Search usage reporting", () => {
     ];
 
     expect(frames).toContainEqual({
+      event: "content_block_start",
+      data: {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "server_tool_use",
+          id: "srvtoolu_ai_hub_0",
+          name: "web_search",
+          input: {},
+        },
+      },
+    });
+    expect(frames).toContainEqual({
       event: "content_block_delta",
       data: {
         type: "content_block_delta",
