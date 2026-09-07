@@ -128,20 +128,15 @@ jobs:
 
           test_path = Path('test/unit/web-search-usage.test.ts')
           test_text = test_path.read_text()
-          old = '''    expect(frames[0]?.data.usage).toEqual({
-              input_tokens: 10,
-              output_tokens: 2,
-              server_tool_use: { web_search_requests: 2 },
-            });'''
-          new = '''    const messageDelta = frames.find((frame) => frame.event === "message_delta");
-            expect(messageDelta?.data.usage).toEqual({
-              input_tokens: 10,
-              output_tokens: 2,
-              server_tool_use: { web_search_requests: 2 },
-            });'''
-          if old not in test_text:
+          needle = 'expect(frames[0]?.data.usage).toEqual({'
+          if needle not in test_text:
               raise RuntimeError('streaming usage assertion not found')
-          test_path.write_text(test_text.replace(old, new, 1))
+          test_text = test_text.replace(
+              needle,
+              'const messageDelta = frames.find((frame) => frame.event === "message_delta");\n    expect(messageDelta?.data.usage).toEqual({',
+              1,
+          )
+          test_path.write_text(test_text)
           PY
           rm .github/workflows/debug-native-web-search-probe.yml
 
