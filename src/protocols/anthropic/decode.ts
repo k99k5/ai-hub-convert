@@ -596,6 +596,46 @@ function parseThinking(value: unknown): Record<string, unknown> | undefined {
   return invalidRequest();
 }
 
+function isAnthropicToolSearchTool(tool: Record<string, unknown>): boolean {
+  switch (tool.type) {
+    case "tool_search_tool_regex":
+    case "tool_search_tool_regex_20251119":
+      if (tool.name !== "tool_search_tool_regex") {
+        return invalidRequest();
+      }
+      return true;
+    case "tool_search_tool_bm25":
+    case "tool_search_tool_bm25_20251119":
+      if (tool.name !== "tool_search_tool_bm25") {
+        return invalidRequest();
+      }
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Anthropic executes Tool Search server-side. OpenAI-compatible upstreams cannot service it,
+// so omit only the search declaration and keep deferred tools resident as normal functions.
+function normalizeAnthropicToolSearchForConversion(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(input.tools)) {
+    return input;
+  }
+
+  let changed = false;
+  const tools = input.tools.filter((rawTool) => {
+    if (!isRecord(rawTool) || !isAnthropicToolSearchTool(rawTool)) {
+      return true;
+    }
+    changed = true;
+    return false;
+  });
+
+  return changed ? { ...input, tools } : input;
+}
+
 export interface DecodedAnthropicRequest {
   readonly request: CanonicalRequest;
   readonly promptCache: PromptCacheSidecar;
@@ -605,12 +645,13 @@ export function decodeAnthropicRequestWithSidecar(input: unknown): DecodedAnthro
   if (!isRecord(input)) {
     return invalidRequest();
   }
-  const maxTokens = input.max_tokens;
+  const normalizedInput = normalizeAnthropicToolSearchForConversion(input);
+  const maxTokens = normalizedInput.max_tokens;
   if (typeof maxTokens !== "number" || !Number.isInteger(maxTokens) || maxTokens < 0) {
     return invalidRequest();
   }
-  const request = decodeRequest(input, maxTokens);
-  return { request, promptCache: decodePromptCacheSidecar(input) };
+  const request = decodeRequest(normalizedInput, maxTokens);
+  return { request, promptCache: decodePromptCacheSidecar(normalizedInput) };
 }
 
 export function decodeAnthropicRequest(input: unknown): CanonicalRequest {
@@ -621,8 +662,9 @@ export function decodeAnthropicTokenCountRequest(input: unknown): CanonicalReque
   if (!isRecord(input)) {
     return invalidRequest();
   }
-  const request = decodeRequest(input);
-  decodePromptCacheSidecar(input);
+  const normalizedInput = normalizeAnthropicToolSearchForConversion(input);
+  const request = decodeRequest(normalizedInput);
+  decodePromptCacheSidecar(normalizedInput);
   return request;
 }
 
