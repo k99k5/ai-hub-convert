@@ -1,11 +1,14 @@
 import type { CanonicalRequest } from "../../core/ir.js";
-import { EmptyWebSearchProvider } from "./empty.js";
+import { DuckDuckGoWebSearchProvider } from "./duckduckgo.js";
 import { WebSearchProviderRegistry } from "./registry.js";
+import type { WebSearchProvider } from "./types.js";
 import { WebSearchUnsupportedError } from "./unsupported.js";
 
-export function createDefaultWebSearchRegistry(): WebSearchProviderRegistry {
+export function createDefaultWebSearchRegistry(
+  provider: WebSearchProvider = new DuckDuckGoWebSearchProvider(),
+): WebSearchProviderRegistry {
   const registry = new WebSearchProviderRegistry();
-  registry.register("web-search", new EmptyWebSearchProvider());
+  registry.register("web-search", provider);
   return registry;
 }
 
