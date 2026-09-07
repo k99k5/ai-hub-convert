@@ -1,0 +1,53 @@
+name: Fix PR 13 Search Result Byte Accounting
+
+on:
+  push:
+    branches:
+      - debug/web-search-usage-logs
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-usage-logs
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply serialized Web Search result accounting and validate
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/protocols/anthropic/stream-encode.ts")
+          source = path.read_text()
+          source = source.replace("const WEB_SEARCH_RESULT_OVERHEAD_BYTES = 128;\n", "", 1)
+
+          old = '''      this.#outputLimiter.addBytes(resultIndex, OUTPUT_ITEM_OVERHEAD_BYTES);\n      this.#outputLimiter.addUnrelated(resultIndex, toolUseId);\n      for (const result of execution.results) {\n        this.#outputLimiter.addBytes(resultIndex, WEB_SEARCH_RESULT_OVERHEAD_BYTES);\n        this.#outputLimiter.addUnrelated(resultIndex, result.title);\n        this.#outputLimiter.addUnrelated(resultIndex, result.url);\n      }\n      frames.push(\n        {\n          event: "content_block_start",\n          data: {\n            type: "content_block_start",\n            index: resultIndex,\n            content_block: {\n              type: "web_search_tool_result",\n              tool_use_id: toolUseId,\n              content: execution.results.map((result) => ({\n                type: "web_search_result",\n                title: result.title,\n                url: result.url,\n              })),\n            },\n          },\n        },\n'''
+          new = '''      const resultContent = execution.results.map((result) => ({\n        type: "web_search_result",\n        title: result.title,\n        url: result.url,\n      }));\n      const resultBlock = {\n        type: "web_search_tool_result",\n        tool_use_id: toolUseId,\n        content: resultContent,\n      };\n      this.#outputLimiter.addBytes(resultIndex, OUTPUT_ITEM_OVERHEAD_BYTES);\n      this.#outputLimiter.addUnrelated(resultIndex, JSON.stringify(resultBlock));\n      frames.push(\n        {\n          event: "content_block_start",\n          data: {\n            type: "content_block_start",\n            index: resultIndex,\n            content_block: resultBlock,\n          },\n        },\n'''
+          if old not in source:
+              raise SystemExit("target Web Search result accounting block not found")
+          path.write_text(source.replace(old, new, 1))
+          PY
+          pnpm format
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+          pnpm test:coverage
+          pnpm build
+          rm .github/workflows/fix-pr13-search-result-bytes.yml
+          git config user.name "TigerKK"
+          git config user.email "545551320@qq.com"
+          git add -A
+          git commit -m "fix: count serialized Web Search result bytes"
+          git push origin HEAD:debug/web-search-usage-logs
