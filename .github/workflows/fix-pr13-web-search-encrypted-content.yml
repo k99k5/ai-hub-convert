@@ -1,0 +1,41 @@
+name: Fix PR 13 Web Search encrypted content
+
+on:
+  push:
+    branches:
+      - debug/web-search-usage-logs
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'chore: run Web Search encrypted content fix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-usage-logs
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply replay token fix and validate
+        run: |
+          python .github/scripts/fix_pr13_web_search_encrypted_content.py
+          pnpm format
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+          pnpm test:coverage
+          pnpm build
+          rm .github/scripts/fix_pr13_web_search_encrypted_content.py
+          rm .github/workflows/fix-pr13-web-search-encrypted-content.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: add replayable Web Search encrypted content"
+          git push origin HEAD:debug/web-search-usage-logs
