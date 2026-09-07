@@ -841,6 +841,10 @@ function decodeRequest(input: Record<string, unknown>, maxTokens?: number): Cano
   if (!Array.isArray(input.messages)) {
     return invalidRequest();
   }
+  const firstMessage = input.messages[0];
+  if (isRecord(firstMessage) && firstMessage.role === "system") {
+    return invalidRequest();
+  }
   if (input.stream !== undefined && typeof input.stream !== "boolean") {
     return invalidRequest();
   }
