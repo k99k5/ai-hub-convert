@@ -40,7 +40,7 @@ export function forceNonStreamingBody(
   if (!isRecord(body)) {
     throw new Error("Web Search tool loop requires an object request body");
   }
-  const next = { ...body, stream: false };
+  const next: Record<string, unknown> = { ...body, stream: false };
   if (path === "chat/completions") {
     delete next.stream_options;
   }
@@ -176,7 +176,7 @@ function appendChatResults(
     tool_call_id: callId,
     content: result,
   }));
-  const next = {
+  const next: Record<string, unknown> = {
     ...requestBody,
     messages: [...messages, assistant, ...toolMessages],
     stream: false,
