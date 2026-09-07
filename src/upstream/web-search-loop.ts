@@ -18,7 +18,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function getWebSearchRequestCount(response: unknown): number | undefined {
-  if (!isRecord(response) || !isRecord(response.usage) || !isRecord(response.usage.server_tool_use)) {
+  if (
+    !isRecord(response) ||
+    !isRecord(response.usage) ||
+    !isRecord(response.usage.server_tool_use)
+  ) {
     return undefined;
   }
   const value = response.usage.server_tool_use.web_search_requests;
