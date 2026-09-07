@@ -150,6 +150,31 @@ function debugAnthropicBodyShape(body: unknown): Record<string, unknown> {
     systemType: Array.isArray(record.system) ? "array" : typeof record.system,
     toolsType: Array.isArray(tools) ? "array" : typeof tools,
     ...(Array.isArray(tools) ? { toolCount: tools.length } : {}),
+    outputConfigType:
+      record.output_config === null
+        ? "null"
+        : Array.isArray(record.output_config)
+          ? "array"
+          : typeof record.output_config,
+    ...(typeof record.output_config === "object" &&
+    record.output_config !== null &&
+    !Array.isArray(record.output_config)
+      ? {
+          outputConfigKeys: Object.keys(record.output_config as Record<string, unknown>).sort(),
+          outputEffort: (record.output_config as Record<string, unknown>).effort,
+          outputFormatType:
+            typeof (record.output_config as Record<string, unknown>).format === "object" &&
+            (record.output_config as Record<string, unknown>).format !== null &&
+            !Array.isArray((record.output_config as Record<string, unknown>).format)
+              ? (
+                  (record.output_config as Record<string, unknown>).format as Record<
+                    string,
+                    unknown
+                  >
+                ).type
+              : typeof (record.output_config as Record<string, unknown>).format,
+        }
+      : {}),
     streamType: typeof record.stream,
     ...(typeof record.stream === "boolean" ? { stream: record.stream } : {}),
   };

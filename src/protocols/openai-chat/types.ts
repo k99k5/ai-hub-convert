@@ -44,6 +44,14 @@ export interface ChatRequest {
   parallel_tool_calls?: boolean;
   max_completion_tokens?: number;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  response_format?: {
+    type: "json_schema";
+    json_schema: {
+      name: string;
+      strict: true;
+      schema: Record<string, unknown>;
+    };
+  };
   stream: boolean;
   stream_options?: { include_usage: boolean };
   temperature?: number;

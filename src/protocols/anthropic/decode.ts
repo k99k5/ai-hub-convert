@@ -3,6 +3,7 @@ import type {
   CanonicalTool,
   Content,
   ImageContent,
+  JsonSchemaOutputFormat,
   Message,
   ReasoningEffort,
   SearchResultContent,
@@ -593,9 +594,12 @@ function parseMetadata(value: unknown): Record<string, unknown> | undefined {
   return value;
 }
 
-function parseOutputConfig(value: unknown): ReasoningEffort | undefined {
+function parseOutputConfig(value: unknown): {
+  reasoningEffort?: ReasoningEffort;
+  outputFormat?: JsonSchemaOutputFormat;
+} {
   if (value === undefined) {
-    return undefined;
+    return {};
   }
   if (!isRecord(value)) {
     return invalidRequest();
@@ -605,14 +609,10 @@ function parseOutputConfig(value: unknown): ReasoningEffort | undefined {
       return invalidRequest();
     }
   }
-  if (value.format !== undefined && value.format !== null) {
-    return invalidRequest();
-  }
+
   const effort = value.effort;
-  if (effort === undefined) {
-    return undefined;
-  }
   if (
+    effort !== undefined &&
     effort !== null &&
     effort !== "low" &&
     effort !== "medium" &&
@@ -622,7 +622,26 @@ function parseOutputConfig(value: unknown): ReasoningEffort | undefined {
   ) {
     return invalidRequest();
   }
-  return effort;
+
+  let outputFormat: JsonSchemaOutputFormat | undefined;
+  const format = value.format;
+  if (format !== undefined && format !== null) {
+    if (
+      !isRecord(format) ||
+      format.type !== "json_schema" ||
+      !isRecord(format.schema) ||
+      !isJsonValue(format.schema) ||
+      Object.keys(format).some((key) => key !== "type" && key !== "schema")
+    ) {
+      return invalidRequest();
+    }
+    outputFormat = { type: "json_schema", schema: format.schema };
+  }
+
+  return {
+    ...(effort === undefined ? {} : { reasoningEffort: effort }),
+    ...(outputFormat === undefined ? {} : { outputFormat }),
+  };
 }
 
 function parseThinking(value: unknown): Record<string, unknown> | undefined {
@@ -941,7 +960,7 @@ function decodeRequest(input: Record<string, unknown>, maxTokens?: number): Cano
   const topK = optionalNumber(input, "top_k");
   const stopSequences = optionalStringArray(input, "stop_sequences");
   const metadata = parseMetadata(input.metadata);
-  const reasoningEffort = parseOutputConfig(input.output_config);
+  const outputConfig = parseOutputConfig(input.output_config);
   const thinking = parseThinking(input.thinking);
   const extensionRequest = {
     ...(topK !== undefined ? { top_k: topK } : {}),
@@ -952,7 +971,10 @@ function decodeRequest(input: Record<string, unknown>, maxTokens?: number): Cano
     source: "anthropic",
     model,
     ...(maxTokens === undefined ? {} : { maxOutputTokens: maxTokens }),
-    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(outputConfig.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: outputConfig.reasoningEffort }),
+    ...(outputConfig.outputFormat === undefined ? {} : { outputFormat: outputConfig.outputFormat }),
     messages: [...(system ? [system] : []), ...messages],
     tools: parseTools(input.tools),
     ...toolChoice,

@@ -211,6 +211,18 @@ export function encodeResponsesRequest(
     ...(reasoning === null || (typeof reasoning === "object" && !Array.isArray(reasoning))
       ? { reasoning: reasoning as Record<string, unknown> | null }
       : {}),
+    ...(request.outputFormat === undefined
+      ? {}
+      : {
+          text: {
+            format: {
+              type: "json_schema" as const,
+              name: "response",
+              schema: request.outputFormat.schema,
+              strict: true as const,
+            },
+          },
+        }),
     ...(options.promptCache.kind === "prompt-cache-key"
       ? options.promptCacheKey !== undefined
         ? { prompt_cache_key: options.promptCacheKey }

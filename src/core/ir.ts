@@ -98,11 +98,17 @@ export type ToolChoice =
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max" | null;
 
+export interface JsonSchemaOutputFormat {
+  type: "json_schema";
+  schema: Record<string, unknown>;
+}
+
 export interface CanonicalRequest {
   source: Protocol;
   model: string;
   maxOutputTokens?: number;
   reasoningEffort?: ReasoningEffort;
+  outputFormat?: JsonSchemaOutputFormat;
   messages: Message[];
   tools: CanonicalTool[];
   toolChoice?: ToolChoice;
