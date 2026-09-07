@@ -3,7 +3,7 @@ import { AnthropicStreamEncoder } from "../../src/protocols/anthropic/stream-enc
 
 describe("Anthropic Web Search output limits", () => {
   it("charges JSON-escaped bytes for synthesized search result blocks", () => {
-    const escapedTitle = '"\\\n'.repeat(1_000);
+    const escapedTitle = ['"', "\\", "\n"].join("").repeat(1_000);
     const encoder = new AnthropicStreamEncoder({
       outputLimits: { perItemBytes: 4_500, perStreamBytes: 20_000 },
       webSearchExecutions: [
@@ -23,8 +23,6 @@ describe("Anthropic Web Search output limits", () => {
 
     expect(() =>
       encoder.encode({ type: "response_start", id: "msg_test", model: "test-model" }),
-    ).toThrowError(
-      expect.objectContaining({ scope: "item", code: "STREAM_OUTPUT_TOO_LARGE" }),
-    );
+    ).toThrowError(expect.objectContaining({ scope: "item", code: "STREAM_OUTPUT_TOO_LARGE" }));
   });
 });
