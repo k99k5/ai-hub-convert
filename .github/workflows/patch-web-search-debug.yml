@@ -1,7 +1,11 @@
 name: Patch Web Search Debug Logs
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - debug/web-search-trace
+    paths:
+      - .github/workflows/patch-web-search-debug.yml
 
 permissions:
   contents: write
@@ -11,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-trace
       - uses: pnpm/action-setup@v4
         with:
           version: 10.6.3
