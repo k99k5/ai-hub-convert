@@ -1,10 +1,11 @@
 import type { CanonicalRequest } from "../../core/ir.js";
+import { EmptyWebSearchProvider } from "./empty.js";
 import { WebSearchProviderRegistry } from "./registry.js";
-import { UnsupportedWebSearchProvider, WebSearchUnsupportedError } from "./unsupported.js";
+import { WebSearchUnsupportedError } from "./unsupported.js";
 
 export function createDefaultWebSearchRegistry(): WebSearchProviderRegistry {
   const registry = new WebSearchProviderRegistry();
-  registry.register("web-search", new UnsupportedWebSearchProvider());
+  registry.register("web-search", new EmptyWebSearchProvider());
   return registry;
 }
 
