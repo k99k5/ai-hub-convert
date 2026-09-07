@@ -266,6 +266,24 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             );
             return;
           } catch (error) {
+            console.error(
+              "[stream-debug] " +
+                JSON.stringify({
+                  event: "anthropic.route.error",
+                  ts: new Date().toISOString(),
+                  requestId: request.id,
+                  headersSent: reply.raw.headersSent,
+                  name: error instanceof Error ? error.name : typeof error,
+                  message: error instanceof Error ? error.message : String(error),
+                  code:
+                    typeof error === "object" &&
+                    error !== null &&
+                    "code" in error &&
+                    typeof error.code === "string"
+                      ? error.code
+                      : null,
+                }),
+            );
             abortScope.abort(error);
             if (!reply.raw.headersSent) {
               if (isProtocolAdapterError(error)) {
@@ -649,25 +667,56 @@ async function streamAnthropicResponse(
     maxFrameBytes: timeoutOptions.maxFrameBytes,
   })[Symbol.asyncIterator]();
   const pinged = new PingedIterator(frames, pingIntervalMs);
+  const decoderKind = decoder instanceof ResponsesStreamDecoder ? "responses" : "chat";
+  let stage = "read_frame";
+  let lastFrameEvent: string | null = null;
   try {
     while (true) {
+      stage = "read_frame";
       const next = await pinged.next();
       if (next.type === "done") {
         break;
       }
       if (next.type === "ping") {
+        stage = "send_ping";
         await send({ event: "ping", data: { type: "ping" } });
         pinged.markClientWrite();
         continue;
       }
+      lastFrameEvent = next.value.event;
+      stage = "decoder.decode";
       for (const event of decoder.decode(next.value)) {
+        stage = "encoder.encode:" + event.type;
         for (const encoded of encoder.encode(event)) {
+          stage = "client.send:" + encoded.event;
           await send(encoded);
           pinged.markClientWrite();
         }
       }
     }
+    stage = "decoder.finish";
     decoder.finish();
+  } catch (error) {
+    console.error(
+      "[stream-debug] " +
+        JSON.stringify({
+          event: "anthropic.transform.error",
+          ts: new Date().toISOString(),
+          decoder: decoderKind,
+          stage,
+          lastFrameEvent,
+          name: error instanceof Error ? error.name : typeof error,
+          message: error instanceof Error ? error.message : String(error),
+          code:
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            typeof error.code === "string"
+              ? error.code
+              : null,
+        }),
+    );
+    throw error;
   } finally {
     pinged.close();
   }

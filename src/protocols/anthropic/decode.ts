@@ -650,6 +650,33 @@ function normalizeAnthropicToolSearchForConversion(
     return input;
   }
 
+  const rawWebSearchTools = input.tools.flatMap((rawTool) => {
+    if (!isRecord(rawTool) || rawTool.name !== "WebSearch") {
+      return [];
+    }
+    return [
+      {
+        type: typeof rawTool.type === "string" ? rawTool.type : null,
+        defer_loading: typeof rawTool.defer_loading === "boolean" ? rawTool.defer_loading : null,
+        has_input_schema: isRecord(rawTool.input_schema),
+      },
+    ];
+  });
+  if (rawWebSearchTools.length > 0) {
+    const hasToolSearch = input.tools.some(
+      (rawTool) => isRecord(rawTool) && isAnthropicToolSearchTool(rawTool),
+    );
+    console.error(
+      "[web-search-debug] " +
+        JSON.stringify({
+          event: "anthropic.websearch.raw",
+          ts: new Date().toISOString(),
+          hasToolSearch,
+          tools: rawWebSearchTools,
+        }),
+    );
+  }
+
   let changed = false;
   const tools = input.tools.flatMap((rawTool) => {
     if (!isRecord(rawTool)) {
