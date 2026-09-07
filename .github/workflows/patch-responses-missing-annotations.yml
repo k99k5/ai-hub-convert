@@ -1,0 +1,177 @@
+name: Patch Responses Missing Annotations
+
+on:
+  push:
+    branches:
+      - debug/web-search-trace-v2
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-trace-v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Patch, test, and push
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/protocols/openai-responses/stream-decode.ts')
+          s = p.read_text()
+          old = '''    if (rawPart.type === "output_text") {
+      if (!Array.isArray(rawPart.annotations)) {
+        throw new Error(`Responses output item ${index} annotations do not match`);
+      }
+      annotations.push(...rawPart.annotations.map((value) => parseAnnotationValue(value)));
+      textParts.push(readString(rawPart, "text"));
+      continue;
+    }
+'''
+          new = '''    if (rawPart.type === "output_text") {
+      const rawAnnotations = rawPart.annotations;
+      if (rawAnnotations !== undefined && !Array.isArray(rawAnnotations)) {
+        throw new Error(`Responses output item ${index} annotations do not match`);
+      }
+      const partAnnotations = Array.isArray(rawAnnotations) ? rawAnnotations : [];
+      annotations.push(...partAnnotations.map((value) => parseAnnotationValue(value)));
+      textParts.push(readString(rawPart, "text"));
+      continue;
+    }
+'''
+          if old not in s:
+              raise SystemExit('decoder anchor not found')
+          p.write_text(s.replace(old, new, 1))
+
+          test = Path('test/unit/responses-stream-missing-annotations.test.ts')
+          test.write_text('''import { expect, it } from "vitest";
+import { ResponsesStreamDecoder } from "../../src/protocols/openai-responses/stream-decode.js";
+
+function frame(event: string, payload: Record<string, unknown>) {
+  return { event, data: JSON.stringify(payload) };
+}
+
+it("accepts output_text without annotations in a real Responses stream", () => {
+  const decoder = new ResponsesStreamDecoder();
+
+  expect(
+    decoder.decode(
+      frame("response.created", {
+        type: "response.created",
+        response: { id: "resp_missing_annotations", model: "deepseek-v4-flash" },
+      }),
+    ),
+  ).toEqual([
+    {
+      type: "response_start",
+      id: "resp_missing_annotations",
+      model: "deepseek-v4-flash",
+    },
+  ]);
+
+  const item = {
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: "2026年10月1日是星期四。" }],
+  };
+
+  expect(
+    decoder.decode(
+      frame("response.output_item.added", {
+        type: "response.output_item.added",
+        output_index: 1,
+        item,
+      }),
+    ),
+  ).toEqual([
+    {
+      type: "content_start",
+      index: 1,
+      itemId: "msg_1",
+      content: { type: "text", text: "" },
+    },
+    { type: "text_delta", index: 1, delta: "2026年10月1日是星期四。" },
+  ]);
+
+  expect(
+    decoder.decode(
+      frame("response.output_item.done", {
+        type: "response.output_item.done",
+        output_index: 1,
+        item,
+      }),
+    ),
+  ).toEqual([{ type: "content_stop", index: 1 }]);
+
+  expect(
+    decoder.decode(
+      frame("response.completed", {
+        type: "response.completed",
+        response: {
+          id: "resp_missing_annotations",
+          model: "deepseek-v4-flash",
+          status: "completed",
+          usage: { input_tokens: 10, output_tokens: 5 },
+        },
+      }),
+    ),
+  ).toEqual([
+    {
+      type: "response_complete",
+      finishReason: "end_turn",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    },
+  ]);
+
+  expect(() => decoder.finish()).not.toThrow();
+});
+
+it("still rejects a present non-array annotations field", () => {
+  const decoder = new ResponsesStreamDecoder();
+  decoder.decode(
+    frame("response.created", {
+      type: "response.created",
+      response: { id: "resp_bad_annotations", model: "deepseek-v4-flash" },
+    }),
+  );
+
+  expect(() =>
+    decoder.decode(
+      frame("response.output_item.added", {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: {
+          id: "msg_bad",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "x", annotations: null }],
+        },
+      }),
+    ),
+  ).toThrow("Responses output item 0 annotations do not match");
+});
+''')
+          PY
+
+          pnpm exec biome format --write src/protocols/openai-responses/stream-decode.ts test/unit/responses-stream-missing-annotations.test.ts
+          pnpm typecheck
+          pnpm test
+          rm .github/workflows/patch-responses-missing-annotations.yml
+          git config user.name "TigerKK"
+          git config user.email "545551320@qq.com"
+          git add src/protocols/openai-responses/stream-decode.ts test/unit/responses-stream-missing-annotations.test.ts .github/workflows/patch-responses-missing-annotations.yml
+          git commit -m "fix: accept omitted Responses annotations"
+          git push origin HEAD:debug/web-search-trace-v2
