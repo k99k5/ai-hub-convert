@@ -1,5 +1,8 @@
 import type { CanonicalResponse, Citation, FinishReason, ReasoningContent } from "../../core/ir.js";
-import { createWebSearchReplayToken } from "../../providers/web-search/internal.js";
+import {
+  createWebSearchReplayToken,
+  createWebSearchToolUseId,
+} from "../../providers/web-search/internal.js";
 import type {
   AnthropicImageBlock,
   AnthropicMessageResponse,
@@ -32,6 +35,7 @@ export interface AnthropicEncodeOptions {
     synthetic?: boolean;
   };
   webSearchExecutions?: readonly {
+    id: string;
     query: string;
     results: readonly { title: string; url: string }[];
   }[];
@@ -208,10 +212,11 @@ function encodeUsage(response: CanonicalResponse): AnthropicUsage {
 }
 
 function encodeWebSearchBlocks(
+  responseId: string,
   executions: NonNullable<AnthropicEncodeOptions["webSearchExecutions"]>,
 ): AnthropicResponseContentBlock[] {
   return executions.flatMap((execution, index) => {
-    const toolUseId = `srvtoolu_ai_hub_${index}`;
+    const toolUseId = createWebSearchToolUseId(responseId, execution.id, index);
     return [
       {
         type: "server_tool_use" as const,
@@ -252,7 +257,7 @@ export function encodeAnthropicResponse(
     role: "assistant",
     model: response.model,
     content: [
-      ...encodeWebSearchBlocks(options.webSearchExecutions ?? []),
+      ...encodeWebSearchBlocks(response.id, options.webSearchExecutions ?? []),
       ...response.content.map((content) => encodeContent(content, options)),
     ],
     stop_reason: stopReason,

@@ -3,6 +3,7 @@ import { encodeAnthropicResponse } from "../../src/protocols/anthropic/encode.js
 import { AnthropicStreamEncoder } from "../../src/protocols/anthropic/stream-encode.js";
 import {
   createWebSearchReplayToken,
+  createWebSearchToolUseId,
   INTERNAL_WEB_SEARCH_TOOL_NAME,
 } from "../../src/providers/web-search/internal.js";
 import type { WebSearchProvider } from "../../src/providers/web-search/types.js";
@@ -188,7 +189,7 @@ describe("Web Search usage reporting", () => {
         finishReason: "end_turn",
         usage: { inputTokens: 10, outputTokens: 2, webSearchRequests: 1 },
       },
-      { webSearchExecutions: [{ query, results: [result] }] },
+      { webSearchExecutions: [{ id: "call_search", query, results: [result] }] },
     );
 
     expect(response.content[1]).toMatchObject({
@@ -253,6 +254,7 @@ describe("Web Search usage reporting", () => {
       }),
     ];
 
+    const expectedToolUseId = createWebSearchToolUseId("msg_test", "call_search", 0);
     expect(frames).toContainEqual({
       event: "content_block_start",
       data: {
@@ -260,7 +262,7 @@ describe("Web Search usage reporting", () => {
         index: 0,
         content_block: {
           type: "server_tool_use",
-          id: "srvtoolu_ai_hub_0",
+          id: expectedToolUseId,
           name: "web_search",
           input: {},
         },
@@ -284,7 +286,7 @@ describe("Web Search usage reporting", () => {
         index: 1,
         content_block: {
           type: "web_search_tool_result",
-          tool_use_id: "srvtoolu_ai_hub_0",
+          tool_use_id: expectedToolUseId,
           content: [
             {
               type: "web_search_result",

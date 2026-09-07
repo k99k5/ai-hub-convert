@@ -1,6 +1,9 @@
 import type { CanonicalEvent } from "../../core/events.js";
 import type { Content, Usage } from "../../core/ir.js";
-import { createWebSearchReplayToken } from "../../providers/web-search/internal.js";
+import {
+  createWebSearchReplayToken,
+  createWebSearchToolUseId,
+} from "../../providers/web-search/internal.js";
 import { normalizeReadToolArguments } from "../../policies/read-tool.js";
 import { finalizeThinkingBlock } from "../../policies/thinking-signature.js";
 import {
@@ -180,7 +183,7 @@ export class AnthropicStreamEncoder {
           },
         },
       },
-      ...this.#webSearchPrefixFrames(),
+      ...this.#webSearchPrefixFrames(event.id),
     ];
   }
 
@@ -280,10 +283,10 @@ export class AnthropicStreamEncoder {
     return index + this.#contentIndexOffset;
   }
 
-  #webSearchPrefixFrames(): AnthropicSseFrame[] {
+  #webSearchPrefixFrames(responseId: string): AnthropicSseFrame[] {
     const frames: AnthropicSseFrame[] = [];
     for (const [searchIndex, execution] of (this.options.webSearchExecutions ?? []).entries()) {
-      const toolUseId = `srvtoolu_ai_hub_${searchIndex}`;
+      const toolUseId = createWebSearchToolUseId(responseId, execution.id, searchIndex);
       const toolIndex = searchIndex * 2;
       const resultIndex = toolIndex + 1;
       const queryJson = JSON.stringify({ query: execution.query });

@@ -2,7 +2,10 @@ import { request as httpRequest, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
-import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
+import {
+  createWebSearchToolUseId,
+  INTERNAL_WEB_SEARCH_TOOL_NAME,
+} from "../../src/providers/web-search/internal.js";
 import { ActiveStreamRegistry } from "../../src/stream/active-streams.js";
 
 const apps: Array<ReturnType<typeof buildApp>> = [];
@@ -982,17 +985,18 @@ describe("Web Search execution", () => {
       expect(resultPosition).toBeGreaterThan(searchPosition);
       expect(answerPosition).toBeGreaterThan(resultPosition);
     } else {
+      const expectedToolUseId = createWebSearchToolUseId("resp_final", "call_search", 0);
       expect(response.json()).toMatchObject({
         content: [
           {
             type: "server_tool_use",
-            id: "srvtoolu_ai_hub_0",
+            id: expectedToolUseId,
             name: "web_search",
             input: { query: "latest news" },
           },
           {
             type: "web_search_tool_result",
-            tool_use_id: "srvtoolu_ai_hub_0",
+            tool_use_id: expectedToolUseId,
             content: [],
           },
           { type: "text", text: "No results found." },

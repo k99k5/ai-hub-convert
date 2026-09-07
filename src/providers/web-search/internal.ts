@@ -29,3 +29,14 @@ export function createWebSearchReplayToken(
     .digest("base64url");
   return `ai_hub_replay_v1:${digest}`;
 }
+
+export function createWebSearchToolUseId(
+  responseId: string,
+  executionId: string,
+  searchIndex: number,
+): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([responseId, executionId, searchIndex]), "utf8")
+    .digest("base64url");
+  return `srvtoolu_ai_hub_${digest}`;
+}
