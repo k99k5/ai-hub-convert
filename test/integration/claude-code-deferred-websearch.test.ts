@@ -47,7 +47,7 @@ it("owns Claude Code deferred WebSearch and completes an empty search without le
             type: "message",
             role: "assistant",
             status: "completed",
-            content: [{ type: "output_text", text: "搜索没有返回结果。", annotations: [] }],
+            content: [{ type: "output_text", text: "搜索没有返回结果。" }],
           },
         ],
         usage: { input_tokens: 8, output_tokens: 4 },
