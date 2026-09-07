@@ -336,7 +336,7 @@ function encodeCitation(citation: {
   };
 }
 
-function encodeUsage(usage: Usage): Record<string, number> {
+function encodeUsage(usage: Usage): Record<string, unknown> {
   const cacheRead = usage.cacheReadInputTokens ?? 0;
   const cacheWrite = usage.cacheWriteInputTokens ?? 0;
   return {
@@ -347,6 +347,9 @@ function encodeUsage(usage: Usage): Record<string, number> {
       : {}),
     ...(usage.cacheWriteInputTokens !== undefined
       ? { cache_creation_input_tokens: usage.cacheWriteInputTokens }
+      : {}),
+    ...(usage.webSearchRequests !== undefined
+      ? { server_tool_use: { web_search_requests: usage.webSearchRequests } }
       : {}),
   };
 }
