@@ -70,7 +70,9 @@ describe("Upstream Web Search tool loop", () => {
       "responses",
       {
         model: "deepseek-test",
-        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "search" }] }],
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "search" }] },
+        ],
         tools: [
           {
             type: "function",
