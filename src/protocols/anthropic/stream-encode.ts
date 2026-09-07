@@ -244,6 +244,14 @@ export class AnthropicStreamEncoder {
       throw new Error("Anthropic stream cannot complete with open content blocks");
     }
     this.#completed = true;
+    const usage = encodeUsage(event.usage);
+    process.stderr.write(
+      `[web-search-debug] ${JSON.stringify({
+        event: "anthropic_stream_complete",
+        canonicalWebSearchRequests: event.usage.webSearchRequests,
+        encodedServerToolUse: usage.server_tool_use,
+      })}\n`,
+    );
     return [
       {
         event: "message_delta",
@@ -253,7 +261,7 @@ export class AnthropicStreamEncoder {
             stop_reason: encodeStopReason(event.finishReason),
             stop_sequence: event.stopSequence ?? null,
           },
-          usage: encodeUsage(event.usage),
+          usage,
         },
       },
       { event: "message_stop", data: { type: "message_stop" } },
