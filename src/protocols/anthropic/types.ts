@@ -164,12 +164,33 @@ export interface AnthropicResponseSearchResultBlock {
   citations: { enabled: boolean };
 }
 
+export interface AnthropicResponseServerToolUseBlock {
+  type: "server_tool_use";
+  id: string;
+  name: "web_search";
+  input: { query: string };
+}
+
+export interface AnthropicResponseWebSearchResult {
+  type: "web_search_result";
+  title: string;
+  url: string;
+}
+
+export interface AnthropicResponseWebSearchToolResultBlock {
+  type: "web_search_tool_result";
+  tool_use_id: string;
+  content: AnthropicResponseWebSearchResult[];
+}
+
 export type AnthropicResponseContentBlock =
   | AnthropicResponseTextBlock
   | AnthropicImageBlock
   | AnthropicResponseToolUseBlock
   | AnthropicResponseThinkingBlock
-  | AnthropicResponseSearchResultBlock;
+  | AnthropicResponseSearchResultBlock
+  | AnthropicResponseServerToolUseBlock
+  | AnthropicResponseWebSearchToolResultBlock;
 
 export type AnthropicStopReason =
   | "end_turn"

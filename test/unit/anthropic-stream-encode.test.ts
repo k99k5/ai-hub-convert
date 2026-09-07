@@ -526,4 +526,23 @@ describe("AnthropicStreamEncoder", () => {
     ]);
     expect(uuidFactory).not.toHaveBeenCalled();
   });
+
+  it("counts synthesized Web Search blocks against the aggregate stream output limit", () => {
+    const encoder = new AnthropicStreamEncoder({
+      outputLimits: { perItemBytes: 1024, perStreamBytes: 600 },
+      webSearchExecutions: [{ id: "call_search", query: "q".repeat(200), results: [] }],
+    });
+    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+    encoder.encode({ type: "content_start", index: 0, content: { type: "text", text: "" } });
+    encoder.encode({ type: "text_delta", index: 0, delta: "a".repeat(100) });
+    encoder.encode({ type: "content_stop", index: 0 });
+
+    expect(() =>
+      encoder.encode({
+        type: "response_complete",
+        finishReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1, webSearchRequests: 1 },
+      }),
+    ).toThrowError(expect.objectContaining({ scope: "stream", code: "STREAM_OUTPUT_TOO_LARGE" }));
+  });
 });

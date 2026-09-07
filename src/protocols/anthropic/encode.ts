@@ -30,6 +30,10 @@ export interface AnthropicEncodeOptions {
     signature?: string;
     synthetic?: boolean;
   };
+  webSearchExecutions?: readonly {
+    query: string;
+    results: readonly { title: string; url: string }[];
+  }[];
 }
 
 const invalidResponse = (): never => {
@@ -202,6 +206,31 @@ function encodeUsage(response: CanonicalResponse): AnthropicUsage {
   };
 }
 
+function encodeWebSearchBlocks(
+  executions: NonNullable<AnthropicEncodeOptions["webSearchExecutions"]>,
+): AnthropicResponseContentBlock[] {
+  return executions.flatMap((execution, index) => {
+    const toolUseId = `srvtoolu_ai_hub_${index}`;
+    return [
+      {
+        type: "server_tool_use" as const,
+        id: toolUseId,
+        name: "web_search" as const,
+        input: { query: execution.query },
+      },
+      {
+        type: "web_search_tool_result" as const,
+        tool_use_id: toolUseId,
+        content: execution.results.map((result) => ({
+          type: "web_search_result" as const,
+          title: result.title,
+          url: result.url,
+        })),
+      },
+    ];
+  });
+}
+
 export function encodeAnthropicResponse(
   response: CanonicalResponse,
   options: AnthropicEncodeOptions = {},
@@ -215,7 +244,10 @@ export function encodeAnthropicResponse(
     type: "message",
     role: "assistant",
     model: response.model,
-    content: response.content.map((content) => encodeContent(content, options)),
+    content: [
+      ...response.content.map((content) => encodeContent(content, options)),
+      ...encodeWebSearchBlocks(options.webSearchExecutions ?? []),
+    ],
     stop_reason: stopReason,
     stop_sequence:
       stopReason === "stop_sequence" && response.stopSequence !== undefined

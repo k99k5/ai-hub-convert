@@ -187,7 +187,7 @@ export class UpstreamClient {
           path,
           round,
           callId: call.id,
-          queryPreview: searchRequest.query.slice(0, 160),
+          queryLength: searchRequest.query.length,
         });
         try {
           const results = await provider.execute(searchRequest, {
@@ -217,7 +217,6 @@ export class UpstreamClient {
             round,
             callId: call.id,
             errorName: error instanceof Error ? error.name : typeof error,
-            errorMessage: error instanceof Error ? error.message : String(error),
           });
           throw error;
         }

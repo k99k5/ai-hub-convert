@@ -14,6 +14,8 @@ import {
 } from "../../stream/tool-argument-limits.js";
 
 const OUTPUT_ITEM_OVERHEAD_BYTES = 256;
+const CITATION_OVERHEAD_BYTES = 128;
+const WEB_SEARCH_RESULT_OVERHEAD_BYTES = 128;
 
 export interface AnthropicSseFrame {
   event: string;
@@ -68,11 +70,13 @@ export class AnthropicStreamEncoder {
         return this.#startContent(event.index, event.content);
       case "text_delta":
         this.#assertOpen(event.index, "text");
+        this.#outputLimiter.add(event.index, event.delta);
         return [
           frame("content_block_delta", event.index, { type: "text_delta", text: event.delta }),
         ];
       case "reasoning_delta":
         this.#assertOpen(event.index, "reasoning");
+        this.#outputLimiter.add(event.index, event.delta);
         return [
           frame("content_block_delta", event.index, {
             type: "thinking_delta",
@@ -84,6 +88,7 @@ export class AnthropicStreamEncoder {
         return [];
       case "signature_delta": {
         const block = this.#assertOpen(event.index, "reasoning");
+        this.#outputLimiter.add(event.index, event.delta);
         block.signature += event.delta;
         return [
           frame("content_block_delta", event.index, {
@@ -103,6 +108,7 @@ export class AnthropicStreamEncoder {
           block.deltas.push(event.delta);
           return [];
         }
+        this.#outputLimiter.add(event.index, event.delta);
         return [
           frame("content_block_delta", event.index, {
             type: "input_json_delta",
@@ -112,6 +118,11 @@ export class AnthropicStreamEncoder {
       }
       case "citation_delta":
         this.#assertOpen(event.index, "text");
+        this.#outputLimiter.addBytes(event.index, CITATION_OVERHEAD_BYTES);
+        this.#outputLimiter.addUnrelated(event.index, event.citation.url);
+        if (event.citation.title !== undefined) {
+          this.#outputLimiter.addUnrelated(event.index, event.citation.title);
+        }
         return [
           frame("content_block_delta", event.index, {
             type: "citations_delta",
@@ -186,6 +197,7 @@ export class AnthropicStreamEncoder {
       },
     ];
     if (content.type === "refusal" && content.refusal.length > 0) {
+      this.#outputLimiter.add(index, content.refusal);
       frames.push(
         frame("content_block_delta", index, { type: "text_delta", text: content.refusal }),
       );
@@ -212,6 +224,7 @@ export class AnthropicStreamEncoder {
         block.deltas.join(""),
         true,
       );
+      this.#outputLimiter.add(index, normalized.json);
       frames.push(
         frame("content_block_delta", index, {
           type: "input_json_delta",
@@ -229,6 +242,7 @@ export class AnthropicStreamEncoder {
         },
       );
       if ("signature" in finalized) {
+        this.#outputLimiter.add(index, finalized.signature);
         frames.push(
           frame("content_block_delta", index, {
             type: "signature_delta",
@@ -256,6 +270,11 @@ export class AnthropicStreamEncoder {
     let nativeResultCount = 0;
     for (const [searchIndex, execution] of webSearchExecutions.entries()) {
       const toolUseId = `srvtoolu_ai_hub_${searchIndex}`;
+      const queryJson = JSON.stringify({ query: execution.query });
+      this.#outputLimiter.addBytes(nextIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
+      this.#outputLimiter.addUnrelated(nextIndex, toolUseId);
+      this.#outputLimiter.addUnrelated(nextIndex, "web_search");
+      this.#outputLimiter.add(nextIndex, queryJson);
       nativeWebSearchFrames.push(
         {
           event: "content_block_start",
@@ -267,7 +286,7 @@ export class AnthropicStreamEncoder {
         },
         frame("content_block_delta", nextIndex, {
           type: "input_json_delta",
-          partial_json: JSON.stringify({ query: execution.query }),
+          partial_json: queryJson,
         }),
         {
           event: "content_block_stop",
@@ -276,6 +295,13 @@ export class AnthropicStreamEncoder {
       );
       nextIndex += 1;
       nativeResultCount += execution.results.length;
+      this.#outputLimiter.addBytes(nextIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
+      this.#outputLimiter.addUnrelated(nextIndex, toolUseId);
+      for (const result of execution.results) {
+        this.#outputLimiter.addBytes(nextIndex, WEB_SEARCH_RESULT_OVERHEAD_BYTES);
+        this.#outputLimiter.addUnrelated(nextIndex, result.title);
+        this.#outputLimiter.addUnrelated(nextIndex, result.url);
+      }
       nativeWebSearchFrames.push(
         {
           event: "content_block_start",
@@ -315,7 +341,7 @@ export class AnthropicStreamEncoder {
           event: "native_web_search_emitted",
           searches: webSearchExecutions.length,
           results: nativeResultCount,
-          queryPreviews: webSearchExecutions.map((execution) => execution.query.slice(0, 160)),
+          queryLengths: webSearchExecutions.map((execution) => execution.query.length),
         })}\n`,
       );
     }

@@ -77,7 +77,9 @@ import { UpstreamClient, UpstreamHttpError } from "./upstream/client.js";
 import { shouldFallbackToChat } from "./upstream/routing.js";
 import {
   decodeWebSearchExecutionsHeader,
+  getWebSearchExecutions,
   getWebSearchRequestCount,
+  type WebSearchExecution,
 } from "./upstream/web-search-loop.js";
 
 const require = createRequire(import.meta.url);
@@ -105,6 +107,11 @@ interface StreamTimeoutOptions {
   idleTimeoutMs: number;
   maxFrameBytes: number;
   onTimeout: (error: Error) => void;
+}
+
+interface AnthropicCompletionResult {
+  response: CanonicalResponse;
+  webSearchExecutions: WebSearchExecution[];
 }
 
 function toolArgumentLimits(config: AppConfig): ToolArgumentLimits {
@@ -428,7 +435,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
         const abortScope = createRequestAbortScope(request.raw, reply.raw);
         try {
-          const canonicalResponse = await requestAnthropicCompletion(
+          const completion = await requestAnthropicCompletion(
             upstream,
             canonicalRequest,
             apiKey,
@@ -438,7 +445,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             GENERIC_PROMPT_CACHE_CAPABILITIES,
           );
           const normalizedResponse = normalizeResponseToolArguments(
-            canonicalResponse,
+            completion.response,
             isClaudeCode && config.claudeCode.readToolCompatEnabled,
           );
           return reply.send(
@@ -447,6 +454,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
                 finalizeThinkingBlock(reasoning, {
                   enabled: isClaudeCode && config.claudeCode.syntheticThinkingSignatureEnabled,
                 }),
+              webSearchExecutions: completion.webSearchExecutions,
             }),
           );
         } catch (error) {
@@ -822,7 +830,7 @@ async function requestAnthropicCompletion(
   promptCacheSidecar: PromptCacheSidecar,
   promptCacheEnabled: boolean,
   promptCacheCapabilities: PromptCacheCapabilities,
-): Promise<CanonicalResponse> {
+): Promise<AnthropicCompletionResult> {
   try {
     preparePromptCacheAttempt({
       request,
@@ -837,7 +845,10 @@ async function requestAnthropicCompletion(
       apiKey,
       signal,
     );
-    return addWebSearchUsage(decodeResponsesResponse(response), response);
+    return {
+      response: addWebSearchUsage(decodeResponsesResponse(response), response),
+      webSearchExecutions: getWebSearchExecutions(response),
+    };
   } catch (error) {
     if (
       !(error instanceof UpstreamHttpError) ||
@@ -867,7 +878,10 @@ async function requestAnthropicCompletion(
     apiKey,
     signal,
   );
-  return addWebSearchUsage(decodeChatResponse(response), response);
+  return {
+    response: addWebSearchUsage(decodeChatResponse(response), response),
+    webSearchExecutions: getWebSearchExecutions(response),
+  };
 }
 
 function normalizeResponseToolArguments(

@@ -977,8 +977,22 @@ describe("Web Search execution", () => {
       expect(response.body).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
     } else {
       expect(response.json()).toMatchObject({
-        content: [{ type: "text", text: "No results found." }],
+        content: [
+          { type: "text", text: "No results found." },
+          {
+            type: "server_tool_use",
+            id: "srvtoolu_ai_hub_0",
+            name: "web_search",
+            input: { query: "latest news" },
+          },
+          {
+            type: "web_search_tool_result",
+            tool_use_id: "srvtoolu_ai_hub_0",
+            content: [],
+          },
+        ],
         stop_reason: "end_turn",
+        usage: { server_tool_use: { web_search_requests: 1 } },
       });
     }
   });
