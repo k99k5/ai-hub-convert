@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CanonicalRequest } from "../../src/core/ir.js";
+import { EmptyWebSearchProvider } from "../../src/providers/web-search/empty.js";
 import {
   assertWebSearchSupported,
   createDefaultWebSearchRegistry,
@@ -28,8 +29,20 @@ function providerWithExecution(execute: boolean): WebSearchProvider {
   };
 }
 
-describe("UnsupportedWebSearchProvider", () => {
-  it("declares no execution capability and fails without a network hook", async () => {
+describe("Web Search providers", () => {
+  it("returns no results from the default empty provider", async () => {
+    const provider = new EmptyWebSearchProvider();
+
+    expect(provider.capabilities()).toEqual({ execute: true, citations: false, streaming: false });
+    await expect(
+      provider.execute(
+        { query: "current weather" },
+        { signal: new AbortController().signal, requestId: "req_test" },
+      ),
+    ).resolves.toEqual([]);
+  });
+
+  it("retains an explicit unsupported provider for fail-closed configurations", async () => {
     const provider = new UnsupportedWebSearchProvider();
 
     expect(provider.capabilities()).toEqual({ execute: false, citations: false, streaming: false });
@@ -43,13 +56,13 @@ describe("UnsupportedWebSearchProvider", () => {
 });
 
 describe("Web Search preflight", () => {
-  it("registers the unsupported provider by default", () => {
+  it("registers the executable empty provider by default", () => {
     expect(() =>
       assertWebSearchSupported(
         requestWithTools([{ type: "web_search", provider: "web-search", version: "web_search" }]),
         createDefaultWebSearchRegistry(),
       ),
-    ).toThrowError(WebSearchUnsupportedError);
+    ).not.toThrow();
   });
 
   it("ignores ordinary functions and accepts providers with execution capability", () => {
