@@ -298,7 +298,12 @@ export class AnthropicStreamEncoder {
           data: {
             type: "content_block_start",
             index: toolIndex,
-            content_block: { type: "server_tool_use", id: toolUseId, name: "web_search" },
+            content_block: {
+              type: "server_tool_use",
+              id: toolUseId,
+              name: "web_search",
+              input: {},
+            },
           },
         },
         frame("content_block_delta", toolIndex, {
