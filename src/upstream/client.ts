@@ -1,4 +1,6 @@
+import { EmptyWebSearchProvider } from "../providers/web-search/empty.js";
 import { createDefaultWebSearchRegistry } from "../providers/web-search/preflight.js";
+import type { WebSearchProvider } from "../providers/web-search/types.js";
 import {
   appendWebSearchResults,
   decodeWebSearchRequest,
@@ -21,6 +23,7 @@ interface UpstreamClientOptions {
   jsonBodyLimitBytes?: number;
   errorBodyLimitBytes?: number;
   fetch?: Fetch;
+  webSearchProvider?: WebSearchProvider;
 }
 
 const DEFAULT_JSON_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
@@ -65,7 +68,7 @@ export class UpstreamClient {
   readonly #jsonBodyLimitBytes: number;
   readonly #errorBodyLimitBytes: number;
   readonly #fetch: Fetch;
-  readonly #webSearchProviders = createDefaultWebSearchRegistry();
+  readonly #webSearchProviders: ReturnType<typeof createDefaultWebSearchRegistry>;
 
   constructor(options: UpstreamClientOptions) {
     this.#baseUrl = new URL(options.baseUrl);
@@ -73,6 +76,10 @@ export class UpstreamClient {
     this.#jsonBodyLimitBytes = options.jsonBodyLimitBytes ?? DEFAULT_JSON_BODY_LIMIT_BYTES;
     this.#errorBodyLimitBytes = options.errorBodyLimitBytes ?? DEFAULT_ERROR_BODY_LIMIT_BYTES;
     this.#fetch = options.fetch ?? globalThis.fetch;
+    const webSearchProvider =
+      options.webSearchProvider ??
+      (options.fetch === undefined ? undefined : new EmptyWebSearchProvider());
+    this.#webSearchProviders = createDefaultWebSearchRegistry(webSearchProvider);
   }
 
   async postJson(
