@@ -75,7 +75,10 @@ import { parseSseStream } from "./stream/sse-parser.js";
 import { ToolArgumentLimitError, type ToolArgumentLimits } from "./stream/tool-argument-limits.js";
 import { UpstreamClient, UpstreamHttpError } from "./upstream/client.js";
 import { shouldFallbackToChat } from "./upstream/routing.js";
-import { getWebSearchRequestCount } from "./upstream/web-search-loop.js";
+import {
+  decodeWebSearchExecutionsHeader,
+  getWebSearchRequestCount,
+} from "./upstream/web-search-loop.js";
 
 const require = createRequire(import.meta.url);
 const fastifySSE = require("@fastify/sse") as FastifyPluginAsync<SSEPluginOptions>;
@@ -676,7 +679,10 @@ async function streamAnthropicResponse(
   }
 
   const webSearchRequests = readWebSearchUsageHeader(response);
-  const encoder = new AnthropicStreamEncoder(encoderOptions);
+  const webSearchExecutions = decodeWebSearchExecutionsHeader(
+    response.headers.get("x-ai-hub-web-search-trace"),
+  );
+  const encoder = new AnthropicStreamEncoder({ ...encoderOptions, webSearchExecutions });
   const frames = parseSseStream(response.body, timeoutOptions, signal, {
     maxFrameBytes: timeoutOptions.maxFrameBytes,
   })[Symbol.asyncIterator]();

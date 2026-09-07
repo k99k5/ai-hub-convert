@@ -26,6 +26,11 @@ export interface AnthropicStreamEncoderOptions {
   uuidFactory?: () => string;
   toolArgumentLimits?: ToolArgumentLimits;
   outputLimits?: StreamOutputLimits;
+  webSearchExecutions?: readonly {
+    id: string;
+    query: string;
+    results: readonly { title: string; url: string; content: string }[];
+  }[];
 }
 
 interface OpenBlock {
@@ -245,12 +250,13 @@ export class AnthropicStreamEncoder {
     }
     this.#completed = true;
     const usage = encodeUsage(event.usage);
-    const webSearchRequests = event.usage.webSearchRequests ?? 0;
-    const nativeProbeFrames: AnthropicSseFrame[] = [];
+    const webSearchExecutions = this.options.webSearchExecutions ?? [];
+    const nativeWebSearchFrames: AnthropicSseFrame[] = [];
     let nextIndex = this.#seenIndices.size === 0 ? 0 : Math.max(...this.#seenIndices.values()) + 1;
-    for (let searchIndex = 0; searchIndex < webSearchRequests; searchIndex += 1) {
-      const toolUseId = `srvtoolu_ai_hub_probe_${searchIndex}`;
-      nativeProbeFrames.push(
+    let nativeResultCount = 0;
+    for (const [searchIndex, execution] of webSearchExecutions.entries()) {
+      const toolUseId = `srvtoolu_ai_hub_${searchIndex}`;
+      nativeWebSearchFrames.push(
         {
           event: "content_block_start",
           data: {
@@ -261,7 +267,7 @@ export class AnthropicStreamEncoder {
         },
         frame("content_block_delta", nextIndex, {
           type: "input_json_delta",
-          partial_json: JSON.stringify({ query: "web search" }),
+          partial_json: JSON.stringify({ query: execution.query }),
         }),
         {
           event: "content_block_stop",
@@ -269,7 +275,8 @@ export class AnthropicStreamEncoder {
         },
       );
       nextIndex += 1;
-      nativeProbeFrames.push(
+      nativeResultCount += execution.results.length;
+      nativeWebSearchFrames.push(
         {
           event: "content_block_start",
           data: {
@@ -278,7 +285,11 @@ export class AnthropicStreamEncoder {
             content_block: {
               type: "web_search_tool_result",
               tool_use_id: toolUseId,
-              content: [],
+              content: execution.results.map((result) => ({
+                type: "web_search_result",
+                title: result.title,
+                url: result.url,
+              })),
             },
           },
         },
@@ -294,21 +305,22 @@ export class AnthropicStreamEncoder {
         event: "anthropic_stream_complete",
         canonicalWebSearchRequests: event.usage.webSearchRequests,
         encodedServerToolUse: usage.server_tool_use,
-        nativeProbeBlocks: webSearchRequests,
+        nativeSearchBlocks: webSearchExecutions.length,
+        nativeSearchResults: nativeResultCount,
       })}\n`,
     );
-    if (webSearchRequests > 0) {
+    if (webSearchExecutions.length > 0) {
       process.stderr.write(
         `[web-search-debug] ${JSON.stringify({
-          event: "native_probe_emitted",
-          webSearchRequests,
-          emittedServerToolUseBlocks: webSearchRequests,
-          emittedWebSearchToolResultBlocks: webSearchRequests,
+          event: "native_web_search_emitted",
+          searches: webSearchExecutions.length,
+          results: nativeResultCount,
+          queryPreviews: webSearchExecutions.map((execution) => execution.query.slice(0, 160)),
         })}\n`,
       );
     }
     return [
-      ...nativeProbeFrames,
+      ...nativeWebSearchFrames,
       {
         event: "message_delta",
         data: {

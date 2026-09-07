@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../providers/web-search/internal.js";
 import type { WebSearchRequest, WebSearchResult } from "../providers/web-search/types.js";
 
@@ -13,8 +14,87 @@ export interface InternalToolCalls {
   hasOtherToolCalls: boolean;
 }
 
+export interface WebSearchExecution {
+  id: string;
+  query: string;
+  results: WebSearchResult[];
+}
+
+const INTERNAL_WEB_SEARCH_TRACE_KEY = "__ai_hub_web_search_trace";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeWebSearchExecutions(value: unknown): WebSearchExecution[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const executions: WebSearchExecution[] = [];
+  for (const rawExecution of value) {
+    if (
+      !isRecord(rawExecution) ||
+      typeof rawExecution.id !== "string" ||
+      typeof rawExecution.query !== "string" ||
+      !Array.isArray(rawExecution.results)
+    ) {
+      return [];
+    }
+    const results: WebSearchResult[] = [];
+    for (const rawResult of rawExecution.results) {
+      if (
+        !isRecord(rawResult) ||
+        typeof rawResult.title !== "string" ||
+        typeof rawResult.url !== "string" ||
+        typeof rawResult.content !== "string"
+      ) {
+        return [];
+      }
+      results.push({
+        title: rawResult.title,
+        url: rawResult.url,
+        content: rawResult.content,
+      });
+    }
+    executions.push({ id: rawExecution.id, query: rawExecution.query, results });
+  }
+  return executions;
+}
+
+export function attachWebSearchExecutions(
+  response: unknown,
+  executions: readonly WebSearchExecution[],
+): unknown {
+  if (!isRecord(response) || executions.length === 0) {
+    return response;
+  }
+  return {
+    ...response,
+    [INTERNAL_WEB_SEARCH_TRACE_KEY]: executions.map((execution) => ({
+      id: execution.id,
+      query: execution.query,
+      results: execution.results.map((result) => ({ ...result })),
+    })),
+  };
+}
+
+export function getWebSearchExecutions(response: unknown): WebSearchExecution[] {
+  return isRecord(response)
+    ? normalizeWebSearchExecutions(response[INTERNAL_WEB_SEARCH_TRACE_KEY])
+    : [];
+}
+
+export function decodeWebSearchExecutionsHeader(value: string | null): WebSearchExecution[] {
+  if (value === null || value.length === 0) {
+    return [];
+  }
+  try {
+    return normalizeWebSearchExecutions(
+      JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as unknown,
+    );
+  } catch {
+    return [];
+  }
 }
 
 export function getWebSearchRequestCount(response: unknown): number | undefined {
@@ -262,9 +342,17 @@ export function synthesizeCompletionStream(path: CompletionPath, response: unkno
   if (!isRecord(response)) {
     throw new Error("Cannot synthesize an event stream from an invalid upstream response");
   }
+  const webSearchExecutions = getWebSearchExecutions(response);
+  const { [INTERNAL_WEB_SEARCH_TRACE_KEY]: _trace, ...streamResponse } = response;
   const body =
-    path === "responses" ? synthesizeResponsesStream(response) : synthesizeChatStream(response);
+    path === "responses"
+      ? synthesizeResponsesStream(streamResponse)
+      : synthesizeChatStream(streamResponse);
   const webSearchRequests = getWebSearchRequestCount(response);
+  const traceHeader =
+    webSearchExecutions.length === 0
+      ? undefined
+      : Buffer.from(JSON.stringify(webSearchExecutions), "utf8").toString("base64url");
   return new Response(body, {
     status: 200,
     headers: {
@@ -272,6 +360,7 @@ export function synthesizeCompletionStream(path: CompletionPath, response: unkno
       ...(webSearchRequests === undefined
         ? {}
         : { "x-ai-hub-web-search-requests": String(webSearchRequests) }),
+      ...(traceHeader === undefined ? {} : { "x-ai-hub-web-search-trace": traceHeader }),
     },
   });
 }

@@ -3,6 +3,7 @@ import { createDefaultWebSearchRegistry } from "../providers/web-search/prefligh
 import type { WebSearchProvider } from "../providers/web-search/types.js";
 import {
   appendWebSearchResults,
+  attachWebSearchExecutions,
   attachWebSearchRequestCount,
   decodeWebSearchRequest,
   disableInternalWebSearchTool,
@@ -12,6 +13,7 @@ import {
   getWebSearchRequestCount,
   hasInternalWebSearchTool,
   synthesizeCompletionStream,
+  type WebSearchExecution,
 } from "./web-search-loop.js";
 
 type UpstreamPath = "responses" | "responses/input_tokens" | "chat/completions";
@@ -121,6 +123,7 @@ export class UpstreamClient {
         path,
         attachedCount: getWebSearchRequestCount(response),
         headerCount: stream.headers.get("x-ai-hub-web-search-requests"),
+        hasTraceHeader: stream.headers.has("x-ai-hub-web-search-trace"),
       });
       return stream;
     }
@@ -141,6 +144,7 @@ export class UpstreamClient {
   ): Promise<unknown> {
     let currentBody = forceNonStreamingBody(path, body);
     let webSearchRequests = 0;
+    const webSearchExecutions: WebSearchExecution[] = [];
     for (let round = 0; round < MAX_WEB_SEARCH_ROUNDS; round += 1) {
       const response = await this.#post(path, currentBody, apiKey, signal);
       const upstreamRequestId = response.headers.get("x-request-id") ?? `web_search_round_${round}`;
@@ -155,12 +159,16 @@ export class UpstreamClient {
         executedCount: webSearchRequests,
       });
       if (calls.webSearch.length === 0) {
-        const finalBody = attachWebSearchRequestCount(responseBody, webSearchRequests);
+        const finalBody = attachWebSearchExecutions(
+          attachWebSearchRequestCount(responseBody, webSearchRequests),
+          webSearchExecutions,
+        );
         debugWebSearch("loop_complete", {
           path,
           round,
           executedCount: webSearchRequests,
           attachedCount: getWebSearchRequestCount(finalBody),
+          traceCount: webSearchExecutions.length,
         });
         return finalBody;
       }
@@ -187,6 +195,11 @@ export class UpstreamClient {
             signal,
           });
           webSearchRequests += 1;
+          webSearchExecutions.push({
+            id: call.id,
+            query: searchRequest.query,
+            results: results.map((result) => ({ ...result })),
+          });
           debugWebSearch("provider_execute_done", {
             path,
             round,
