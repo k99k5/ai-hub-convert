@@ -11,7 +11,10 @@ import { decodeResponsesRequest } from "../../src/protocols/openai-responses/req
 import { encodeResponsesResponse } from "../../src/protocols/openai-responses/response-encode.js";
 import { decodeResponsesResponse } from "../../src/protocols/openai-responses/decode.js";
 import { encodeResponsesRequest } from "../../src/protocols/openai-responses/encode.js";
-import { WebSearchUnsupportedError } from "../../src/providers/web-search/unsupported.js";
+import {
+  INTERNAL_WEB_SEARCH_TOOL_NAME,
+  INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
+} from "../../src/providers/web-search/internal.js";
 
 function baseRequest(overrides: Partial<CanonicalRequest> = {}): CanonicalRequest {
   return {
@@ -831,15 +834,29 @@ describe("OpenAI Responses adapter", () => {
     ).not.toHaveProperty("prompt_cache_key");
   });
 
-  it("fails closed when a built-in Web Search tool reaches an upstream encoder", () => {
-    const request = baseRequest({
-      tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
-    });
-
-    expect(() =>
-      encodeResponsesRequest(request, { store: false, promptCache: noPromptCache }),
-    ).toThrowError(WebSearchUnsupportedError);
+  it("materializes built-in Web Search as the reserved upstream Responses function", () => {
+  const request = baseRequest({
+    tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
+    toolChoice: { type: "function", name: "web_search" },
   });
+
+  const encoded = encodeResponsesRequest(request, {
+    store: false,
+    promptCache: noPromptCache,
+  });
+  expect(encoded.tools).toEqual([
+    expect.objectContaining({
+      type: "function",
+      name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+      parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
+      strict: true,
+    }),
+  ]);
+  expect(encoded.tool_choice).toEqual({
+    type: "function",
+    name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+  });
+});
 
   it("replays only genuine Responses opaque reasoning and drops cross-protocol reasoning", () => {
     const encoded = encodeResponsesRequest(
@@ -1102,15 +1119,29 @@ describe("OpenAI Chat adapter", () => {
     expect(encodeChatRequest(baseRequest())).not.toHaveProperty("reasoning_effort");
   });
 
-  it("fails closed when a built-in Web Search tool reaches the Chat encoder", () => {
-    expect(() =>
-      encodeChatRequest(
-        baseRequest({
-          tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
-        }),
-      ),
-    ).toThrowError(WebSearchUnsupportedError);
+  it("materializes built-in Web Search as the reserved upstream Chat function", () => {
+  const encoded = encodeChatRequest(
+    baseRequest({
+      tools: [{ type: "web_search", provider: "web-search", version: "web_search" }],
+      toolChoice: { type: "function", name: "web_search" },
+    }),
+  );
+
+  expect(encoded.tools).toEqual([
+    expect.objectContaining({
+      type: "function",
+      function: expect.objectContaining({
+        name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+        parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
+        strict: true,
+      }),
+    }),
+  ]);
+  expect(encoded.tool_choice).toEqual({
+    type: "function",
+    function: { name: INTERNAL_WEB_SEARCH_TOOL_NAME },
   });
+});
 
   it("encodes multimodal messages, reasoning extension, parallel tools, results, and stop", () => {
     const encoded = encodeChatRequest(
