@@ -4,6 +4,7 @@ import type { SSEPluginOptions } from "@fastify/sse";
 import type { FastifyPluginAsync } from "fastify";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { AppConfig } from "./config.js";
+import type { CanonicalEvent } from "./core/events.js";
 import type { CanonicalRequest, CanonicalResponse } from "./core/ir.js";
 import { createRequestAbortScope } from "./http/abort.js";
 import {
@@ -74,6 +75,7 @@ import { parseSseStream } from "./stream/sse-parser.js";
 import { ToolArgumentLimitError, type ToolArgumentLimits } from "./stream/tool-argument-limits.js";
 import { UpstreamClient, UpstreamHttpError } from "./upstream/client.js";
 import { shouldFallbackToChat } from "./upstream/routing.js";
+import { getWebSearchRequestCount } from "./upstream/web-search-loop.js";
 
 const require = createRequire(import.meta.url);
 const fastifySSE = require("@fastify/sse") as FastifyPluginAsync<SSEPluginOptions>;
@@ -126,6 +128,35 @@ function isBoundaryError(error: unknown): error is FastifyBoundaryError {
 
 function isProtocolAdapterError(error: unknown): boolean {
   return error instanceof OpenAIAdapterError || error instanceof ChatAdapterError;
+}
+
+function addWebSearchUsage(
+  response: CanonicalResponse,
+  upstreamResponse: unknown,
+): CanonicalResponse {
+  const webSearchRequests = getWebSearchRequestCount(upstreamResponse);
+  return webSearchRequests === undefined
+    ? response
+    : { ...response, usage: { ...response.usage, webSearchRequests } };
+}
+
+function readWebSearchUsageHeader(response: Response): number | undefined {
+  const value = response.headers.get("x-ai-hub-web-search-requests");
+  if (value === null) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function addWebSearchUsageToEvent(
+  event: CanonicalEvent,
+  webSearchRequests: number | undefined,
+): CanonicalEvent {
+  if (event.type !== "response_complete" || webSearchRequests === undefined) {
+    return event;
+  }
+  return { ...event, usage: { ...event.usage, webSearchRequests } };
 }
 
 export function buildApp(options: BuildAppOptions): FastifyInstance {
@@ -644,6 +675,7 @@ async function streamAnthropicResponse(
     throw new Error("Upstream completion stream has no body");
   }
 
+  const webSearchRequests = readWebSearchUsageHeader(response);
   const encoder = new AnthropicStreamEncoder(encoderOptions);
   const frames = parseSseStream(response.body, timeoutOptions, signal, {
     maxFrameBytes: timeoutOptions.maxFrameBytes,
@@ -661,7 +693,7 @@ async function streamAnthropicResponse(
         continue;
       }
       for (const event of decoder.decode(next.value)) {
-        for (const encoded of encoder.encode(event)) {
+        for (const encoded of encoder.encode(addWebSearchUsageToEvent(event, webSearchRequests))) {
           await send(encoded);
           pinged.markClientWrite();
         }
@@ -696,7 +728,7 @@ async function requestAnthropicCompletion(
       apiKey,
       signal,
     );
-    return decodeResponsesResponse(response);
+    return addWebSearchUsage(decodeResponsesResponse(response), response);
   } catch (error) {
     if (
       !(error instanceof UpstreamHttpError) ||
@@ -726,7 +758,7 @@ async function requestAnthropicCompletion(
     apiKey,
     signal,
   );
-  return decodeChatResponse(response);
+  return addWebSearchUsage(decodeChatResponse(response), response);
 }
 
 function normalizeResponseToolArguments(
