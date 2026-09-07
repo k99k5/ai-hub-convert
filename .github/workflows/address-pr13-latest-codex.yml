@@ -1,0 +1,42 @@
+name: Address PR 13 Latest Codex Review
+
+on:
+  push:
+    branches:
+      - debug/web-search-usage-logs
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-usage-logs
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply review fixes and validate
+        run: |
+          python .github/scripts/address_pr13_latest_codex.py
+          pnpm format
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+          pnpm test:coverage
+          pnpm build
+          rm .github/scripts/address_pr13_latest_codex.py
+          rm .github/workflows/address-pr13-latest-codex.yml
+          git config user.name "TigerKK"
+          git config user.email "545551320@qq.com"
+          git add -A
+          git commit -m "fix: address latest Anthropic review findings"
+          git push origin HEAD:debug/web-search-usage-logs
