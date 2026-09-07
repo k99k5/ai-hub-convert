@@ -2,6 +2,7 @@ import { request as httpRequest, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
+import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
 import { ActiveStreamRegistry } from "../../src/stream/active-streams.js";
 
 const apps: Array<ReturnType<typeof buildApp>> = [];
@@ -887,125 +888,126 @@ describe("stream lifecycle", () => {
   });
 });
 
-describe("Web Search preflight", () => {
-  it.each([
-    { url: "/v1/messages", stream: false },
-    { url: "/v1/messages", stream: true },
-    { url: "/v1/messages/count_tokens", stream: false },
-  ])("rejects Anthropic built-in search before upstream for $url stream=$stream", async ({
-    url,
-    stream,
-  }) => {
-    let upstreamCalls = 0;
-    const app = createApp({}, async () => {
-      upstreamCalls += 1;
-      throw new Error("Upstream must not be called");
+describe("Web Search execution", () => {
+  it.each([false, true])(
+    "executes Anthropic built-in search with an empty provider result for stream=%s",
+    async (stream) => {
+      const upstreamBodies: Record<string, unknown>[] = [];
+      let round = 0;
+      const app = createApp({}, async (input, init) => {
+        const request = new Request(input, init);
+        upstreamBodies.push((await request.json()) as Record<string, unknown>);
+        round += 1;
+        if (round === 1) {
+          return Response.json({
+            id: "resp_search",
+            model: "vendor/model-1",
+            status: "completed",
+            output: [
+              {
+                id: "fc_search",
+                type: "function_call",
+                status: "completed",
+                call_id: "call_search",
+                name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+                arguments: '{"query":"latest news"}',
+              },
+            ],
+            usage: { input_tokens: 5, output_tokens: 1 },
+          });
+        }
+        return Response.json({
+          id: "resp_final",
+          model: "vendor/model-1",
+          status: "completed",
+          output: [
+            {
+              id: "msg_final",
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [
+                { type: "output_text", text: "No results found.", annotations: [] },
+              ],
+            },
+          ],
+          usage: { input_tokens: 8, output_tokens: 4 },
+        });
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/messages",
+        headers: { "content-type": "application/json", "x-api-key": "caller-key" },
+        payload: {
+          model: "vendor/model-1",
+          max_tokens: 64,
+          stream,
+          messages: [{ role: "user", content: "search" }],
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+        },
+      });
+
+      expect(response.statusCode, response.body).toBe(200);
+      expect(upstreamBodies).toHaveLength(2);
+      expect(upstreamBodies[0]?.tools).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "function",
+            name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+          }),
+        ]),
+      );
+      expect(upstreamBodies[1]?.input).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "function_call_output",
+            call_id: "call_search",
+            output: "[]",
+          }),
+        ]),
+      );
+      if (stream) {
+        expect(response.headers["content-type"]).toContain("text/event-stream");
+        expect(response.body).toContain("No results found.");
+        expect(response.body).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
+      } else {
+        expect(response.json()).toMatchObject({
+          content: [{ type: "text", text: "No results found." }],
+          stop_reason: "end_turn",
+        });
+      }
+    },
+  );
+
+  it("keeps built-in Web Search in Anthropic input token counting", async () => {
+    let upstreamBody: Record<string, unknown> | undefined;
+    const app = createApp({}, async (input, init) => {
+      upstreamBody = (await new Request(input, init).json()) as Record<string, unknown>;
+      return Response.json({ object: "response.input_tokens", input_tokens: 3 });
     });
 
     const response = await app.inject({
       method: "POST",
-      url,
+      url: "/v1/messages/count_tokens",
       headers: { "content-type": "application/json", "x-api-key": "caller-key" },
       payload: {
         model: "vendor/model-1",
-        max_tokens: 64,
-        stream,
         messages: [{ role: "user", content: "search" }],
         tools: [{ type: "web_search_20250305", name: "web_search" }],
       },
     });
 
-    expect(response.statusCode).toBe(501);
-    expect(response.headers["content-type"]).toContain("application/json");
-    expect(response.json()).toMatchObject({
-      type: "error",
-      error: { type: "api_error", message: "Web Search is not supported" },
-    });
-    expect(upstreamCalls).toBe(0);
-  });
-
-  it.each([
-    false,
-    true,
-  ])("rejects Responses built-in search before upstream for stream=%s", async (stream) => {
-    let upstreamCalls = 0;
-    const app = createApp({}, async () => {
-      upstreamCalls += 1;
-      throw new Error("Upstream must not be called");
-    });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/responses",
-      headers: { "content-type": "application/json", authorization: "Bearer caller-key" },
-      payload: {
-        model: "vendor/model-1",
-        input: "search",
-        stream,
-        tools: [{ type: "web_search" }],
-      },
-    });
-
-    expect(response.statusCode).toBe(501);
-    expect(response.headers["content-type"]).toContain("application/json");
-    expect(response.json()).toMatchObject({
-      error: {
-        type: "server_error",
-        code: "web_search_unsupported",
-        message: "Web Search is not supported",
-      },
-    });
-    expect(upstreamCalls).toBe(0);
-  });
-
-  it.each([
-    "web_search_20250305",
-    "web_search_20260209",
-    "web_search_20260318",
-  ])("rejects Anthropic built-in search version %s before upstream", async (type) => {
-    let upstreamCalls = 0;
-    const app = createApp({}, async () => {
-      upstreamCalls += 1;
-      throw new Error("Upstream must not be called");
-    });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/messages",
-      headers: { "content-type": "application/json", "x-api-key": "caller-key" },
-      payload: {
-        model: "vendor/model-1",
-        max_tokens: 64,
-        messages: [{ role: "user", content: "search" }],
-        tools: [{ type, name: "web_search" }],
-      },
-    });
-
-    expect(response.statusCode).toBe(501);
-    expect(upstreamCalls).toBe(0);
-  });
-
-  it.each([
-    "web_search",
-    "web_search_2025_08_26",
-    "web_search_preview",
-    "web_search_preview_2025_03_11",
-  ])("rejects Responses built-in search version %s before upstream", async (type) => {
-    let upstreamCalls = 0;
-    const app = createApp({}, async () => {
-      upstreamCalls += 1;
-      throw new Error("Upstream must not be called");
-    });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/responses",
-      headers: { "content-type": "application/json", authorization: "Bearer caller-key" },
-      payload: { model: "vendor/model-1", input: "search", tools: [{ type }] },
-    });
-
-    expect(response.statusCode).toBe(501);
-    expect(upstreamCalls).toBe(0);
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json()).toEqual({ input_tokens: 3 });
+    expect(upstreamBody?.tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "function",
+          name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+        }),
+      ]),
+    );
   });
 
   it("does not classify a function named web_search as built-in search", async () => {
