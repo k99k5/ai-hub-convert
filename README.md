@@ -116,15 +116,15 @@ system attribution 与 User-Agent 冲突时以前者为准。只有严格、有�
 
 ## Web Search
 
-内置 Web Search 通过独立 provider registry 预留。首版注册的 provider 不支持执行，因此合法的 Anthropic/OpenAI built-in Web Search 请求会在任何上游调用前返回当前协议的 HTTP 501；stream 请求也会在提交 SSE headers 前返回 JSON 501。
+内置 Web Search 通过独立 provider registry 执行，当前 provider 为 DuckDuckGo。Anthropic `web_search_*` 与 Claude Code deferred `WebSearch` 会转换为网关内部保留工具，由网关执行搜索并把结果回填给上游模型；上游模型随后继续生成最终响应。
 
-普通 function 即使名称为 `web_search`，仍按普通 function 处理。已有 `search_result` 与上游 URL citation 可以转换，服务不会主动联网搜索。
+Anthropic JSON/SSE 出口会生成原生 `server_tool_use` / `web_search_tool_result` 块，并同步 `usage.server_tool_use.web_search_requests`。后续多轮对话回传这些 server-search block 时，网关会识别并过滤自身生成的 replay 数据。普通 function 即使名称为 `web_search`，仍按普通 function 处理，不会被当作内置 Web Search。
 
 ## 兼容范围
 
-支持 JSON 与 SSE：text、system、URL/Base64 image、function tool、tool call/result、并行与交错工具调用、reasoning/thinking、usage、已有 search result、URL citation/annotation。Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 会转为 Responses `reasoning.effort`，token counting 同样保留，Chat fallback 转为 `reasoning_effort`。
+支持 JSON 与 SSE：text、system、URL/Base64 image、function tool、tool call/result、并行与交错工具调用、reasoning/thinking、usage、已有 search result、URL citation/annotation。Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 会转为 Responses `reasoning.effort`，token counting 同样保留，Chat fallback 转为 `reasoning_effort`。Anthropic `output_config.format` 支持 `null` 或 `{ type: "json_schema", schema: {...} }`：Responses 映射到 `text.format`，token counting 同样保留，Chat fallback 映射到 `response_format.json_schema`。
 
-首版不支持 document/PDF、audio、file upload、background Responses 生命周期、非空 `output_config.format` 或主动 Web Search。非空 `output_config.format` 会在上游调用前返回 Anthropic 400；`background:true` 会被拒绝。Anthropic `tool_result` 中的 image/search_result 内容同样在上游调用前返回 Anthropic 400。上游 refusal 在 Anthropic 出口折为 text 块并输出 `stop_reason:"refusal"`。完整矩阵和有损语义见 [docs/compatibility.md](docs/compatibility.md)。
+当前仍不支持 document/PDF、audio、file upload 或 background Responses 生命周期；`background:true` 会被拒绝。Anthropic `tool_result` 中的 image/search_result 内容同样在上游调用前返回 Anthropic 400。上游 refusal 在 Anthropic 出口折为 text 块并输出 `stop_reason:"refusal"`。完整矩阵和有损语义见 [docs/compatibility.md](docs/compatibility.md)。
 
 ## Docker
 
