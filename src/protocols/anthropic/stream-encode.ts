@@ -48,6 +48,7 @@ export class AnthropicStreamEncoder {
   readonly #seenIndices = new Set<number>();
   readonly #argumentLimiter: ToolArgumentStreamLimiter;
   readonly #outputLimiter: StreamOutputLimiter;
+  readonly #contentIndexOffset: number;
 
   constructor(private readonly options: AnthropicStreamEncoderOptions = {}) {
     this.#argumentLimiter = new ToolArgumentStreamLimiter(
@@ -56,6 +57,7 @@ export class AnthropicStreamEncoder {
     this.#outputLimiter = new StreamOutputLimiter(
       options.outputLimits ?? DEFAULT_STREAM_OUTPUT_LIMITS,
     );
+    this.#contentIndexOffset = (options.webSearchExecutions?.length ?? 0) * 2;
   }
 
   encode(event: CanonicalEvent): AnthropicSseFrame[] {
@@ -68,30 +70,35 @@ export class AnthropicStreamEncoder {
         return this.#start(event);
       case "content_start":
         return this.#startContent(event.index, event.content);
-      case "text_delta":
+      case "text_delta": {
         this.#assertOpen(event.index, "text");
-        this.#outputLimiter.add(event.index, event.delta);
+        const outputIndex = this.#outputIndex(event.index);
+        this.#outputLimiter.add(outputIndex, event.delta);
         return [
-          frame("content_block_delta", event.index, { type: "text_delta", text: event.delta }),
+          frame("content_block_delta", outputIndex, { type: "text_delta", text: event.delta }),
         ];
-      case "reasoning_delta":
+      }
+      case "reasoning_delta": {
         this.#assertOpen(event.index, "reasoning");
-        this.#outputLimiter.add(event.index, event.delta);
+        const outputIndex = this.#outputIndex(event.index);
+        this.#outputLimiter.add(outputIndex, event.delta);
         return [
-          frame("content_block_delta", event.index, {
+          frame("content_block_delta", outputIndex, {
             type: "thinking_delta",
             thinking: event.delta,
           }),
         ];
+      }
       case "reasoning_continuation":
         this.#assertOpen(event.index, "reasoning");
         return [];
       case "signature_delta": {
         const block = this.#assertOpen(event.index, "reasoning");
-        this.#outputLimiter.add(event.index, event.delta);
+        const outputIndex = this.#outputIndex(event.index);
+        this.#outputLimiter.add(outputIndex, event.delta);
         block.signature += event.delta;
         return [
-          frame("content_block_delta", event.index, {
+          frame("content_block_delta", outputIndex, {
             type: "signature_delta",
             signature: event.delta,
           }),
@@ -108,27 +115,30 @@ export class AnthropicStreamEncoder {
           block.deltas.push(event.delta);
           return [];
         }
-        this.#outputLimiter.add(event.index, event.delta);
+        const outputIndex = this.#outputIndex(event.index);
+        this.#outputLimiter.add(outputIndex, event.delta);
         return [
-          frame("content_block_delta", event.index, {
+          frame("content_block_delta", outputIndex, {
             type: "input_json_delta",
             partial_json: event.delta,
           }),
         ];
       }
-      case "citation_delta":
+      case "citation_delta": {
         this.#assertOpen(event.index, "text");
-        this.#outputLimiter.addBytes(event.index, CITATION_OVERHEAD_BYTES);
-        this.#outputLimiter.addUnrelated(event.index, event.citation.url);
+        const outputIndex = this.#outputIndex(event.index);
+        this.#outputLimiter.addBytes(outputIndex, CITATION_OVERHEAD_BYTES);
+        this.#outputLimiter.addUnrelated(outputIndex, event.citation.url);
         if (event.citation.title !== undefined) {
-          this.#outputLimiter.addUnrelated(event.index, event.citation.title);
+          this.#outputLimiter.addUnrelated(outputIndex, event.citation.title);
         }
         return [
-          frame("content_block_delta", event.index, {
+          frame("content_block_delta", outputIndex, {
             type: "citations_delta",
             citation: encodeCitation(event.citation),
           }),
         ];
+      }
       case "content_stop":
         return this.#stopContent(event.index);
       case "response_complete":
@@ -170,6 +180,7 @@ export class AnthropicStreamEncoder {
           },
         },
       },
+      ...this.#webSearchPrefixFrames(),
     ];
   }
 
@@ -179,10 +190,11 @@ export class AnthropicStreamEncoder {
       throw new Error(`Anthropic content block ${index} is already defined`);
     }
     this.#seenIndices.add(index);
-    this.#outputLimiter.addBytes(index, OUTPUT_ITEM_OVERHEAD_BYTES);
+    const outputIndex = this.#outputIndex(index);
+    this.#outputLimiter.addBytes(outputIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
     if (content.type === "function_call") {
-      this.#outputLimiter.addUnrelated(index, content.id);
-      this.#outputLimiter.addUnrelated(index, content.name);
+      this.#outputLimiter.addUnrelated(outputIndex, content.id);
+      this.#outputLimiter.addUnrelated(outputIndex, content.name);
     }
     const contentBlock = encodeContentStart(content);
     this.#openBlocks.set(index, {
@@ -193,13 +205,16 @@ export class AnthropicStreamEncoder {
     const frames: AnthropicSseFrame[] = [
       {
         event: "content_block_start",
-        data: { type: "content_block_start", index, content_block: contentBlock },
+        data: { type: "content_block_start", index: outputIndex, content_block: contentBlock },
       },
     ];
     if (content.type === "refusal" && content.refusal.length > 0) {
-      this.#outputLimiter.add(index, content.refusal);
+      this.#outputLimiter.add(outputIndex, content.refusal);
       frames.push(
-        frame("content_block_delta", index, { type: "text_delta", text: content.refusal }),
+        frame("content_block_delta", outputIndex, {
+          type: "text_delta",
+          text: content.refusal,
+        }),
       );
     }
     return frames;
@@ -212,6 +227,7 @@ export class AnthropicStreamEncoder {
       throw new Error(`Anthropic content block ${index} is not open`);
     }
 
+    const outputIndex = this.#outputIndex(index);
     const frames: AnthropicSseFrame[] = [];
     if (
       block.content.type === "function_call" &&
@@ -224,9 +240,9 @@ export class AnthropicStreamEncoder {
         block.deltas.join(""),
         true,
       );
-      this.#outputLimiter.add(index, normalized.json);
+      this.#outputLimiter.add(outputIndex, normalized.json);
       frames.push(
-        frame("content_block_delta", index, {
+        frame("content_block_delta", outputIndex, {
           type: "input_json_delta",
           partial_json: normalized.json,
         }),
@@ -242,9 +258,9 @@ export class AnthropicStreamEncoder {
         },
       );
       if ("signature" in finalized) {
-        this.#outputLimiter.add(index, finalized.signature);
+        this.#outputLimiter.add(outputIndex, finalized.signature);
         frames.push(
-          frame("content_block_delta", index, {
+          frame("content_block_delta", outputIndex, {
             type: "signature_delta",
             signature: finalized.signature,
           }),
@@ -253,61 +269,61 @@ export class AnthropicStreamEncoder {
     }
 
     this.#openBlocks.delete(index);
-    frames.push({ event: "content_block_stop", data: { type: "content_block_stop", index } });
+    frames.push({
+      event: "content_block_stop",
+      data: { type: "content_block_stop", index: outputIndex },
+    });
     return frames;
   }
 
-  #complete(event: Extract<CanonicalEvent, { type: "response_complete" }>): AnthropicSseFrame[] {
-    this.#assertStarted();
-    if (this.#openBlocks.size > 0) {
-      throw new Error("Anthropic stream cannot complete with open content blocks");
-    }
-    this.#completed = true;
-    const usage = encodeUsage(event.usage);
-    const webSearchExecutions = this.options.webSearchExecutions ?? [];
-    const nativeWebSearchFrames: AnthropicSseFrame[] = [];
-    let nextIndex = this.#seenIndices.size === 0 ? 0 : Math.max(...this.#seenIndices.values()) + 1;
-    let nativeResultCount = 0;
-    for (const [searchIndex, execution] of webSearchExecutions.entries()) {
+  #outputIndex(index: number): number {
+    return index + this.#contentIndexOffset;
+  }
+
+  #webSearchPrefixFrames(): AnthropicSseFrame[] {
+    const frames: AnthropicSseFrame[] = [];
+    for (const [searchIndex, execution] of (this.options.webSearchExecutions ?? []).entries()) {
       const toolUseId = `srvtoolu_ai_hub_${searchIndex}`;
+      const toolIndex = searchIndex * 2;
+      const resultIndex = toolIndex + 1;
       const queryJson = JSON.stringify({ query: execution.query });
-      this.#outputLimiter.addBytes(nextIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
-      this.#outputLimiter.addUnrelated(nextIndex, toolUseId);
-      this.#outputLimiter.addUnrelated(nextIndex, "web_search");
-      this.#outputLimiter.add(nextIndex, queryJson);
-      nativeWebSearchFrames.push(
+
+      this.#outputLimiter.addBytes(toolIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
+      this.#outputLimiter.addUnrelated(toolIndex, toolUseId);
+      this.#outputLimiter.addUnrelated(toolIndex, "web_search");
+      this.#outputLimiter.add(toolIndex, queryJson);
+      frames.push(
         {
           event: "content_block_start",
           data: {
             type: "content_block_start",
-            index: nextIndex,
+            index: toolIndex,
             content_block: { type: "server_tool_use", id: toolUseId, name: "web_search" },
           },
         },
-        frame("content_block_delta", nextIndex, {
+        frame("content_block_delta", toolIndex, {
           type: "input_json_delta",
           partial_json: queryJson,
         }),
         {
           event: "content_block_stop",
-          data: { type: "content_block_stop", index: nextIndex },
+          data: { type: "content_block_stop", index: toolIndex },
         },
       );
-      nextIndex += 1;
-      nativeResultCount += execution.results.length;
-      this.#outputLimiter.addBytes(nextIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
-      this.#outputLimiter.addUnrelated(nextIndex, toolUseId);
+
+      this.#outputLimiter.addBytes(resultIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
+      this.#outputLimiter.addUnrelated(resultIndex, toolUseId);
       for (const result of execution.results) {
-        this.#outputLimiter.addBytes(nextIndex, WEB_SEARCH_RESULT_OVERHEAD_BYTES);
-        this.#outputLimiter.addUnrelated(nextIndex, result.title);
-        this.#outputLimiter.addUnrelated(nextIndex, result.url);
+        this.#outputLimiter.addBytes(resultIndex, WEB_SEARCH_RESULT_OVERHEAD_BYTES);
+        this.#outputLimiter.addUnrelated(resultIndex, result.title);
+        this.#outputLimiter.addUnrelated(resultIndex, result.url);
       }
-      nativeWebSearchFrames.push(
+      frames.push(
         {
           event: "content_block_start",
           data: {
             type: "content_block_start",
-            index: nextIndex,
+            index: resultIndex,
             content_block: {
               type: "web_search_tool_result",
               tool_use_id: toolUseId,
@@ -321,11 +337,25 @@ export class AnthropicStreamEncoder {
         },
         {
           event: "content_block_stop",
-          data: { type: "content_block_stop", index: nextIndex },
+          data: { type: "content_block_stop", index: resultIndex },
         },
       );
-      nextIndex += 1;
     }
+    return frames;
+  }
+
+  #complete(event: Extract<CanonicalEvent, { type: "response_complete" }>): AnthropicSseFrame[] {
+    this.#assertStarted();
+    if (this.#openBlocks.size > 0) {
+      throw new Error("Anthropic stream cannot complete with open content blocks");
+    }
+    this.#completed = true;
+    const usage = encodeUsage(event.usage);
+    const webSearchExecutions = this.options.webSearchExecutions ?? [];
+    const nativeResultCount = webSearchExecutions.reduce(
+      (count, execution) => count + execution.results.length,
+      0,
+    );
     process.stderr.write(
       `[web-search-debug] ${JSON.stringify({
         event: "anthropic_stream_complete",
@@ -346,7 +376,6 @@ export class AnthropicStreamEncoder {
       );
     }
     return [
-      ...nativeWebSearchFrames,
       {
         event: "message_delta",
         data: {

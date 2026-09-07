@@ -245,8 +245,8 @@ export function encodeAnthropicResponse(
     role: "assistant",
     model: response.model,
     content: [
-      ...response.content.map((content) => encodeContent(content, options)),
       ...encodeWebSearchBlocks(options.webSearchExecutions ?? []),
+      ...response.content.map((content) => encodeContent(content, options)),
     ],
     stop_reason: stopReason,
     stop_sequence:

@@ -527,22 +527,55 @@ describe("AnthropicStreamEncoder", () => {
     expect(uuidFactory).not.toHaveBeenCalled();
   });
 
+  it("emits native Web Search blocks before answer content and offsets answer indices", () => {
+    const encoder = new AnthropicStreamEncoder({
+      webSearchExecutions: [
+        {
+          id: "call_search",
+          query: "latest news",
+          results: [{ title: "Result", url: "https://example.test", content: "body" }],
+        },
+      ],
+    });
+
+    const start = encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+    expect(start.map((frame) => frame.event)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "content_block_start",
+      "content_block_stop",
+    ]);
+    expect(start[1]?.data).toMatchObject({
+      index: 0,
+      content_block: { type: "server_tool_use", name: "web_search" },
+    });
+    expect(start[4]?.data).toMatchObject({
+      index: 1,
+      content_block: { type: "web_search_tool_result" },
+    });
+
+    expect(
+      encoder.encode({ type: "content_start", index: 0, content: { type: "text", text: "" } }),
+    ).toMatchObject([{ data: { index: 2, content_block: { type: "text" } } }]);
+    expect(encoder.encode({ type: "text_delta", index: 0, delta: "answer" })).toMatchObject([
+      { data: { index: 2, delta: { type: "text_delta", text: "answer" } } },
+    ]);
+  });
+
   it("counts synthesized Web Search blocks against the aggregate stream output limit", () => {
     const encoder = new AnthropicStreamEncoder({
-      outputLimits: { perItemBytes: 1024, perStreamBytes: 600 },
+      outputLimits: { perItemBytes: 1024, perStreamBytes: 1400 },
       webSearchExecutions: [{ id: "call_search", query: "q".repeat(200), results: [] }],
     });
-    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });
+    expect(() =>
+      encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" }),
+    ).not.toThrow();
     encoder.encode({ type: "content_start", index: 0, content: { type: "text", text: "" } });
-    encoder.encode({ type: "text_delta", index: 0, delta: "a".repeat(100) });
-    encoder.encode({ type: "content_stop", index: 0 });
 
     expect(() =>
-      encoder.encode({
-        type: "response_complete",
-        finishReason: "end_turn",
-        usage: { inputTokens: 1, outputTokens: 1, webSearchRequests: 1 },
-      }),
+      encoder.encode({ type: "text_delta", index: 0, delta: "a".repeat(500) }),
     ).toThrowError(expect.objectContaining({ scope: "stream", code: "STREAM_OUTPUT_TOO_LARGE" }));
   });
 });

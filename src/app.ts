@@ -140,6 +140,13 @@ function isProtocolAdapterError(error: unknown): boolean {
   return error instanceof OpenAIAdapterError || error instanceof ChatAdapterError;
 }
 
+function debugValueType(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+  return Array.isArray(value) ? "array" : typeof value;
+}
+
 function debugAnthropicBodyShape(body: unknown): Record<string, unknown> {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return { bodyType: Array.isArray(body) ? "array" : body === null ? "null" : typeof body };
@@ -147,8 +154,14 @@ function debugAnthropicBodyShape(body: unknown): Record<string, unknown> {
   const record = body as Record<string, unknown>;
   const messages = record.messages;
   const tools = record.tools;
+  const outputConfig =
+    typeof record.output_config === "object" &&
+    record.output_config !== null &&
+    !Array.isArray(record.output_config)
+      ? (record.output_config as Record<string, unknown>)
+      : undefined;
   return {
-    keys: Object.keys(record).sort(),
+    requestKeyCount: Object.keys(record).length,
     modelType: typeof record.model,
     maxTokensType: typeof record.max_tokens,
     ...(typeof record.max_tokens === "number" ? { maxTokens: record.max_tokens } : {}),
@@ -163,25 +176,15 @@ function debugAnthropicBodyShape(body: unknown): Record<string, unknown> {
         : Array.isArray(record.output_config)
           ? "array"
           : typeof record.output_config,
-    ...(typeof record.output_config === "object" &&
-    record.output_config !== null &&
-    !Array.isArray(record.output_config)
-      ? {
-          outputConfigKeys: Object.keys(record.output_config as Record<string, unknown>).sort(),
-          outputEffort: (record.output_config as Record<string, unknown>).effort,
-          outputFormatType:
-            typeof (record.output_config as Record<string, unknown>).format === "object" &&
-            (record.output_config as Record<string, unknown>).format !== null &&
-            !Array.isArray((record.output_config as Record<string, unknown>).format)
-              ? (
-                  (record.output_config as Record<string, unknown>).format as Record<
-                    string,
-                    unknown
-                  >
-                ).type
-              : typeof (record.output_config as Record<string, unknown>).format,
-        }
-      : {}),
+    ...(outputConfig === undefined
+      ? {}
+      : {
+          outputConfigKeyCount: Object.keys(outputConfig).length,
+          outputConfigHasEffort: Object.hasOwn(outputConfig, "effort"),
+          outputConfigHasFormat: Object.hasOwn(outputConfig, "format"),
+          outputEffortType: debugValueType(outputConfig.effort),
+          outputFormatType: debugValueType(outputConfig.format),
+        }),
     streamType: typeof record.stream,
     ...(typeof record.stream === "boolean" ? { stream: record.stream } : {}),
   };
@@ -201,14 +204,12 @@ function debugBoundaryValidation(validation: unknown): unknown {
         ? (item.params as Record<string, unknown>)
         : undefined;
     return {
-      ...(typeof item.instancePath === "string" ? { instancePath: item.instancePath } : {}),
       ...(typeof item.schemaPath === "string" ? { schemaPath: item.schemaPath } : {}),
       ...(typeof item.keyword === "string" ? { keyword: item.keyword } : {}),
-      ...(typeof item.message === "string" ? { message: item.message } : {}),
-      ...(params?.missingProperty !== undefined ? { missingProperty: params.missingProperty } : {}),
-      ...(params?.additionalProperty !== undefined
-        ? { additionalProperty: params.additionalProperty }
-        : {}),
+      hasInstancePath: typeof item.instancePath === "string",
+      hasMessage: typeof item.message === "string",
+      hasMissingProperty: params?.missingProperty !== undefined,
+      hasAdditionalProperty: params?.additionalProperty !== undefined,
     };
   });
 }

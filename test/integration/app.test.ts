@@ -975,10 +975,15 @@ describe("Web Search execution", () => {
       expect(response.headers["content-type"]).toContain("text/event-stream");
       expect(response.body).toContain("No results found.");
       expect(response.body).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
+      const searchPosition = response.body.indexOf('"type":"server_tool_use"');
+      const resultPosition = response.body.indexOf('"type":"web_search_tool_result"');
+      const answerPosition = response.body.indexOf("No results found.");
+      expect(searchPosition).toBeGreaterThan(-1);
+      expect(resultPosition).toBeGreaterThan(searchPosition);
+      expect(answerPosition).toBeGreaterThan(resultPosition);
     } else {
       expect(response.json()).toMatchObject({
         content: [
-          { type: "text", text: "No results found." },
           {
             type: "server_tool_use",
             id: "srvtoolu_ai_hub_0",
@@ -990,6 +995,7 @@ describe("Web Search execution", () => {
             tool_use_id: "srvtoolu_ai_hub_0",
             content: [],
           },
+          { type: "text", text: "No results found." },
         ],
         stop_reason: "end_turn",
         usage: { server_tool_use: { web_search_requests: 1 } },
@@ -1182,6 +1188,40 @@ describe("Anthropic Messages conversion", () => {
     });
 
     expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not log arbitrary malformed output_config values", async () => {
+    const privateEffort = "private-output-effort";
+    const privateFormat = "private-format-kind";
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const app = createApp({}, async () => {
+        throw new Error("upstream must not be called");
+      });
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/messages",
+        headers: { "content-type": "application/json", "x-api-key": "caller-key" },
+        payload: {
+          model: "vendor/model-1",
+          max_tokens: 64,
+          output_config: {
+            effort: { secret: privateEffort },
+            format: { type: privateFormat },
+          },
+          messages: [{ role: "user", content: "hello" }],
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      const logged = write.mock.calls.map(([chunk]) => String(chunk)).join("");
+      expect(logged).not.toContain(privateEffort);
+      expect(logged).not.toContain(privateFormat);
+      expect(logged).toContain('"outputEffortType":"object"');
+      expect(logged).toContain('"outputFormatType":"object"');
+    } finally {
+      write.mockRestore();
+    }
   });
 
   it("converts an upstream refusal to text with a refusal stop reason", async () => {
