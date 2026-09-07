@@ -1,0 +1,41 @@
+name: Fix PR 13 Server Tool Input
+
+on:
+  push:
+    branches:
+      - debug/web-search-usage-logs
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-usage-logs
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Patch server tool start frame and validate
+        run: |
+          python -c 'from pathlib import Path; p=Path("src/protocols/anthropic/stream-encode.ts"); s=p.read_text(); old="            content_block: { type: \"server_tool_use\", id: toolUseId, name: \"web_search\" },"; new="            content_block: { type: \"server_tool_use\", id: toolUseId, name: \"web_search\", input: {} },"; assert old in s; p.write_text(s.replace(old,new,1))'
+          pnpm format
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+          pnpm test:coverage
+          pnpm build
+          rm .github/workflows/fix-pr13-server-tool-input.yml
+          git config user.name "TigerKK"
+          git config user.email "545551320@qq.com"
+          git add -A
+          git commit -m "fix: initialize streamed server tool input"
+          git push origin HEAD:debug/web-search-usage-logs
