@@ -8,6 +8,7 @@ export interface ResponsesInputTokensRequest {
   tool_choice?: ReturnType<typeof encodeResponsesRequest>["tool_choice"];
   parallel_tool_calls?: boolean;
   reasoning?: ReturnType<typeof encodeResponsesRequest>["reasoning"];
+  text?: ReturnType<typeof encodeResponsesRequest>["text"];
 }
 
 export function encodeResponsesInputTokensRequest(
@@ -26,6 +27,7 @@ export function encodeResponsesInputTokensRequest(
       ? {}
       : { parallel_tool_calls: encoded.parallel_tool_calls }),
     ...(encoded.reasoning === undefined ? {} : { reasoning: encoded.reasoning }),
+    ...(encoded.text === undefined ? {} : { text: encoded.text }),
   };
 }
 
