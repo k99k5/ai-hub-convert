@@ -33,7 +33,10 @@ export function hasInternalWebSearchTool(path: CompletionPath, body: unknown): b
   });
 }
 
-export function forceNonStreamingBody(path: CompletionPath, body: unknown): Record<string, unknown> {
+export function forceNonStreamingBody(
+  path: CompletionPath,
+  body: unknown,
+): Record<string, unknown> {
   if (!isRecord(body)) {
     throw new Error("Web Search tool loop requires an object request body");
   }
@@ -223,11 +226,9 @@ function synthesizeResponsesStream(response: Record<string, unknown>): string {
       }),
     );
   });
-  const terminalType = response.status === "incomplete" ? "response.incomplete" : "response.completed";
-  frames.push(
-    sse(terminalType, { type: terminalType, response }),
-    sse(undefined, "[DONE]"),
-  );
+  const terminalType =
+    response.status === "incomplete" ? "response.incomplete" : "response.completed";
+  frames.push(sse(terminalType, { type: terminalType, response }), sse(undefined, "[DONE]"));
   return frames.join("");
 }
 
