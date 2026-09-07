@@ -1,6 +1,10 @@
 import type { CanonicalRequest, Content, Message, ToolChoice } from "../../core/ir.js";
 import type { PromptCacheCapability } from "../../policies/cache/capabilities.js";
-import { WebSearchUnsupportedError } from "../../providers/web-search/unsupported.js";
+import {
+  INTERNAL_WEB_SEARCH_TOOL_DESCRIPTION,
+  INTERNAL_WEB_SEARCH_TOOL_NAME,
+  INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
+} from "../../providers/web-search/internal.js";
 import {
   OpenAIAdapterError,
   type ResponsesInputContent,
@@ -122,9 +126,19 @@ function encodeMessage(message: Message): ResponsesInputItem[] {
   return items;
 }
 
-function encodeToolChoice(choice: ToolChoice): ResponsesToolChoice {
+function hasBuiltInWebSearch(request: CanonicalRequest): boolean {
+  return request.tools.some((tool) => tool.type === "web_search");
+}
+
+function encodeToolChoice(choice: ToolChoice, request: CanonicalRequest): ResponsesToolChoice {
   if (choice.type === "function") {
-    return { type: "function", name: choice.name };
+    return {
+      type: "function",
+      name:
+        choice.name === "web_search" && hasBuiltInWebSearch(request)
+          ? INTERNAL_WEB_SEARCH_TOOL_NAME
+          : choice.name,
+    };
   }
   return choice.type;
 }
@@ -160,7 +174,13 @@ export function encodeResponsesRequest(
       : {
           tools: request.tools.map((tool) => {
             if (tool.type === "web_search") {
-              throw new WebSearchUnsupportedError();
+              return {
+                type: "function" as const,
+                name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+                description: INTERNAL_WEB_SEARCH_TOOL_DESCRIPTION,
+                parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
+                strict: true,
+              };
             }
             return {
               type: "function" as const,
@@ -173,7 +193,7 @@ export function encodeResponsesRequest(
         }),
     ...(request.toolChoice === undefined
       ? {}
-      : { tool_choice: encodeToolChoice(request.toolChoice) }),
+      : { tool_choice: encodeToolChoice(request.toolChoice, request) }),
     ...(request.parallelToolCalls === undefined
       ? {}
       : { parallel_tool_calls: request.parallelToolCalls }),
