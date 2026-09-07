@@ -97,9 +97,14 @@ export type AnthropicToolChoice =
 
 export type AnthropicReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max" | null;
 
+export interface AnthropicJsonSchemaOutputFormat {
+  type: "json_schema";
+  schema: Record<string, unknown>;
+}
+
 export interface AnthropicOutputConfig {
   effort?: AnthropicReasoningEffort;
-  format?: null;
+  format?: AnthropicJsonSchemaOutputFormat | null;
 }
 
 export type AnthropicThinkingConfig =
