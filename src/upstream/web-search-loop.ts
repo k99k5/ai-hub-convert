@@ -17,6 +17,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export function getWebSearchRequestCount(response: unknown): number | undefined {
+  if (!isRecord(response) || !isRecord(response.usage) || !isRecord(response.usage.server_tool_use)) {
+    return undefined;
+  }
+  const value = response.usage.server_tool_use.web_search_requests;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+export function attachWebSearchRequestCount(response: unknown, count: number): unknown {
+  if (!isRecord(response) || !Number.isSafeInteger(count) || count <= 0) {
+    return response;
+  }
+  const usage = isRecord(response.usage) ? response.usage : {};
+  const serverToolUse = isRecord(usage.server_tool_use) ? usage.server_tool_use : {};
+  const existing =
+    typeof serverToolUse.web_search_requests === "number" &&
+    Number.isSafeInteger(serverToolUse.web_search_requests) &&
+    serverToolUse.web_search_requests >= 0
+      ? serverToolUse.web_search_requests
+      : 0;
+  return {
+    ...response,
+    usage: {
+      ...usage,
+      server_tool_use: {
+        ...serverToolUse,
+        web_search_requests: existing + count,
+      },
+    },
+  };
+}
+
 function isInternalWebSearchTool(path: CompletionPath, rawTool: unknown): boolean {
   if (!isRecord(rawTool)) {
     return false;
@@ -228,9 +260,15 @@ export function synthesizeCompletionStream(path: CompletionPath, response: unkno
   }
   const body =
     path === "responses" ? synthesizeResponsesStream(response) : synthesizeChatStream(response);
+  const webSearchRequests = getWebSearchRequestCount(response);
   return new Response(body, {
     status: 200,
-    headers: { "content-type": "text/event-stream; charset=utf-8" },
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      ...(webSearchRequests === undefined
+        ? {}
+        : { "x-ai-hub-web-search-requests": String(webSearchRequests) }),
+    },
   });
 }
 

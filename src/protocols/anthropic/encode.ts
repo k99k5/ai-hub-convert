@@ -179,9 +179,12 @@ function encodeStopReason(finishReason: FinishReason): AnthropicStopReason {
 function encodeUsage(response: CanonicalResponse): AnthropicUsage {
   const cacheRead = response.usage.cacheReadInputTokens;
   const cacheWrite = response.usage.cacheWriteInputTokens;
+  const webSearchRequests = response.usage.webSearchRequests;
   if (
     (cacheRead !== undefined && (!Number.isFinite(cacheRead) || cacheRead < 0)) ||
     (cacheWrite !== undefined && (!Number.isFinite(cacheWrite) || cacheWrite < 0)) ||
+    (webSearchRequests !== undefined &&
+      (!Number.isSafeInteger(webSearchRequests) || webSearchRequests < 0)) ||
     !Number.isFinite(response.usage.inputTokens) ||
     !Number.isFinite(response.usage.outputTokens) ||
     response.usage.outputTokens < 0
@@ -193,6 +196,9 @@ function encodeUsage(response: CanonicalResponse): AnthropicUsage {
     output_tokens: response.usage.outputTokens,
     ...(cacheRead !== undefined ? { cache_read_input_tokens: cacheRead } : {}),
     ...(cacheWrite !== undefined ? { cache_creation_input_tokens: cacheWrite } : {}),
+    ...(webSearchRequests !== undefined
+      ? { server_tool_use: { web_search_requests: webSearchRequests } }
+      : {}),
   };
 }
 
