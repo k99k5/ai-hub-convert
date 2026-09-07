@@ -1,4 +1,3 @@
-import { Buffer } from "node:buffer";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../providers/web-search/internal.js";
 import type { WebSearchRequest, WebSearchResult } from "../providers/web-search/types.js";
 
@@ -84,19 +83,6 @@ export function getWebSearchExecutions(response: unknown): WebSearchExecution[] 
     : [];
 }
 
-export function decodeWebSearchExecutionsHeader(value: string | null): WebSearchExecution[] {
-  if (value === null || value.length === 0) {
-    return [];
-  }
-  try {
-    return normalizeWebSearchExecutions(
-      JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as unknown,
-    );
-  } catch {
-    return [];
-  }
-}
-
 export function getWebSearchRequestCount(response: unknown): number | undefined {
   if (
     !isRecord(response) ||
@@ -162,6 +148,7 @@ export function disableInternalWebSearchTool(
     ...(tools === undefined ? {} : { tools }),
   };
   const toolChoice = next.tool_choice;
+  if (toolChoice === "required" && tools?.length === 0) next.tool_choice = "auto";
   if (path === "responses") {
     if (
       isRecord(toolChoice) &&
@@ -179,6 +166,20 @@ export function disableInternalWebSearchTool(
     next.tool_choice = "auto";
   }
   return next;
+}
+
+export function releaseWebSearchToolChoice(
+  path: CompletionPath,
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const choice = body.tool_choice;
+  const forcedSearch =
+    isRecord(choice) &&
+    choice.type === "function" &&
+    (path === "responses"
+      ? choice.name === INTERNAL_WEB_SEARCH_TOOL_NAME
+      : isRecord(choice.function) && choice.function.name === INTERNAL_WEB_SEARCH_TOOL_NAME);
+  return forcedSearch || choice === "required" ? { ...body, tool_choice: "auto" } : body;
 }
 
 export function forceNonStreamingBody(
@@ -336,126 +337,4 @@ function appendChatResults(
   };
   delete next.stream_options;
   return next;
-}
-
-export function synthesizeCompletionStream(path: CompletionPath, response: unknown): Response {
-  if (!isRecord(response)) {
-    throw new Error("Cannot synthesize an event stream from an invalid upstream response");
-  }
-  const webSearchExecutions = getWebSearchExecutions(response);
-  const { [INTERNAL_WEB_SEARCH_TRACE_KEY]: _trace, ...streamResponse } = response;
-  const body =
-    path === "responses"
-      ? synthesizeResponsesStream(streamResponse)
-      : synthesizeChatStream(streamResponse);
-  const webSearchRequests = getWebSearchRequestCount(response);
-  const traceHeader =
-    webSearchExecutions.length === 0
-      ? undefined
-      : Buffer.from(JSON.stringify(webSearchExecutions), "utf8").toString("base64url");
-  return new Response(body, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      ...(webSearchRequests === undefined
-        ? {}
-        : { "x-ai-hub-web-search-requests": String(webSearchRequests) }),
-      ...(traceHeader === undefined ? {} : { "x-ai-hub-web-search-trace": traceHeader }),
-    },
-  });
-}
-
-function sse(event: string | undefined, data: unknown): string {
-  return `${event ? `event: ${event}\n` : ""}data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`;
-}
-
-function normalizeSynthesizedResponsesItem(item: unknown): unknown {
-  if (!isRecord(item) || item.type !== "message" || !Array.isArray(item.content)) {
-    return item;
-  }
-  return {
-    ...item,
-    content: item.content.map((rawPart) => {
-      if (
-        !isRecord(rawPart) ||
-        rawPart.type !== "output_text" ||
-        Array.isArray(rawPart.annotations)
-      ) {
-        return rawPart;
-      }
-      return { ...rawPart, annotations: [] };
-    }),
-  };
-}
-
-function synthesizeResponsesStream(response: Record<string, unknown>): string {
-  if (typeof response.id !== "string" || typeof response.model !== "string") {
-    throw new Error("Cannot synthesize a Responses stream without id and model");
-  }
-  const frames: string[] = [
-    sse("response.created", {
-      type: "response.created",
-      response: { id: response.id, model: response.model },
-    }),
-  ];
-  const output = Array.isArray(response.output) ? response.output : [];
-  output.forEach((rawItem, outputIndex) => {
-    const item = normalizeSynthesizedResponsesItem(rawItem);
-    frames.push(
-      sse("response.output_item.added", {
-        type: "response.output_item.added",
-        output_index: outputIndex,
-        item,
-      }),
-      sse("response.output_item.done", {
-        type: "response.output_item.done",
-        output_index: outputIndex,
-        item,
-      }),
-    );
-  });
-  const terminalType =
-    response.status === "incomplete" ? "response.incomplete" : "response.completed";
-  frames.push(sse(terminalType, { type: terminalType, response }), sse(undefined, "[DONE]"));
-  return frames.join("");
-}
-
-function synthesizeChatStream(response: Record<string, unknown>): string {
-  if (typeof response.id !== "string" || typeof response.model !== "string") {
-    throw new Error("Cannot synthesize a Chat stream without id and model");
-  }
-  const choices = Array.isArray(response.choices) ? response.choices : [];
-  const first = isRecord(choices[0]) ? choices[0] : undefined;
-  const message = first && isRecord(first.message) ? first.message : {};
-  const toolCalls = Array.isArray(message.tool_calls)
-    ? message.tool_calls.map((rawCall, index) =>
-        isRecord(rawCall) ? { ...rawCall, index } : rawCall,
-      )
-    : undefined;
-  const delta = {
-    role: "assistant",
-    ...(typeof message.reasoning_content === "string"
-      ? { reasoning_content: message.reasoning_content }
-      : typeof message.reasoning === "string"
-        ? { reasoning: message.reasoning }
-        : {}),
-    ...(typeof message.content === "string" ? { content: message.content } : {}),
-    ...(toolCalls === undefined ? {} : { tool_calls: toolCalls }),
-  };
-  const chunk = {
-    id: response.id,
-    model: response.model,
-    choices: [
-      {
-        index: 0,
-        delta,
-        finish_reason:
-          first && (typeof first.finish_reason === "string" || first.finish_reason === null)
-            ? first.finish_reason
-            : "stop",
-      },
-    ],
-    ...(isRecord(response.usage) ? { usage: response.usage } : {}),
-  };
-  return sse(undefined, chunk) + sse(undefined, "[DONE]");
 }

@@ -80,6 +80,8 @@ export class ResponsesStreamEncoder {
         throw new Error("Anthropic signatures cannot be encoded as Responses reasoning");
       case "citation_delta":
         return this.#citationDelta(event.index, event.citation);
+      case "web_search_result":
+        return [];
     }
   }
 

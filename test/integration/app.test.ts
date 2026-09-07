@@ -1,3 +1,4 @@
+import { responsesStream } from "../helpers/upstream.js";
 import { request as httpRequest, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
@@ -896,6 +897,7 @@ describe("Web Search execution", () => {
     false,
     true,
   ])("executes Anthropic built-in search with an empty provider result for stream=%s", async (stream) => {
+    const upstreamResponse = stream ? responsesStream : Response.json;
     const upstreamBodies: Record<string, unknown>[] = [];
     let round = 0;
     const app = createApp({}, async (input, init) => {
@@ -903,7 +905,7 @@ describe("Web Search execution", () => {
       upstreamBodies.push((await request.json()) as Record<string, unknown>);
       round += 1;
       if (round === 1) {
-        return Response.json({
+        return upstreamResponse({
           id: "resp_search",
           model: "vendor/model-1",
           status: "completed",
@@ -920,7 +922,7 @@ describe("Web Search execution", () => {
           usage: { input_tokens: 5, output_tokens: 1 },
         });
       }
-      return Response.json({
+      return upstreamResponse({
         id: "resp_final",
         model: "vendor/model-1",
         status: "completed",

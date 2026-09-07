@@ -1,3 +1,4 @@
+import { collect, responsesStream } from "../helpers/upstream.js";
 import { describe, expect, it } from "vitest";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
 import { UpstreamClient } from "../../src/upstream/client.js";
@@ -109,7 +110,7 @@ describe("Upstream Web Search tool loop", () => {
     );
   });
 
-  it("buffers a Web Search round and synthesizes a valid Responses event stream", async () => {
+  it("streams Web Search rounds as canonical events", async () => {
     const responses = [
       {
         id: "resp_search",
@@ -148,7 +149,7 @@ describe("Upstream Web Search tool loop", () => {
       if (!response) {
         throw new Error("Unexpected upstream request");
       }
-      return jsonResponse(response);
+      return responsesStream(response);
     };
     const client = new UpstreamClient({
       baseUrl: new URL("https://upstream.test/v1/"),
@@ -156,7 +157,7 @@ describe("Upstream Web Search tool loop", () => {
       fetch,
     });
 
-    const response = await client.postStream(
+    const response = client.streamCompletion(
       "responses",
       {
         model: "deepseek-test",
@@ -175,13 +176,14 @@ describe("Upstream Web Search tool loop", () => {
       "test-key",
       new AbortController().signal,
     );
-    const text = await response.text();
-
-    expect(response.headers.get("content-type")).toContain("text/event-stream");
-    expect(text).toContain("response.created");
-    expect(text).toContain("No results found.");
-    expect(text).toContain("[DONE]");
-    expect(text).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
+    const events = await collect(response);
+    expect(events.filter((event) => event.type === "response_start")).toHaveLength(1);
+    expect(events).toContainEqual({ type: "text_delta", index: 0, delta: "No results found." });
+    expect(events.at(-1)).toMatchObject({
+      type: "response_complete",
+      usage: { inputTokens: 13, outputTokens: 6, webSearchRequests: 1 },
+    });
+    expect(JSON.stringify(events)).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
   });
 
   it("executes the same empty-result loop for Chat Completions fallback", async () => {

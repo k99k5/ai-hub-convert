@@ -53,7 +53,10 @@ export class AnthropicStreamEncoder {
   readonly #seenIndices = new Set<number>();
   readonly #argumentLimiter: ToolArgumentStreamLimiter;
   readonly #outputLimiter: StreamOutputLimiter;
-  readonly #contentIndexOffset: number;
+  #contentIndexOffset: number;
+  #nextOutputIndex: number;
+  #searchCount: number;
+  #responseId = "";
 
   constructor(private readonly options: AnthropicStreamEncoderOptions = {}) {
     this.#argumentLimiter = new ToolArgumentStreamLimiter(
@@ -63,6 +66,8 @@ export class AnthropicStreamEncoder {
       options.outputLimits ?? DEFAULT_STREAM_OUTPUT_LIMITS,
     );
     this.#contentIndexOffset = (options.webSearchExecutions?.length ?? 0) * 2;
+    this.#nextOutputIndex = this.#contentIndexOffset;
+    this.#searchCount = options.webSearchExecutions?.length ?? 0;
   }
 
   encode(event: CanonicalEvent): AnthropicSseFrame[] {
@@ -145,6 +150,21 @@ export class AnthropicStreamEncoder {
         return this.#stopContent(event.index);
       case "response_complete":
         return this.#complete(event);
+      case "web_search_result": {
+        this.#assertStarted();
+        if (this.#openBlocks.size > 0)
+          throw new Error("Search results require closed content blocks");
+        const frames = this.#webSearchPrefixFrames(
+          this.#responseId,
+          [event.execution],
+          this.#nextOutputIndex,
+          this.#searchCount,
+        );
+        this.#contentIndexOffset += 2;
+        this.#nextOutputIndex += 2;
+        this.#searchCount++;
+        return frames;
+      }
       case "response_error":
         this.#assertStarted();
         this.#completed = true;
@@ -165,6 +185,7 @@ export class AnthropicStreamEncoder {
       throw new Error("Anthropic stream has already started");
     }
     this.#started = true;
+    this.#responseId = event.id;
     return [
       {
         event: "message_start",
@@ -193,6 +214,7 @@ export class AnthropicStreamEncoder {
     }
     this.#seenIndices.add(index);
     const outputIndex = this.#outputIndex(index);
+    this.#nextOutputIndex = Math.max(this.#nextOutputIndex, outputIndex + 1);
     this.#outputLimiter.addBytes(outputIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
     if (content.type === "function_call") {
       this.#outputLimiter.addUnrelated(outputIndex, content.id);
@@ -293,11 +315,17 @@ export class AnthropicStreamEncoder {
     return index + this.#contentIndexOffset;
   }
 
-  #webSearchPrefixFrames(responseId: string): AnthropicSseFrame[] {
+  #webSearchPrefixFrames(
+    responseId: string,
+    executions = this.options.webSearchExecutions ?? [],
+    startIndex = 0,
+    startSearchIndex = 0,
+  ): AnthropicSseFrame[] {
     const frames: AnthropicSseFrame[] = [];
-    for (const [searchIndex, execution] of (this.options.webSearchExecutions ?? []).entries()) {
+    for (const [localIndex, execution] of executions.entries()) {
+      const searchIndex = startSearchIndex + localIndex;
       const toolUseId = createWebSearchToolUseId(responseId, execution.id, searchIndex);
-      const toolIndex = searchIndex * 2;
+      const toolIndex = startIndex + localIndex * 2;
       const resultIndex = toolIndex + 1;
       const queryJson = JSON.stringify({ query: execution.query });
 

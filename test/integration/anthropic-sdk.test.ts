@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
-import { synthesizeCompletionStream } from "../../src/upstream/web-search-loop.js";
+import { responsesStream } from "../helpers/upstream.js";
 
 const apps: Array<ReturnType<typeof buildApp>> = [];
 
@@ -49,7 +49,7 @@ afterEach(async () => {
 describe("Anthropic SDK 兼容性", () => {
   it("通过高级流聚合完整的 Web Search 引用", async () => {
     const client = await createAnthropicClient(async () =>
-      synthesizeCompletionStream("responses", {
+      responsesStream({
         id: "resp_sdk_citation",
         model: "vendor/model-1",
         status: "completed",

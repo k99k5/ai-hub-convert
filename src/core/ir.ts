@@ -78,6 +78,9 @@ export interface FunctionTool {
 export interface WebSearchTool {
   type: "web_search";
   provider: "web-search";
+  maxUses?: number;
+  allowedDomains?: string[];
+  blockedDomains?: string[];
   version:
     | "web_search_20250305"
     | "web_search_20260209"

@@ -56,8 +56,8 @@ export function loadConfig(environment: Environment = process.env): AppConfig {
       connectionTimeoutMs: parseInteger(
         environment.CONNECTION_TIMEOUT_MS,
         "CONNECTION_TIMEOUT_MS",
-        10_000,
-        { min: 1 },
+        0,
+        { min: 0 },
       ),
       requestTimeoutMs: parseInteger(environment.REQUEST_TIMEOUT_MS, "REQUEST_TIMEOUT_MS", 30_000, {
         min: 1,

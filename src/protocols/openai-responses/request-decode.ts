@@ -109,7 +109,7 @@ function decodeImage(value: unknown): Content {
   return { type: "image", source: { type: "url", url: imageUrl } };
 }
 
-function decodeMessageContent(value: unknown): Content[] {
+function decodeMessageContent(value: unknown, role: Message["role"]): Content[] {
   if (typeof value === "string") {
     return [{ type: "text", text: value }];
   }
@@ -118,11 +118,14 @@ function decodeMessageContent(value: unknown): Content[] {
   }
   return value.map((rawPart) => {
     const part = record(rawPart, "message content item");
-    if (part.type === "input_text") {
+    if (part.type === "input_text" || (role === "assistant" && part.type === "output_text")) {
       if (typeof part.text !== "string") {
         return invalid("Invalid OpenAI Responses request: input_text text must be a string");
       }
       return { type: "text" as const, text: part.text };
+    }
+    if (role === "assistant" && part.type === "refusal" && typeof part.refusal === "string") {
+      return { type: "refusal" as const, refusal: part.refusal };
     }
     if (part.type === "input_image" && part.file_id === undefined) {
       return decodeImage(part.image_url);
@@ -136,7 +139,7 @@ function decodeMessage(item: Record<string, unknown>): Message {
   if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") {
     return invalid("Invalid OpenAI Responses request: unsupported message role");
   }
-  return { role, content: decodeMessageContent(item.content) };
+  return { role, content: decodeMessageContent(item.content, role) };
 }
 
 function decodeReasoning(item: Record<string, unknown>): Message {
@@ -326,6 +329,9 @@ function decodeTools(value: unknown): CanonicalTool[] {
         type: "web_search" as const,
         provider: "web-search" as const,
         version: tool.type,
+        ...(isRecord(tool.filters) && Array.isArray(tool.filters.allowed_domains)
+          ? { allowedDomains: [...tool.filters.allowed_domains] as string[] }
+          : {}),
       };
     }
     if (tool.type !== "function") {

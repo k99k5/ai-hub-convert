@@ -21,6 +21,7 @@ interface StreamItem {
   bodyHash: Hash;
   annotationHash: Hash;
   annotationCount: number;
+  refusalHash?: Hash;
 }
 
 interface ParsedMessageBody {
@@ -39,6 +40,7 @@ const IGNORED_EVENTS = new Set([
   "response.content_part.added",
   "response.content_part.done",
   "response.output_text.done",
+  "response.refusal.done",
   "response.function_call_arguments.done",
   "response.reasoning_summary_part.added",
   "response.reasoning_summary_part.done",
@@ -86,6 +88,16 @@ export class ResponsesStreamDecoder {
         return this.#decodeItemAdded(payload);
       case "response.output_text.delta":
         return [this.#decodeDelta(payload, "message", "text_delta")];
+      case "response.refusal.delta": {
+        const index = readInteger(payload, "output_index");
+        const item = this.#items.get(index);
+        if (item?.type !== "message" || readString(payload, "item_id") !== item.itemId) {
+          throw new Error("Responses refusal does not match an open message");
+        }
+        item.refusalHash ??= createHash("sha256");
+        item.refusalHash.update(readString(payload, "delta"), "utf8");
+        return [];
+      }
       case "response.output_text.annotation.added":
         return [this.#decodeAnnotation(payload)];
       case "response.reasoning_summary_text.delta":
@@ -349,6 +361,12 @@ export class ResponsesStreamDecoder {
         throw new Error(`Responses output item ${index} done role does not match`);
       }
       message = readMessageBody(doneItem, index);
+      if (
+        openItem.refusalHash &&
+        openItem.refusalHash.digest("hex") !== hashText(message.refusalText)
+      ) {
+        throw new Error(`Responses output item ${index} done refusal does not match`);
+      }
       doneBody = message.text;
       doneAnnotations = message.annotations.map((annotation) => annotation.hashValue);
     } else if (openItem.type === "reasoning") {

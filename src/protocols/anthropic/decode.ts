@@ -448,7 +448,7 @@ function validateWebSearchTool(tool: Record<string, unknown>): void {
   if (
     tool.max_uses !== undefined &&
     tool.max_uses !== null &&
-    (typeof tool.max_uses !== "number" || !Number.isFinite(tool.max_uses))
+    (typeof tool.max_uses !== "number" || !Number.isSafeInteger(tool.max_uses) || tool.max_uses < 0)
   ) {
     invalidRequest();
   }
@@ -519,6 +519,13 @@ function parseTools(value: unknown): CanonicalTool[] {
         type: "web_search" as const,
         provider: "web-search" as const,
         version: tool.type,
+        ...(typeof tool.max_uses === "number" ? { maxUses: tool.max_uses } : {}),
+        ...(Array.isArray(tool.allowed_domains)
+          ? { allowedDomains: [...tool.allowed_domains] as string[] }
+          : {}),
+        ...(Array.isArray(tool.blocked_domains)
+          ? { blockedDomains: [...tool.blocked_domains] as string[] }
+          : {}),
       };
     }
     if (!isRecord(tool.input_schema) || !isJsonValue(tool.input_schema)) {

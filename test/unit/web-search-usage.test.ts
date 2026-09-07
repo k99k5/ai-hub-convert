@@ -1,3 +1,4 @@
+import { collect, responsesStream } from "../helpers/upstream.js";
 import { describe, expect, it } from "vitest";
 import { encodeAnthropicResponse } from "../../src/protocols/anthropic/encode.js";
 import { AnthropicStreamEncoder } from "../../src/protocols/anthropic/stream-encode.js";
@@ -8,10 +9,7 @@ import {
 } from "../../src/providers/web-search/internal.js";
 import type { WebSearchProvider } from "../../src/providers/web-search/types.js";
 import { UpstreamClient } from "../../src/upstream/client.js";
-import {
-  decodeWebSearchExecutionsHeader,
-  getWebSearchRequestCount,
-} from "../../src/upstream/web-search-loop.js";
+import { getWebSearchRequestCount } from "../../src/upstream/web-search-loop.js";
 
 describe("Web Search usage reporting", () => {
   it("counts an executed search even when the provider returns zero results", async () => {
@@ -78,7 +76,7 @@ describe("Web Search usage reporting", () => {
     expect(getWebSearchRequestCount(result)).toBe(1);
   });
 
-  it("carries real web search query and results into synthesized stream metadata", async () => {
+  it("emits real web search query and results during the stream", async () => {
     const responses = [
       {
         id: "resp_search",
@@ -121,14 +119,11 @@ describe("Web Search usage reporting", () => {
         if (body === undefined) {
           throw new Error("Unexpected upstream request");
         }
-        return new Response(JSON.stringify(body), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
+        return responsesStream(body);
       },
     });
 
-    const stream = await client.postStream(
+    const stream = client.streamCompletion(
       "responses",
       {
         stream: true,
@@ -145,8 +140,9 @@ describe("Web Search usage reporting", () => {
       new AbortController().signal,
     );
 
+    const events = await collect(stream);
     expect(
-      decodeWebSearchExecutionsHeader(stream.headers.get("x-ai-hub-web-search-trace")),
+      events.filter((event) => event.type === "web_search_result").map((event) => event.execution),
     ).toEqual([
       {
         id: "call_search",

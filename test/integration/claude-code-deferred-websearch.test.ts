@@ -1,3 +1,4 @@
+import { responsesStream } from "../helpers/upstream.js";
 import { afterEach, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
@@ -20,7 +21,7 @@ it("owns Claude Code deferred WebSearch and completes an empty search without le
       bodies.push((await request.json()) as Record<string, unknown>);
       round += 1;
       if (round === 1) {
-        return Response.json({
+        return responsesStream({
           id: "resp_search",
           model: "deepseek-v4-flash",
           status: "completed",
@@ -37,7 +38,7 @@ it("owns Claude Code deferred WebSearch and completes an empty search without le
           usage: { input_tokens: 5, output_tokens: 1 },
         });
       }
-      return Response.json({
+      return responsesStream({
         id: "resp_final",
         model: "deepseek-v4-flash",
         status: "completed",

@@ -82,6 +82,9 @@ Claude Code cache policy 只有 strict SemVer 识别成功且范围内才启用�
 - Anthropic SSE 顺序：`message_start → content block events → message_delta → message_stop`。
 - Anthropic keepalive 使用命名 `event: ping`。
 - Responses SSE 重新生成单调 `sequence_number`，终态后发送 `[DONE]`。
+- Web Search 的各轮模型调用保持真实 SSE；普通输出实时转发，内部 function 不暴露给客户端。Anthropic 在搜索等待期间持续发送 ping，并在搜索结果到达时输出对应的原生搜索块。
+- 模型轮次、搜索执行和受限回退共享请求总超时；最终 token/cache usage 累计所有轮次，后续轮次的 HTTP 错误不能触发 Chat 回退。
+- `CONNECTION_TIMEOUT_MS=0` 默认禁用 socket 空闲超时，避免在上游总超时或 SSE 首字节/idle 超时之前截断有效请求。
 - 首帧前错误返回入口协议的 HTTP JSON；首帧后错误返回入口协议的流内 error。
 - 三条 POST route 使用保留未知字段、禁止类型强转的浅层 wire schema；adapter 继续负责精确语义校验。schema 与 malformed JSON 返回入口协议的固定 HTTP 400，body 超限返回固定 HTTP 413。
 - 单帧 SSE、成功 JSON body、错误外壳 body、单输出项/保留状态、整条流输出/状态、工具参数、请求 body、首字节等待、流 idle 与请求总时长都有上限；malformed upstream SSE UTF-8 fail-closed。

@@ -192,6 +192,7 @@ describe("decodeAnthropicRequest", () => {
         type: "web_search",
         provider: "web-search",
         version: "web_search_20250305",
+        maxUses: 2,
       },
       {
         type: "function",
@@ -867,7 +868,9 @@ describe("decodeAnthropicRequest", () => {
           },
         ],
       }).tools,
-    ).toEqual([{ type: "web_search", provider: "web-search", version: "web_search_20250305" }]);
+    ).toEqual([
+      { type: "web_search", provider: "web-search", version: "web_search_20250305", maxUses: 3 },
+    ]);
 
     const malformedOptions: Record<string, unknown>[] = [
       { name: "not_web_search" },

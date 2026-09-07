@@ -1,19 +1,11 @@
 import { EmptyWebSearchProvider } from "../providers/web-search/empty.js";
 import { createDefaultWebSearchRegistry } from "../providers/web-search/preflight.js";
 import type { WebSearchProvider } from "../providers/web-search/types.js";
-import {
-  appendWebSearchResults,
-  attachWebSearchExecutions,
-  attachWebSearchRequestCount,
-  decodeWebSearchRequest,
-  disableInternalWebSearchTool,
-  encodeWebSearchResults,
-  extractInternalToolCalls,
-  forceNonStreamingBody,
-  hasInternalWebSearchTool,
-  synthesizeCompletionStream,
-  type WebSearchExecution,
-} from "./web-search-loop.js";
+import type { CanonicalEvent } from "../core/events.js";
+import type { WebSearchTool } from "../core/ir.js";
+import { streamCompletion, type CompletionStreamOptions } from "./completion-stream.js";
+import { WebSearchSession } from "./web-search-session.js";
+import { forceNonStreamingBody, hasInternalWebSearchTool } from "./web-search-loop.js";
 
 type UpstreamPath = "responses" | "responses/input_tokens" | "chat/completions";
 type CompletionPath = Exclude<UpstreamPath, "responses/input_tokens">;
@@ -44,6 +36,7 @@ export class UpstreamHttpError extends Error {
   readonly status: number;
   readonly code?: string;
   readonly requestId?: string;
+  hasUpstreamSemanticEvent = false;
 
   constructor(status: number, options: { code?: string; requestId?: string }) {
     super(`Upstream request failed with status ${status}`);
@@ -90,9 +83,12 @@ export class UpstreamClient {
     body: unknown,
     apiKey: string,
     signal: AbortSignal,
+    webSearch?: WebSearchTool,
   ): Promise<unknown> {
+    signal = AbortSignal.any([signal, AbortSignal.timeout(this.#timeoutMs)]);
+    signal.throwIfAborted();
     if (path !== "responses/input_tokens" && hasInternalWebSearchTool(path, body)) {
-      return this.#postJsonWithWebSearchLoop(path, body, apiKey, signal);
+      return this.#postJsonWithWebSearchLoop(path, body, apiKey, signal, webSearch);
     }
     const response = await this.#post(path, body, apiKey, signal);
     return readJsonBody(response, this.#jsonBodyLimitBytes);
@@ -104,22 +100,49 @@ export class UpstreamClient {
     apiKey: string,
     signal: AbortSignal,
   ): Promise<Response> {
-    if (hasInternalWebSearchTool(path, body)) {
-      const response = await this.#postJsonWithWebSearchLoop(
-        path,
-        forceNonStreamingBody(path, body),
-        apiKey,
-        signal,
-      );
-      return synthesizeCompletionStream(path, response);
-    }
-
+    signal = AbortSignal.any([signal, AbortSignal.timeout(this.#timeoutMs)]);
+    signal.throwIfAborted();
     const response = await this.#post(path, body, apiKey, signal);
     const contentType = response.headers.get("content-type")?.toLowerCase();
     if (!response.body || !contentType?.startsWith("text/event-stream")) {
+      await response.body?.cancel().catch(() => undefined);
       throw new UpstreamProtocolError("Upstream did not return an event stream");
     }
     return response;
+  }
+
+  async *streamCompletion(
+    path: CompletionPath,
+    body: unknown,
+    apiKey: string,
+    signal: AbortSignal,
+    options: CompletionStreamOptions = {},
+  ): AsyncGenerator<CanonicalEvent> {
+    const controller = new AbortController();
+    const combinedSignal = AbortSignal.any([
+      signal,
+      controller.signal,
+      AbortSignal.timeout(this.#timeoutMs),
+    ]);
+    let hasEvents = false;
+    try {
+      for await (const event of streamCompletion(
+        path,
+        body,
+        (next, nextSignal) => this.postStream(path, next, apiKey, nextSignal),
+        this.#webSearchProviders.get("web-search"),
+        combinedSignal,
+        options,
+      )) {
+        hasEvents = true;
+        yield event;
+      }
+    } catch (error) {
+      if (hasEvents && error instanceof UpstreamHttpError) error.hasUpstreamSemanticEvent = true;
+      throw error;
+    } finally {
+      controller.abort();
+    }
   }
 
   async #postJsonWithWebSearchLoop(
@@ -127,51 +150,27 @@ export class UpstreamClient {
     body: unknown,
     apiKey: string,
     signal: AbortSignal,
+    webSearch?: WebSearchTool,
   ): Promise<unknown> {
-    let currentBody = forceNonStreamingBody(path, body);
-    let webSearchRequests = 0;
-    const webSearchExecutions: WebSearchExecution[] = [];
+    const session = new WebSearchSession(
+      path,
+      this.#webSearchProviders.get("web-search"),
+      this.#jsonBodyLimitBytes,
+      webSearch,
+    );
+    let currentBody = session.prepare(forceNonStreamingBody(path, body));
     for (let round = 0; round < MAX_WEB_SEARCH_ROUNDS; round += 1) {
-      const response = await this.#post(path, currentBody, apiKey, signal);
-      const upstreamRequestId = response.headers.get("x-request-id") ?? `web_search_round_${round}`;
+      let response: Response;
+      try {
+        response = await this.#post(path, currentBody, apiKey, signal);
+      } catch (error) {
+        if (round > 0 && error instanceof UpstreamHttpError) error.hasUpstreamSemanticEvent = true;
+        throw error;
+      }
       const responseBody = await readJsonBody(response, this.#jsonBodyLimitBytes);
-      const calls = extractInternalToolCalls(path, responseBody);
-      if (calls.webSearch.length === 0) {
-        return attachWebSearchExecutions(
-          attachWebSearchRequestCount(responseBody, webSearchRequests),
-          webSearchExecutions,
-        );
-      }
-      if (calls.hasOtherToolCalls) {
-        throw new UpstreamProtocolError(
-          "Upstream mixed internal Web Search with client-executed tool calls in one turn",
-        );
-      }
-
-      const outputs = new Map<string, string>();
-      const provider = this.#webSearchProviders.get("web-search");
-      let allResultsEmpty = true;
-      for (const call of calls.webSearch) {
-        const searchRequest = decodeWebSearchRequest(call.arguments);
-        const results = await provider.execute(searchRequest, {
-          requestId: upstreamRequestId,
-          signal,
-        });
-        webSearchRequests += 1;
-        webSearchExecutions.push({
-          id: call.id,
-          query: searchRequest.query,
-          results: results.map((result) => ({ ...result })),
-        });
-        if (results.length > 0) {
-          allResultsEmpty = false;
-        }
-        outputs.set(call.id, encodeWebSearchResults(results));
-      }
-      currentBody = appendWebSearchResults(path, currentBody, responseBody, outputs);
-      if (allResultsEmpty) {
-        currentBody = disableInternalWebSearchTool(path, currentBody);
-      }
+      const next = await session.advance(currentBody, responseBody, signal);
+      if (!next) return session.finish(responseBody);
+      currentBody = next;
     }
     throw new UpstreamProtocolError("Web Search tool loop exceeded the maximum number of rounds");
   }
@@ -182,7 +181,7 @@ export class UpstreamClient {
     apiKey: string,
     signal: AbortSignal,
   ): Promise<Response> {
-    const combinedSignal = AbortSignal.any([signal, AbortSignal.timeout(this.#timeoutMs)]);
+    signal.throwIfAborted();
     const response = await this.#fetch(new URL(path, this.#baseUrl), {
       method: "POST",
       headers: {
@@ -190,7 +189,7 @@ export class UpstreamClient {
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: combinedSignal,
+      signal,
       redirect: "error",
     });
 

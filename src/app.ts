@@ -4,7 +4,6 @@ import type { SSEPluginOptions } from "@fastify/sse";
 import type { FastifyPluginAsync } from "fastify";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { AppConfig } from "./config.js";
-import type { CanonicalEvent } from "./core/events.js";
 import type { CanonicalRequest, CanonicalResponse } from "./core/ir.js";
 import { createRequestAbortScope } from "./http/abort.js";
 import {
@@ -34,6 +33,7 @@ import {
   createDefaultWebSearchRegistry,
 } from "./providers/web-search/preflight.js";
 import { WebSearchUnsupportedError } from "./providers/web-search/unsupported.js";
+import type { WebSearchProvider } from "./providers/web-search/types.js";
 import {
   assertClaudeCodeVersionAllowed,
   ClaudeCodeVersionRangeError,
@@ -52,12 +52,10 @@ import {
 } from "./protocols/anthropic/stream-encode.js";
 import { decodeChatResponse } from "./protocols/openai-chat/decode.js";
 import { encodeChatRequest } from "./protocols/openai-chat/encode.js";
-import { ChatStreamDecoder } from "./protocols/openai-chat/stream-decode.js";
 import { decodeResponsesRequest } from "./protocols/openai-responses/request-decode.js";
 import { encodeResponsesResponse } from "./protocols/openai-responses/response-encode.js";
 import { decodeResponsesResponse } from "./protocols/openai-responses/decode.js";
 import { encodeResponsesRequest } from "./protocols/openai-responses/encode.js";
-import { ResponsesStreamDecoder } from "./protocols/openai-responses/stream-decode.js";
 import {
   ResponsesStreamEncoder,
   type ResponsesSseFrame,
@@ -71,12 +69,10 @@ import { OpenAIAdapterError } from "./protocols/openai-responses/types.js";
 import { ActiveStreamRegistry } from "./stream/active-streams.js";
 import { StreamOutputLimitError, type StreamOutputLimits } from "./stream/output-limits.js";
 import { PingedIterator } from "./stream/ping.js";
-import { parseSseStream } from "./stream/sse-parser.js";
 import { ToolArgumentLimitError, type ToolArgumentLimits } from "./stream/tool-argument-limits.js";
 import { UpstreamClient, UpstreamHttpError } from "./upstream/client.js";
 import { shouldFallbackToChat } from "./upstream/routing.js";
 import {
-  decodeWebSearchExecutionsHeader,
   getWebSearchExecutions,
   getWebSearchRequestCount,
   type WebSearchExecution,
@@ -89,6 +85,7 @@ interface BuildAppOptions {
   config: AppConfig;
   logger?: FastifyServerOptions["logger"];
   upstreamFetch?: typeof globalThis.fetch;
+  webSearchProvider?: WebSearchProvider;
 }
 
 interface AnthropicMessageBody {
@@ -150,25 +147,6 @@ function addWebSearchUsage(
     : { ...response, usage: { ...response.usage, webSearchRequests } };
 }
 
-function readWebSearchUsageHeader(response: Response): number | undefined {
-  const value = response.headers.get("x-ai-hub-web-search-requests");
-  if (value === null) {
-    return undefined;
-  }
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
-function addWebSearchUsageToEvent(
-  event: CanonicalEvent,
-  webSearchRequests: number | undefined,
-): CanonicalEvent {
-  if (event.type !== "response_complete" || webSearchRequests === undefined) {
-    return event;
-  }
-  return { ...event, usage: { ...event.usage, webSearchRequests } };
-}
-
 export function buildApp(options: BuildAppOptions): FastifyInstance {
   const { config } = options;
   const upstream = new UpstreamClient({
@@ -177,9 +155,12 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     jsonBodyLimitBytes: config.upstream.jsonBodyLimitBytes,
     errorBodyLimitBytes: config.upstream.errorBodyLimitBytes,
     ...(options.upstreamFetch === undefined ? {} : { fetch: options.upstreamFetch }),
+    ...(options.webSearchProvider === undefined
+      ? {}
+      : { webSearchProvider: options.webSearchProvider }),
   });
   const activeStreams = new ActiveStreamRegistry();
-  const webSearchProviders = createDefaultWebSearchRegistry();
+  const webSearchProviders = createDefaultWebSearchRegistry(options.webSearchProvider);
   const app = Fastify({
     ajv: { customOptions: { coerceTypes: false, removeAdditional: false } },
     bodyLimit: config.server.bodyLimitBytes,
@@ -276,7 +257,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         }
 
         if (canonicalRequest.stream) {
-          const abortScope = createRequestAbortScope(request.raw, reply.raw);
+          const abortScope = createRequestAbortScope(
+            request.raw,
+            reply.raw,
+            config.upstream.timeoutMs,
+          );
           const removeActiveStream = activeStreams.add(abortScope);
           const clientStream = new ClientSseSender(reply);
           reply.sse.onClose(() => abortScope.abort(new Error("Client disconnected")));
@@ -334,7 +319,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           }
         }
 
-        const abortScope = createRequestAbortScope(request.raw, reply.raw);
+        const abortScope = createRequestAbortScope(
+          request.raw,
+          reply.raw,
+          config.upstream.timeoutMs,
+        );
         try {
           const completion = await requestAnthropicCompletion(
             upstream,
@@ -423,7 +412,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           throw error;
         }
 
-        const abortScope = createRequestAbortScope(request.raw, reply.raw);
+        const abortScope = createRequestAbortScope(
+          request.raw,
+          reply.raw,
+          config.upstream.timeoutMs,
+        );
         try {
           const upstreamResponse = await upstream.postJson(
             "responses/input_tokens",
@@ -504,7 +497,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         }
 
         if (canonicalRequest.stream) {
-          const abortScope = createRequestAbortScope(request.raw, reply.raw);
+          const abortScope = createRequestAbortScope(
+            request.raw,
+            reply.raw,
+            config.upstream.timeoutMs,
+          );
           const removeActiveStream = activeStreams.add(abortScope);
           const clientStream = new ClientSseSender(reply);
           reply.sse.onClose(() => abortScope.abort(new Error("Client disconnected")));
@@ -550,7 +547,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           }
         }
 
-        const abortScope = createRequestAbortScope(request.raw, reply.raw);
+        const abortScope = createRequestAbortScope(
+          request.raw,
+          reply.raw,
+          config.upstream.timeoutMs,
+        );
         try {
           const upstreamResponse = await upstream.postJson(
             "responses",
@@ -561,6 +562,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             }),
             apiKey,
             abortScope.signal,
+            webSearchOptions(canonicalRequest).webSearch,
           );
           return reply.send(
             encodeResponsesResponse(
@@ -590,7 +592,8 @@ async function streamResponsesResponse(
   timeoutOptions: StreamTimeoutOptions,
   send: (frame: ResponsesSseFrame | string) => Promise<void>,
 ): Promise<void> {
-  const response = await upstream.postStream(
+  const encoder = new ResponsesStreamEncoder(argumentLimits, streamOutputLimits);
+  for await (const event of upstream.streamCompletion(
     "responses",
     encodeResponsesRequest(request, {
       store: false,
@@ -599,24 +602,22 @@ async function streamResponsesResponse(
     }),
     apiKey,
     signal,
-  );
-  if (!response.body) {
-    throw new Error("Upstream Responses stream has no body");
+    {
+      argumentLimits,
+      outputLimits: streamOutputLimits,
+      timeouts: timeoutOptions,
+      maxFrameBytes: timeoutOptions.maxFrameBytes,
+      ...webSearchOptions(request),
+    },
+  )) {
+    for (const frame of encoder.encode(event)) await send(frame);
   }
-
-  const decoder = new ResponsesStreamDecoder(argumentLimits, streamOutputLimits);
-  const encoder = new ResponsesStreamEncoder(argumentLimits, streamOutputLimits);
-  for await (const frame of parseSseStream(response.body, timeoutOptions, signal, {
-    maxFrameBytes: timeoutOptions.maxFrameBytes,
-  })) {
-    for (const event of decoder.decode(frame)) {
-      for (const encoded of encoder.encode(event)) {
-        await send(encoded);
-      }
-    }
-  }
-  decoder.finish();
   await send("[DONE]");
+}
+
+function webSearchOptions(request: CanonicalRequest) {
+  const webSearch = request.tools.find((tool) => tool.type === "web_search");
+  return webSearch === undefined ? {} : { webSearch };
 }
 
 async function streamAnthropicResponse(
@@ -632,9 +633,18 @@ async function streamAnthropicResponse(
   pingIntervalMs: number,
   send: (frame: AnthropicSseFrame) => Promise<void>,
 ): Promise<void> {
-  let response: Response;
-  let decoder: ResponsesStreamDecoder | ChatStreamDecoder;
-  try {
+  const options = {
+    ...(encoderOptions.toolArgumentLimits === undefined
+      ? {}
+      : { argumentLimits: encoderOptions.toolArgumentLimits }),
+    ...(encoderOptions.outputLimits === undefined
+      ? {}
+      : { outputLimits: encoderOptions.outputLimits }),
+    timeouts: timeoutOptions,
+    maxFrameBytes: timeoutOptions.maxFrameBytes,
+    ...webSearchOptions(request),
+  };
+  const events = (async function* () {
     preparePromptCacheAttempt({
       request,
       sidecar: promptCacheSidecar,
@@ -642,29 +652,28 @@ async function streamAnthropicResponse(
       operation: "completion",
       capability: promptCacheCapabilities.responses,
     });
-    response = await upstream.postStream(
-      "responses",
-      encodeResponsesRequest(request, { store: false, promptCache: { kind: "none" } }),
-      apiKey,
-      signal,
-    );
-    decoder = new ResponsesStreamDecoder(
-      encoderOptions.toolArgumentLimits,
-      encoderOptions.outputLimits,
-    );
-  } catch (error) {
-    if (
-      !(error instanceof UpstreamHttpError) ||
-      !shouldFallbackToChat({
-        failure: {
-          status: error.status,
-          ...(error.code === undefined ? {} : { code: error.code }),
-        },
-        hasUpstreamSemanticEvent: false,
-        hasWrittenClientBytes: false,
-      })
-    ) {
-      throw error;
+    try {
+      yield* upstream.streamCompletion(
+        "responses",
+        encodeResponsesRequest(request, { store: false, promptCache: { kind: "none" } }),
+        apiKey,
+        signal,
+        options,
+      );
+      return;
+    } catch (error) {
+      if (
+        !(error instanceof UpstreamHttpError) ||
+        !shouldFallbackToChat({
+          failure: {
+            status: error.status,
+            ...(error.code === undefined ? {} : { code: error.code }),
+          },
+          hasUpstreamSemanticEvent: error.hasUpstreamSemanticEvent,
+          hasWrittenClientBytes: error.hasUpstreamSemanticEvent,
+        })
+      )
+        throw error;
     }
     preparePromptCacheAttempt({
       request,
@@ -673,47 +682,30 @@ async function streamAnthropicResponse(
       operation: "completion",
       capability: promptCacheCapabilities.chatCompletions,
     });
-    response = await upstream.postStream(
+    yield* upstream.streamCompletion(
       "chat/completions",
       encodeChatRequest(request),
       apiKey,
       signal,
+      options,
     );
-    decoder = new ChatStreamDecoder(encoderOptions.toolArgumentLimits, encoderOptions.outputLimits);
-  }
-
-  if (!response.body) {
-    throw new Error("Upstream completion stream has no body");
-  }
-
-  const webSearchRequests = readWebSearchUsageHeader(response);
-  const webSearchExecutions = decodeWebSearchExecutionsHeader(
-    response.headers.get("x-ai-hub-web-search-trace"),
-  );
-  const encoder = new AnthropicStreamEncoder({ ...encoderOptions, webSearchExecutions });
-  const frames = parseSseStream(response.body, timeoutOptions, signal, {
-    maxFrameBytes: timeoutOptions.maxFrameBytes,
-  })[Symbol.asyncIterator]();
-  const pinged = new PingedIterator(frames, pingIntervalMs);
+  })();
+  const encoder = new AnthropicStreamEncoder(encoderOptions);
+  const pinged = new PingedIterator(events, pingIntervalMs);
   try {
     while (true) {
       const next = await pinged.next();
-      if (next.type === "done") {
-        break;
-      }
+      if (next.type === "done") break;
       if (next.type === "ping") {
         await send({ event: "ping", data: { type: "ping" } });
         pinged.markClientWrite();
         continue;
       }
-      for (const event of decoder.decode(next.value)) {
-        for (const encoded of encoder.encode(addWebSearchUsageToEvent(event, webSearchRequests))) {
-          await send(encoded);
-          pinged.markClientWrite();
-        }
+      for (const frame of encoder.encode(next.value)) {
+        await send(frame);
+        pinged.markClientWrite();
       }
     }
-    decoder.finish();
   } finally {
     pinged.close();
   }
@@ -741,6 +733,7 @@ async function requestAnthropicCompletion(
       encodeResponsesRequest(request, { store: false, promptCache: { kind: "none" } }),
       apiKey,
       signal,
+      webSearchOptions(request).webSearch,
     );
     return {
       response: addWebSearchUsage(decodeResponsesResponse(response), response),
@@ -754,7 +747,7 @@ async function requestAnthropicCompletion(
           status: error.status,
           ...(error.code === undefined ? {} : { code: error.code }),
         },
-        hasUpstreamSemanticEvent: false,
+        hasUpstreamSemanticEvent: error.hasUpstreamSemanticEvent,
         hasWrittenClientBytes: false,
       })
     ) {
@@ -774,6 +767,7 @@ async function requestAnthropicCompletion(
     encodeChatRequest(request),
     apiKey,
     signal,
+    webSearchOptions(request).webSearch,
   );
   return {
     response: addWebSearchUsage(decodeChatResponse(response), response),

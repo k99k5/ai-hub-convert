@@ -17,6 +17,14 @@ export type CanonicalEvent =
   | { type: "function_arguments_delta"; index: number; delta: string }
   | { type: "citation_delta"; index: number; citation: Citation }
   | { type: "content_stop"; index: number }
+  | {
+      type: "web_search_result";
+      execution: {
+        id: string;
+        query: string;
+        results: Array<{ title: string; url: string; content: string }>;
+      };
+    }
   | { type: "response_complete"; finishReason: FinishReason; usage: Usage; stopSequence?: string }
   | { type: "response_error"; error: CanonicalError };
 

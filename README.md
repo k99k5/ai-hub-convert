@@ -63,7 +63,7 @@ curl http://127.0.0.1:3000/v1/responses \
 
 ## 配置
 
-所有配置只在启动时读取。空的 Claude Code 最低/最高版本表示不限制对应边界。
+`pnpm dev` 和 `pnpm start` 会在启动时加载项目根目录的 `.env`；已有环境变量优先。所有配置只在启动时读取。空的 Claude Code 最低/最高版本表示不限制对应边界。
 
 | 环境变量 | 默认值 | 说明 |
 | --- | ---: | --- |
@@ -72,7 +72,7 @@ curl http://127.0.0.1:3000/v1/responses \
 | `UPSTREAM_BASE_URL` | 必填 | 上游基础 URL，只允许启动配置提供 |
 | `ALLOW_INSECURE_UPSTREAM` | `false` | 仅在显式为 `true` 时允许 HTTP，供本地开发使用 |
 | `BODY_LIMIT_BYTES` | `33554432` | 请求 body 上限 |
-| `CONNECTION_TIMEOUT_MS` | `10000` | Fastify connection timeout |
+| `CONNECTION_TIMEOUT_MS` | `0` | Socket 空闲超时；默认禁用，由上游总超时和 SSE 首字节/idle 超时约束请求 |
 | `REQUEST_TIMEOUT_MS` | `30000` | Fastify request timeout |
 | `UPSTREAM_TIMEOUT_MS` | `600000` | 上游请求总超时 |
 | `UPSTREAM_FIRST_BYTE_TIMEOUT_MS` | `60000` | SSE 首字节超时 |
@@ -117,6 +117,10 @@ system attribution 与 User-Agent 冲突时以前者为准。只有严格、有�
 ## Web Search
 
 内置 Web Search 通过独立 provider registry 执行，当前 provider 为 DuckDuckGo。Anthropic `web_search_*` 与 Claude Code deferred `WebSearch` 会转换为网关内部保留工具，由网关执行搜索并把结果回填给上游模型；上游模型随后继续生成最终响应。
+
+`stream:true` 的每一轮模型调用都使用真实 SSE，普通文本实时转发，内部搜索调用由网关消费；搜索等待期间 Anthropic 连接继续发送 ping。模型调用、搜索执行和受限 Chat 回退共用请求总超时，最终 usage 累计所有模型轮次的 token 和缓存用量。成功进入任一模型轮次后不再允许 Chat 回退。
+
+Anthropic `max_uses`、`allowed_domains` / `blocked_domains` 和 Responses `filters.allowed_domains` 会保留并在搜索执行时生效；`max_uses:0` 禁用搜索。强制搜索完成一次后恢复自动工具选择，使模型能够生成最终回答。
 
 Anthropic JSON/SSE 出口会生成原生 `server_tool_use` / `web_search_tool_result` 块，并同步 `usage.server_tool_use.web_search_requests`。后续多轮对话回传这些 server-search block 时，网关会识别并过滤自身生成的 replay 数据。普通 function 即使名称为 `web_search`，仍按普通 function 处理，不会被当作内置 Web Search。
 

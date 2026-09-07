@@ -7,6 +7,7 @@ export interface WebSearchCapabilities {
 export interface WebSearchRequest {
   query: string;
   domains?: string[];
+  blockedDomains?: string[];
   maxResults?: number;
 }
 

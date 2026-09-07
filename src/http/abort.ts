@@ -19,8 +19,16 @@ export interface RequestAbortScope {
 export function createRequestAbortScope(
   request: RawRequestCloseSource,
   response?: RawResponseCloseSource,
+  timeoutMs?: number,
 ): RequestAbortScope {
   const controller = new AbortController();
+  const timer =
+    timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          controller.abort(new DOMException("Upstream request timed out", "TimeoutError"));
+        }, timeoutMs);
+  timer?.unref();
   const onRequestClose = () => {
     if (request.aborted) {
       controller.abort(new Error("Client disconnected"));
@@ -38,6 +46,7 @@ export function createRequestAbortScope(
     signal: controller.signal,
     abort: (reason) => controller.abort(reason),
     dispose: () => {
+      clearTimeout(timer);
       request.off("close", onRequestClose);
       response?.off("close", onResponseClose);
     },

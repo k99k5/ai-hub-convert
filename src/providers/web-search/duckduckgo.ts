@@ -1,3 +1,4 @@
+import { matchesSearchDomain } from "./domains.js";
 import type {
   WebSearchCapabilities,
   WebSearchContext,
@@ -51,9 +52,15 @@ export class DuckDuckGoWebSearchProvider implements WebSearchProvider {
 
       const results = parseDuckDuckGoLite(await response.text());
       const filtered = request.domains?.length
-        ? results.filter((result) => matchesDomain(result.url, request.domains ?? []))
+        ? results.filter((result) => matchesSearchDomain(result.url, request.domains ?? []))
         : results;
-      return filtered.slice(0, maxResults);
+      return filtered
+        .filter(
+          (result) =>
+            !request.blockedDomains?.length ||
+            !matchesSearchDomain(result.url, request.blockedDomains),
+        )
+        .slice(0, maxResults);
     } catch (error) {
       if (context.signal.aborted) {
         throw context.signal.reason ?? error;
@@ -183,20 +190,4 @@ function decodeHtmlEntities(value: string): string {
       return String.fromCodePoint(codePoint);
     },
   );
-}
-
-function matchesDomain(url: string, domains: readonly string[]): boolean {
-  let hostname: string;
-  try {
-    hostname = new URL(url).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  return domains.some((rawDomain) => {
-    const domain = rawDomain
-      .trim()
-      .toLowerCase()
-      .replace(/^\.+|\.+$/g, "");
-    return domain !== "" && (hostname === domain || hostname.endsWith(`.${domain}`));
-  });
 }
