@@ -1,0 +1,214 @@
+name: Address PR 13 Review
+
+on:
+  push:
+    branches:
+      - debug/web-search-usage-logs
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/web-search-usage-logs
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Patch review findings and test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f'anchor not found in {path}: {old[:80]!r}')
+              p.write_text(s.replace(old, new, 1))
+
+          # P1: never log prompt-derived search text or provider error strings.
+          replace_once(
+              'src/upstream/client.ts',
+              '          queryPreview: searchRequest.query.slice(0, 160),\n',
+              '          queryLength: searchRequest.query.length,\n',
+          )
+          replace_once(
+              'src/upstream/client.ts',
+              '            errorName: error instanceof Error ? error.name : typeof error,\n            errorMessage: error instanceof Error ? error.message : String(error),\n',
+              '            errorName: error instanceof Error ? error.name : typeof error,\n',
+          )
+
+          # Add native Web Search blocks to the non-streaming Anthropic response type.
+          replace_once(
+              'src/protocols/anthropic/types.ts',
+              '''export interface AnthropicResponseSearchResultBlock {\n  type: "search_result";\n  title: string;\n  source: string;\n  content: AnthropicTextBlock[];\n  citations: { enabled: boolean };\n}\n\nexport type AnthropicResponseContentBlock =\n''',
+              '''export interface AnthropicResponseSearchResultBlock {\n  type: "search_result";\n  title: string;\n  source: string;\n  content: AnthropicTextBlock[];\n  citations: { enabled: boolean };\n}\n\nexport interface AnthropicResponseServerToolUseBlock {\n  type: "server_tool_use";\n  id: string;\n  name: "web_search";\n  input: { query: string };\n}\n\nexport interface AnthropicResponseWebSearchResult {\n  type: "web_search_result";\n  title: string;\n  url: string;\n}\n\nexport interface AnthropicResponseWebSearchToolResultBlock {\n  type: "web_search_tool_result";\n  tool_use_id: string;\n  content: AnthropicResponseWebSearchResult[];\n}\n\nexport type AnthropicResponseContentBlock =\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/types.ts',
+              '''  | AnthropicResponseToolUseBlock\n  | AnthropicResponseThinkingBlock\n  | AnthropicResponseSearchResultBlock;\n''',
+              '''  | AnthropicResponseToolUseBlock\n  | AnthropicResponseThinkingBlock\n  | AnthropicResponseSearchResultBlock\n  | AnthropicResponseServerToolUseBlock\n  | AnthropicResponseWebSearchToolResultBlock;\n''',
+          )
+
+          # P2: encode search execution traces on the non-streaming path too.
+          replace_once(
+              'src/protocols/anthropic/encode.ts',
+              '''export interface AnthropicEncodeOptions {\n  finalizeThinking?: (reasoning: ReasoningContent) => {\n    text: string;\n    signature?: string;\n    synthetic?: boolean;\n  };\n}\n''',
+              '''export interface AnthropicEncodeOptions {\n  finalizeThinking?: (reasoning: ReasoningContent) => {\n    text: string;\n    signature?: string;\n    synthetic?: boolean;\n  };\n  webSearchExecutions?: readonly {\n    query: string;\n    results: readonly { title: string; url: string }[];\n  }[];\n}\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/encode.ts',
+              '''export function encodeAnthropicResponse(\n  response: CanonicalResponse,\n  options: AnthropicEncodeOptions = {},\n): AnthropicMessageResponse {\n''',
+              '''function encodeWebSearchBlocks(\n  executions: NonNullable<AnthropicEncodeOptions["webSearchExecutions"]>,\n): AnthropicResponseContentBlock[] {\n  return executions.flatMap((execution, index) => {\n    const toolUseId = `srvtoolu_ai_hub_${index}`;\n    return [\n      {\n        type: "server_tool_use" as const,\n        id: toolUseId,\n        name: "web_search" as const,\n        input: { query: execution.query },\n      },\n      {\n        type: "web_search_tool_result" as const,\n        tool_use_id: toolUseId,\n        content: execution.results.map((result) => ({\n          type: "web_search_result" as const,\n          title: result.title,\n          url: result.url,\n        })),\n      },\n    ];\n  });\n}\n\nexport function encodeAnthropicResponse(\n  response: CanonicalResponse,\n  options: AnthropicEncodeOptions = {},\n): AnthropicMessageResponse {\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/encode.ts',
+              '    content: response.content.map((content) => encodeContent(content, options)),\n',
+              '''    content: [\n      ...response.content.map((content) => encodeContent(content, options)),\n      ...encodeWebSearchBlocks(options.webSearchExecutions ?? []),\n    ],\n''',
+          )
+
+          # Wire attached execution traces through the JSON completion path.
+          replace_once(
+              'src/app.ts',
+              '''import {\n  decodeWebSearchExecutionsHeader,\n  getWebSearchRequestCount,\n} from "./upstream/web-search-loop.js";\n''',
+              '''import {\n  decodeWebSearchExecutionsHeader,\n  getWebSearchExecutions,\n  getWebSearchRequestCount,\n  type WebSearchExecution,\n} from "./upstream/web-search-loop.js";\n''',
+          )
+          replace_once(
+              'src/app.ts',
+              '''interface StreamTimeoutOptions {\n  firstByteTimeoutMs: number;\n  idleTimeoutMs: number;\n  maxFrameBytes: number;\n  onTimeout: (error: Error) => void;\n}\n''',
+              '''interface StreamTimeoutOptions {\n  firstByteTimeoutMs: number;\n  idleTimeoutMs: number;\n  maxFrameBytes: number;\n  onTimeout: (error: Error) => void;\n}\n\ninterface AnthropicCompletionResult {\n  response: CanonicalResponse;\n  webSearchExecutions: WebSearchExecution[];\n}\n''',
+          )
+          replace_once(
+              'src/app.ts',
+              '''          const canonicalResponse = await requestAnthropicCompletion(\n            upstream,\n            canonicalRequest,\n            apiKey,\n            abortScope.signal,\n            promptCacheSidecar,\n            isClaudeCode && config.claudeCode.promptCacheBreakpointsEnabled,\n            GENERIC_PROMPT_CACHE_CAPABILITIES,\n          );\n          const normalizedResponse = normalizeResponseToolArguments(\n            canonicalResponse,\n            isClaudeCode && config.claudeCode.readToolCompatEnabled,\n          );\n''',
+              '''          const completion = await requestAnthropicCompletion(\n            upstream,\n            canonicalRequest,\n            apiKey,\n            abortScope.signal,\n            promptCacheSidecar,\n            isClaudeCode && config.claudeCode.promptCacheBreakpointsEnabled,\n            GENERIC_PROMPT_CACHE_CAPABILITIES,\n          );\n          const normalizedResponse = normalizeResponseToolArguments(\n            completion.response,\n            isClaudeCode && config.claudeCode.readToolCompatEnabled,\n          );\n''',
+          )
+          replace_once(
+              'src/app.ts',
+              '''              finalizeThinking: (reasoning) =>\n                finalizeThinkingBlock(reasoning, {\n                  enabled: isClaudeCode && config.claudeCode.syntheticThinkingSignatureEnabled,\n                }),\n            }),\n''',
+              '''              finalizeThinking: (reasoning) =>\n                finalizeThinkingBlock(reasoning, {\n                  enabled: isClaudeCode && config.claudeCode.syntheticThinkingSignatureEnabled,\n                }),\n              webSearchExecutions: completion.webSearchExecutions,\n            }),\n''',
+          )
+          replace_once(
+              'src/app.ts',
+              '''): Promise<CanonicalResponse> {\n  try {\n''',
+              '''): Promise<AnthropicCompletionResult> {\n  try {\n''',
+          )
+          replace_once(
+              'src/app.ts',
+              '''    return addWebSearchUsage(decodeResponsesResponse(response), response);\n''',
+              '''    return {\n      response: addWebSearchUsage(decodeResponsesResponse(response), response),\n      webSearchExecutions: getWebSearchExecutions(response),\n    };\n''',
+          )
+          replace_once(
+              'src/app.ts',
+              '''  return addWebSearchUsage(decodeChatResponse(response), response);\n''',
+              '''  return {\n    response: addWebSearchUsage(decodeChatResponse(response), response),\n    webSearchExecutions: getWebSearchExecutions(response),\n  };\n''',
+          )
+
+          # P1: count every emitted Anthropic payload, including synthesized search blocks.
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              'const OUTPUT_ITEM_OVERHEAD_BYTES = 256;\n',
+              'const OUTPUT_ITEM_OVERHEAD_BYTES = 256;\nconst CITATION_OVERHEAD_BYTES = 128;\nconst WEB_SEARCH_RESULT_OVERHEAD_BYTES = 128;\n',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''      case "text_delta":\n        this.#assertOpen(event.index, "text");\n        return [\n''',
+              '''      case "text_delta":\n        this.#assertOpen(event.index, "text");\n        this.#outputLimiter.add(event.index, event.delta);\n        return [\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''      case "reasoning_delta":\n        this.#assertOpen(event.index, "reasoning");\n        return [\n''',
+              '''      case "reasoning_delta":\n        this.#assertOpen(event.index, "reasoning");\n        this.#outputLimiter.add(event.index, event.delta);\n        return [\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''      case "signature_delta": {\n        const block = this.#assertOpen(event.index, "reasoning");\n        block.signature += event.delta;\n''',
+              '''      case "signature_delta": {\n        const block = this.#assertOpen(event.index, "reasoning");\n        this.#outputLimiter.add(event.index, event.delta);\n        block.signature += event.delta;\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''          return [];\n        }\n        return [\n          frame("content_block_delta", event.index, {\n            type: "input_json_delta",\n            partial_json: event.delta,\n          }),\n        ];\n      }\n      case "citation_delta":\n        this.#assertOpen(event.index, "text");\n        return [\n''',
+              '''          return [];\n        }\n        this.#outputLimiter.add(event.index, event.delta);\n        return [\n          frame("content_block_delta", event.index, {\n            type: "input_json_delta",\n            partial_json: event.delta,\n          }),\n        ];\n      }\n      case "citation_delta":\n        this.#assertOpen(event.index, "text");\n        this.#outputLimiter.addBytes(event.index, CITATION_OVERHEAD_BYTES);\n        this.#outputLimiter.addUnrelated(event.index, event.citation.url);\n        if (event.citation.title !== undefined) {\n          this.#outputLimiter.addUnrelated(event.index, event.citation.title);\n        }\n        return [\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''    if (content.type === "refusal" && content.refusal.length > 0) {\n      frames.push(\n''',
+              '''    if (content.type === "refusal" && content.refusal.length > 0) {\n      this.#outputLimiter.add(index, content.refusal);\n      frames.push(\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''      const normalized = normalizeReadToolArguments(\n        block.content.name,\n        block.deltas.join(""),\n        true,\n      );\n      frames.push(\n''',
+              '''      const normalized = normalizeReadToolArguments(\n        block.content.name,\n        block.deltas.join(""),\n        true,\n      );\n      this.#outputLimiter.add(index, normalized.json);\n      frames.push(\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''      if ("signature" in finalized) {\n        frames.push(\n''',
+              '''      if ("signature" in finalized) {\n        this.#outputLimiter.add(index, finalized.signature);\n        frames.push(\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''    for (const [searchIndex, execution] of webSearchExecutions.entries()) {\n      const toolUseId = `srvtoolu_ai_hub_${searchIndex}`;\n      nativeWebSearchFrames.push(\n''',
+              '''    for (const [searchIndex, execution] of webSearchExecutions.entries()) {\n      const toolUseId = `srvtoolu_ai_hub_${searchIndex}`;\n      const queryJson = JSON.stringify({ query: execution.query });\n      this.#outputLimiter.addBytes(nextIndex, OUTPUT_ITEM_OVERHEAD_BYTES);\n      this.#outputLimiter.addUnrelated(nextIndex, toolUseId);\n      this.#outputLimiter.addUnrelated(nextIndex, "web_search");\n      this.#outputLimiter.add(nextIndex, queryJson);\n      nativeWebSearchFrames.push(\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '          partial_json: JSON.stringify({ query: execution.query }),\n',
+              '          partial_json: queryJson,\n',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''      nextIndex += 1;\n      nativeResultCount += execution.results.length;\n      nativeWebSearchFrames.push(\n''',
+              '''      nextIndex += 1;\n      nativeResultCount += execution.results.length;\n      this.#outputLimiter.addBytes(nextIndex, OUTPUT_ITEM_OVERHEAD_BYTES);\n      this.#outputLimiter.addUnrelated(nextIndex, toolUseId);\n      for (const result of execution.results) {\n        this.#outputLimiter.addBytes(nextIndex, WEB_SEARCH_RESULT_OVERHEAD_BYTES);\n        this.#outputLimiter.addUnrelated(nextIndex, result.title);\n        this.#outputLimiter.addUnrelated(nextIndex, result.url);\n      }\n      nativeWebSearchFrames.push(\n''',
+          )
+          replace_once(
+              'src/protocols/anthropic/stream-encode.ts',
+              '''          queryPreviews: webSearchExecutions.map((execution) => execution.query.slice(0, 160)),\n''',
+              '''          queryLengths: webSearchExecutions.map((execution) => execution.query.length),\n''',
+          )
+
+          # Regression: non-streaming responses must include the native search trace.
+          replace_once(
+              'test/integration/app.test.ts',
+              '''    } else {\n      expect(response.json()).toMatchObject({\n        content: [{ type: "text", text: "No results found." }],\n        stop_reason: "end_turn",\n      });\n    }\n''',
+              '''    } else {\n      expect(response.json()).toMatchObject({\n        content: [\n          { type: "text", text: "No results found." },\n          {\n            type: "server_tool_use",\n            id: "srvtoolu_ai_hub_0",\n            name: "web_search",\n            input: { query: "latest news" },\n          },\n          {\n            type: "web_search_tool_result",\n            tool_use_id: "srvtoolu_ai_hub_0",\n            content: [],\n          },\n        ],\n        stop_reason: "end_turn",\n        usage: { server_tool_use: { web_search_requests: 1 } },\n      });\n    }\n''',
+          )
+
+          # Regression: synthesized blocks must share the same aggregate stream budget as answer text.
+          p = Path('test/unit/anthropic-stream-encode.test.ts')
+          s = p.read_text()
+          marker = '\n});\n'
+          insert_at = s.rfind(marker)
+          if insert_at < 0:
+              raise SystemExit('anthropic stream test suite terminator not found')
+          test = '''\n\n  it("counts synthesized Web Search blocks against the aggregate stream output limit", () => {\n    const encoder = new AnthropicStreamEncoder({\n      outputLimits: { perItemBytes: 1024, perStreamBytes: 600 },\n      webSearchExecutions: [\n        { id: "call_search", query: "q".repeat(200), results: [] },\n      ],\n    });\n    encoder.encode({ type: "response_start", id: "resp_1", model: "model-a" });\n    encoder.encode({ type: "content_start", index: 0, content: { type: "text", text: "" } });\n    encoder.encode({ type: "text_delta", index: 0, delta: "a".repeat(100) });\n    encoder.encode({ type: "content_stop", index: 0 });\n\n    expect(() =>\n      encoder.encode({\n        type: "response_complete",\n        finishReason: "end_turn",\n        usage: { inputTokens: 1, outputTokens: 1, webSearchRequests: 1 },\n      }),\n    ).toThrowError(expect.objectContaining({ scope: "stream", code: "STREAM_OUTPUT_TOO_LARGE" }));\n  });\n'''
+          p.write_text(s[:insert_at] + test + s[insert_at:])
+          PY
+
+          if grep -R -n -E 'queryPreview|queryPreviews' src; then
+            echo 'prompt-derived query preview remains in logs'
+            exit 1
+          fi
+
+          pnpm format
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+          pnpm test:coverage
+          pnpm build
+
+          rm .github/workflows/address-pr13-review.yml
+          git config user.name "TigerKK"
+          git config user.email "545551320@qq.com"
+          git add -A
+          git commit -m "fix: address Anthropic Web Search review findings"
+          git push origin HEAD:debug/web-search-usage-logs
