@@ -149,13 +149,18 @@ export function decodeWebSearchRequest(argumentsJson: string): WebSearchRequest 
 }
 
 export function encodeWebSearchResults(results: readonly WebSearchResult[]): string {
-  return JSON.stringify(
-    results.map((result) => ({
+  return JSON.stringify({
+    ok: true,
+    result_count: results.length,
+    results: results.map((result) => ({
       title: result.title,
       url: result.url,
       content: result.content,
     })),
-  );
+    ...(results.length === 0
+      ? { message: "Web search completed successfully with 0 results. This is not an API error." }
+      : {}),
+  });
 }
 
 export function appendWebSearchResults(
@@ -233,6 +238,25 @@ function sse(event: string | undefined, data: unknown): string {
   return `${event ? `event: ${event}\n` : ""}data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`;
 }
 
+function normalizeSynthesizedResponsesItem(item: unknown): unknown {
+  if (!isRecord(item) || item.type !== "message" || !Array.isArray(item.content)) {
+    return item;
+  }
+  return {
+    ...item,
+    content: item.content.map((rawPart) => {
+      if (
+        !isRecord(rawPart) ||
+        rawPart.type !== "output_text" ||
+        Array.isArray(rawPart.annotations)
+      ) {
+        return rawPart;
+      }
+      return { ...rawPart, annotations: [] };
+    }),
+  };
+}
+
 function synthesizeResponsesStream(response: Record<string, unknown>): string {
   if (typeof response.id !== "string" || typeof response.model !== "string") {
     throw new Error("Cannot synthesize a Responses stream without id and model");
@@ -244,7 +268,8 @@ function synthesizeResponsesStream(response: Record<string, unknown>): string {
     }),
   ];
   const output = Array.isArray(response.output) ? response.output : [];
-  output.forEach((item, outputIndex) => {
+  output.forEach((rawItem, outputIndex) => {
+    const item = normalizeSynthesizedResponsesItem(rawItem);
     frames.push(
       sse("response.output_item.added", {
         type: "response.output_item.added",
