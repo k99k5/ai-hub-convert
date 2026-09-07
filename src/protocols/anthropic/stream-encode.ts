@@ -245,14 +245,70 @@ export class AnthropicStreamEncoder {
     }
     this.#completed = true;
     const usage = encodeUsage(event.usage);
+    const webSearchRequests = event.usage.webSearchRequests ?? 0;
+    const nativeProbeFrames: AnthropicSseFrame[] = [];
+    let nextIndex = this.#seenIndices.size === 0 ? 0 : Math.max(...this.#seenIndices.values()) + 1;
+    for (let searchIndex = 0; searchIndex < webSearchRequests; searchIndex += 1) {
+      const toolUseId = `srvtoolu_ai_hub_probe_${searchIndex}`;
+      nativeProbeFrames.push(
+        {
+          event: "content_block_start",
+          data: {
+            type: "content_block_start",
+            index: nextIndex,
+            content_block: { type: "server_tool_use", id: toolUseId, name: "web_search" },
+          },
+        },
+        frame("content_block_delta", nextIndex, {
+          type: "input_json_delta",
+          partial_json: JSON.stringify({ query: "web search" }),
+        }),
+        {
+          event: "content_block_stop",
+          data: { type: "content_block_stop", index: nextIndex },
+        },
+      );
+      nextIndex += 1;
+      nativeProbeFrames.push(
+        {
+          event: "content_block_start",
+          data: {
+            type: "content_block_start",
+            index: nextIndex,
+            content_block: {
+              type: "web_search_tool_result",
+              tool_use_id: toolUseId,
+              content: [],
+            },
+          },
+        },
+        {
+          event: "content_block_stop",
+          data: { type: "content_block_stop", index: nextIndex },
+        },
+      );
+      nextIndex += 1;
+    }
     process.stderr.write(
       `[web-search-debug] ${JSON.stringify({
         event: "anthropic_stream_complete",
         canonicalWebSearchRequests: event.usage.webSearchRequests,
         encodedServerToolUse: usage.server_tool_use,
+        nativeProbeBlocks: webSearchRequests,
       })}\n`,
     );
+    if (webSearchRequests > 0) {
+      process.stderr.write(
+        `[web-search-debug] ${JSON.stringify({
+          event: "native_probe_emitted",
+          webSearchRequests,
+          emittedServerToolUseBlocks: webSearchRequests,
+          emittedWebSearchToolResultBlocks: webSearchRequests,
+        })}\n`,
+      );
+    }
     return [
+      ...nativeProbeFrames,
       {
         event: "message_delta",
         data: {

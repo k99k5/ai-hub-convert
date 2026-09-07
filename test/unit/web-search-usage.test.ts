@@ -92,7 +92,8 @@ describe("Web Search usage reporting", () => {
       usage: { inputTokens: 10, outputTokens: 2, webSearchRequests: 2 },
     });
 
-    expect(frames[0]?.data.usage).toEqual({
+    const messageDelta = frames.find((frame) => frame.event === "message_delta");
+    expect(messageDelta?.data.usage).toEqual({
       input_tokens: 10,
       output_tokens: 2,
       server_tool_use: { web_search_requests: 2 },
