@@ -290,7 +290,7 @@ export class AnthropicStreamEncoder {
       this.#outputLimiter.addBytes(toolIndex, OUTPUT_ITEM_OVERHEAD_BYTES);
       this.#outputLimiter.addUnrelated(toolIndex, toolUseId);
       this.#outputLimiter.addUnrelated(toolIndex, "web_search");
-      this.#outputLimiter.add(toolIndex, queryJson);
+      this.#outputLimiter.addUnrelated(toolIndex, JSON.stringify(queryJson));
       frames.push(
         {
           event: "content_block_start",
