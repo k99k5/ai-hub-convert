@@ -45,6 +45,7 @@ export interface ResponsesFunctionTool {
 export type ResponsesToolChoice = "auto" | "none" | "required" | { type: "function"; name: string };
 
 export interface ResponsesRequest {
+  include?: Array<"reasoning.encrypted_content">;
   model: string;
   input: ResponsesInputItem[];
   tools?: ResponsesFunctionTool[];

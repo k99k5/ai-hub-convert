@@ -35,7 +35,12 @@ export class DuckDuckGoWebSearchProvider implements WebSearchProvider {
     const signal = AbortSignal.any([context.signal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)]);
     try {
       const url = new URL(DUCKDUCKGO_LITE_URL);
-      url.searchParams.set("q", query);
+      // Lite 没有精确地理定位接口，将位置作为检索提示，不承诺原生地理排序。
+      const location = request.userLocation;
+      const locationHint = [location?.city, location?.region, location?.country]
+        .filter(Boolean)
+        .join(" ");
+      url.searchParams.set("q", locationHint ? `${query} ${locationHint}` : query);
       const response = await this.#fetch(url, {
         method: "GET",
         headers: {

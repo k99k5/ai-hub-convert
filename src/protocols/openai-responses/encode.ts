@@ -137,7 +137,9 @@ function encodeToolChoice(choice: ToolChoice, request: CanonicalRequest): Respon
     return {
       type: "function",
       name:
-        choice.name === "web_search" && hasBuiltInWebSearch(request)
+        request.source !== "openai-responses" &&
+        choice.name === "web_search" &&
+        hasBuiltInWebSearch(request)
           ? INTERNAL_WEB_SEARCH_TOOL_NAME
           : choice.name,
     };
@@ -179,7 +181,14 @@ export function encodeResponsesRequest(
               return {
                 type: "function" as const,
                 name: INTERNAL_WEB_SEARCH_TOOL_NAME,
-                description: INTERNAL_WEB_SEARCH_TOOL_DESCRIPTION,
+                description:
+                  INTERNAL_WEB_SEARCH_TOOL_DESCRIPTION +
+                  (request.source === "openai-responses"
+                    ? " 请在答案中以 Markdown 链接引用实际使用的搜索结果，链接必须来自工具返回的 URL。" +
+                      (tool.userLocation === undefined
+                        ? ""
+                        : ` 用户近似位置和时区：${JSON.stringify(tool.userLocation)}。`)
+                    : ""),
                 parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
                 strict: true,
               };
@@ -203,6 +212,10 @@ export function encodeResponsesRequest(
       ? {}
       : { max_output_tokens: request.maxOutputTokens }),
     stream: request.stream,
+    ...(Array.isArray(extensions?.include) &&
+    extensions.include.includes("reasoning.encrypted_content")
+      ? { include: ["reasoning.encrypted_content" as const] }
+      : {}),
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
     ...(request.topP === undefined ? {} : { top_p: request.topP }),
     ...(request.metadata === undefined ? {} : { metadata: request.metadata }),

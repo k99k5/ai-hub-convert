@@ -1,3 +1,4 @@
+import type { CanonicalEvent } from "../core/events.js";
 import type { Usage, WebSearchTool } from "../core/ir.js";
 import { matchesSearchDomain } from "../providers/web-search/domains.js";
 import type { WebSearchProvider } from "../providers/web-search/types.js";
@@ -36,11 +37,11 @@ export class WebSearchSession {
     return this.policy?.maxUses === 0 ? disableInternalWebSearchTool(this.path, body) : body;
   }
 
-  async advance(
+  async *advance(
     body: Record<string, unknown>,
     response: unknown,
     signal: AbortSignal,
-  ): Promise<Record<string, unknown> | undefined> {
+  ): AsyncGenerator<CanonicalEvent, Record<string, unknown> | undefined> {
     this.usage = sumUsage(this.usage, readCompletionUsage(this.path, response));
     const calls = extractInternalToolCalls(this.path, response);
     if (calls.webSearch.length === 0) return undefined;
@@ -60,6 +61,12 @@ export class WebSearchSession {
       }
       const search = {
         ...decodeWebSearchRequest(call.arguments),
+        ...(this.policy?.searchContextSize === undefined
+          ? {}
+          : { maxResults: { low: 3, medium: 5, high: 10 }[this.policy.searchContextSize] }),
+        ...(this.policy?.userLocation === undefined
+          ? {}
+          : { userLocation: this.policy.userLocation }),
         ...(this.policy?.allowedDomains === undefined
           ? {}
           : { domains: this.policy.allowedDomains }),
@@ -67,6 +74,7 @@ export class WebSearchSession {
           ? {}
           : { blockedDomains: this.policy.blockedDomains }),
       };
+      yield { type: "web_search_start", id: call.id, query: search.query };
       const results = (await this.provider.execute(search, { requestId: call.id, signal })).filter(
         (result) =>
           (!search.domains?.length || matchesSearchDomain(result.url, search.domains)) &&
@@ -79,6 +87,7 @@ export class WebSearchSession {
       this.#reserve(JSON.stringify(execution));
       this.#reserve(output);
       this.executions.push(execution);
+      yield { type: "web_search_result", execution };
       allResultsEmpty &&= results.length === 0;
       outputs.set(call.id, output);
     }

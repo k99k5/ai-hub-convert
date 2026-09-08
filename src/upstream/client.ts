@@ -168,7 +168,10 @@ export class UpstreamClient {
         throw error;
       }
       const responseBody = await readJsonBody(response, this.#jsonBodyLimitBytes);
-      const next = await session.advance(currentBody, responseBody, signal);
+      const search = session.advance(currentBody, responseBody, signal);
+      let step = await search.next();
+      while (!step.done) step = await search.next();
+      const next = step.value;
       if (!next) return session.finish(responseBody);
       currentBody = next;
     }

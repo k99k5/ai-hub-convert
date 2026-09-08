@@ -124,6 +124,10 @@ Anthropic `max_uses`、`allowed_domains` / `blocked_domains` 和 Responses `filt
 
 Anthropic JSON/SSE 出口会生成原生 `server_tool_use` / `web_search_tool_result` 块，并同步 `usage.server_tool_use.web_search_requests`。后续多轮对话回传这些 server-search block 时，网关会识别并过滤自身生成的 replay 数据。普通 function 即使名称为 `web_search`，仍按普通 function 处理，不会被当作内置 Web Search。
 
+Responses JSON/SSE 出口会生成 `web_search_call`，SSE 在实际搜索前发送 `in_progress` / `searching`，结果返回后发送 `completed`。通过 `include:["web_search_call.action.sources"]` 获取搜索来源；答案里实际出现的检索链接会附带 `url_citation`。返回的 `output` 可以直接放入下一轮 `input`，搜索记录作为历史上下文处理，不重新执行。
+
+Responses 支持显式搜索 `tool_choice`、`allowed_tools`、`max_tool_calls`、上下文大小及域名过滤。DuckDuckGo Lite 的位置只作为检索提示；不支持离线缓存和图片检索，相关请求返回 400。具体映射、历史回传和兼容性变化见 [Responses 搜索兼容说明](docs/compatibility.md#responses-网关搜索)。
+
 ## 兼容范围
 
 支持 JSON 与 SSE：text、system、URL/Base64 image、function tool、tool call/result、并行与交错工具调用、reasoning/thinking、usage、已有 search result、URL citation/annotation。Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 会转为 Responses `reasoning.effort`，token counting 同样保留，Chat fallback 转为 `reasoning_effort`。Anthropic `output_config.format` 支持 `null` 或 `{ type: "json_schema", schema: {...} }`：Responses 映射到 `text.format`，token counting 同样保留，Chat fallback 映射到 `response_format.json_schema`。

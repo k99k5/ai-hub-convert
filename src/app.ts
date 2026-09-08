@@ -54,6 +54,10 @@ import { decodeChatResponse } from "./protocols/openai-chat/decode.js";
 import { encodeChatRequest } from "./protocols/openai-chat/encode.js";
 import { decodeResponsesRequest } from "./protocols/openai-responses/request-decode.js";
 import { encodeResponsesResponse } from "./protocols/openai-responses/response-encode.js";
+import {
+  addResponsesWebSearch,
+  includeWebSearchSources,
+} from "./protocols/openai-responses/web-search.js";
 import { decodeResponsesResponse } from "./protocols/openai-responses/decode.js";
 import { encodeResponsesRequest } from "./protocols/openai-responses/encode.js";
 import {
@@ -565,8 +569,13 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             webSearchOptions(canonicalRequest).webSearch,
           );
           return reply.send(
-            encodeResponsesResponse(
-              decodeResponsesResponse(upstreamResponse, { preserveWireMetadata: true }),
+            addResponsesWebSearch(
+              encodeResponsesResponse(
+                decodeResponsesResponse(upstreamResponse, { preserveWireMetadata: true }),
+              ),
+              getWebSearchExecutions(upstreamResponse),
+              includeWebSearchSources(canonicalRequest),
+              outputLimits(config),
             ),
           );
         } catch (error) {
@@ -592,7 +601,9 @@ async function streamResponsesResponse(
   timeoutOptions: StreamTimeoutOptions,
   send: (frame: ResponsesSseFrame | string) => Promise<void>,
 ): Promise<void> {
-  const encoder = new ResponsesStreamEncoder(argumentLimits, streamOutputLimits);
+  const encoder = new ResponsesStreamEncoder(argumentLimits, streamOutputLimits, {
+    includeWebSearchSources: includeWebSearchSources(request),
+  });
   for await (const event of upstream.streamCompletion(
     "responses",
     encodeResponsesRequest(request, {

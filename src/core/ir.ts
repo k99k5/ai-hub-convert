@@ -81,6 +81,13 @@ export interface WebSearchTool {
   maxUses?: number;
   allowedDomains?: string[];
   blockedDomains?: string[];
+  searchContextSize?: "low" | "medium" | "high";
+  userLocation?: {
+    city?: string;
+    country?: string;
+    region?: string;
+    timezone?: string;
+  };
   version:
     | "web_search_20250305"
     | "web_search_20260209"

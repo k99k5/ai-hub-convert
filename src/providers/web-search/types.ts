@@ -9,6 +9,12 @@ export interface WebSearchRequest {
   domains?: string[];
   blockedDomains?: string[];
   maxResults?: number;
+  userLocation?: {
+    city?: string;
+    country?: string;
+    region?: string;
+    timezone?: string;
+  };
 }
 
 export interface WebSearchResult {

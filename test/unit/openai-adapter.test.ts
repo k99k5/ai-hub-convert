@@ -213,15 +213,18 @@ describe("OpenAI Responses adapter", () => {
         },
       ],
     });
-    const versioned = decodeResponsesRequest({
-      model: "gpt-test",
-      input: "search",
-      tools: [
-        { type: "web_search_2025_08_26" },
-        { type: "web_search_preview", search_content_types: ["text", "image"] },
-        { type: "web_search_preview_2025_03_11" },
-      ],
-    });
+    const versioned = [
+      "web_search_2025_08_26",
+      "web_search_preview",
+      "web_search_preview_2025_03_11",
+    ].flatMap(
+      (type) =>
+        decodeResponsesRequest({
+          model: "gpt-test",
+          input: "search",
+          tools: [{ type }],
+        }).tools,
+    );
 
     expect(stable.tools).toEqual([
       { type: "web_search", provider: "web-search", version: "web_search" },
@@ -232,7 +235,7 @@ describe("OpenAI Responses adapter", () => {
         strict: false,
       },
     ]);
-    expect(versioned.tools).toEqual([
+    expect(versioned).toEqual([
       {
         type: "web_search",
         provider: "web-search",

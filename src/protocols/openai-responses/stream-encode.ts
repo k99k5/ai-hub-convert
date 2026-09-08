@@ -1,4 +1,5 @@
 import type { CanonicalEvent } from "../../core/events.js";
+import { encodeWebSearchCall, webSearchCitations, webSearchItemId } from "./web-search.js";
 import type {
   Citation,
   FunctionCallContent,
@@ -43,10 +44,16 @@ export class ResponsesStreamEncoder {
   readonly #outputItems = new Map<number, Record<string, unknown>>();
   readonly #argumentLimiter: ToolArgumentStreamLimiter;
   readonly #outputLimiter: StreamOutputLimiter;
+  readonly #contentIndices = new Map<number, number>();
+  readonly #searches = new Map<string, { index: number; itemId: string; query: string }>();
+  readonly #searchSources: Array<{ title: string; url: string }> = [];
+  #searchCount = 0;
+  #nextOutputIndex = 0;
 
   constructor(
     limits: ToolArgumentLimits = DEFAULT_TOOL_ARGUMENT_LIMITS,
     outputLimits: StreamOutputLimits = DEFAULT_STREAM_OUTPUT_LIMITS,
+    private readonly options: { includeWebSearchSources?: boolean } = {},
   ) {
     this.#argumentLimiter = new ToolArgumentStreamLimiter(limits);
     this.#outputLimiter = new StreamOutputLimiter(outputLimits);
@@ -55,6 +62,12 @@ export class ResponsesStreamEncoder {
   encode(event: CanonicalEvent): ResponsesSseFrame[] {
     if (this.#completed) {
       throw new Error("Responses stream is already complete");
+    }
+    if ("index" in event) {
+      if (event.type === "content_start" && !this.#contentIndices.has(event.index)) {
+        this.#contentIndices.set(event.index, event.index + this.#searchCount);
+      }
+      event = { ...event, index: this.#contentIndices.get(event.index) ?? event.index };
     }
 
     switch (event.type) {
@@ -80,8 +93,10 @@ export class ResponsesStreamEncoder {
         throw new Error("Anthropic signatures cannot be encoded as Responses reasoning");
       case "citation_delta":
         return this.#citationDelta(event.index, event.citation);
+      case "web_search_start":
+        return this.#startWebSearch(event.id, event.query);
       case "web_search_result":
-        return [];
+        return this.#finishWebSearch(event.execution);
     }
   }
 
@@ -110,6 +125,7 @@ export class ResponsesStreamEncoder {
       throw new Error(`Responses output item ${index} is already defined`);
     }
     this.#outputLimiter.addBytes(index, OUTPUT_ITEM_OVERHEAD_BYTES);
+    this.#nextOutputIndex = Math.max(this.#nextOutputIndex, index + 1);
     this.#outputLimiter.addUnrelated(index, itemId);
     if (content.type === "text") {
       return this.#startText(index, itemId, content);
@@ -216,10 +232,7 @@ export class ResponsesStreamEncoder {
       throw new Error(`Responses output item ${index} is not open as text`);
     }
     this.#outputLimiter.addBytes(index, CITATION_OVERHEAD_BYTES);
-    this.#outputLimiter.addUnrelated(index, citation.url);
-    if (citation.title !== undefined) {
-      this.#outputLimiter.addUnrelated(index, citation.title);
-    }
+    this.#outputLimiter.addUnrelated(index, JSON.stringify(encodeCitation(citation)));
     const citations = item.content.citations ?? [];
     const annotationIndex = citations.length;
     citations.push(citation);
@@ -305,6 +318,16 @@ export class ResponsesStreamEncoder {
     if (!item) {
       throw new Error(`Responses output item ${index} is not open`);
     }
+    const citationFrames: ResponsesSseFrame[] = [];
+    if (item.type === "text") {
+      for (const citation of webSearchCitations(
+        item.content.text,
+        this.#searchSources,
+        item.content.citations,
+      )) {
+        citationFrames.push(...this.#citationDelta(index, citation));
+      }
+    }
     this.#openItems.delete(index);
     if (item.type === "reasoning") {
       return this.#stopReasoning(index, item);
@@ -327,6 +350,7 @@ export class ResponsesStreamEncoder {
     };
     this.#outputItems.set(index, outputItem);
     return [
+      ...citationFrames,
       this.#frame("response.output_text.done", {
         item_id: item.itemId,
         output_index: index,
@@ -408,7 +432,7 @@ export class ResponsesStreamEncoder {
 
   #complete(finishReason: string, usage: Usage): ResponsesSseFrame[] {
     this.#assertStarted();
-    if (this.#openItems.size > 0) {
+    if (this.#openItems.size > 0 || this.#searches.size > 0) {
       throw new Error("Responses stream cannot complete with open output items");
     }
     this.#completed = true;
@@ -421,6 +445,53 @@ export class ResponsesStreamEncoder {
       this.#frame(incomplete ? "response.incomplete" : "response.completed", {
         response: this.#response(status, output, encodeUsage(usage), finishReason),
       }),
+    ];
+  }
+
+  #startWebSearch(id: string, query: string): ResponsesSseFrame[] {
+    const identity = this.#assertStarted();
+    if (this.#searches.has(id)) throw new Error("搜索调用尚未结束");
+    const index = this.#nextOutputIndex++;
+    const itemId = webSearchItemId(identity.id, id, this.#searchCount++);
+    const item = encodeWebSearchCall(itemId, query, "in_progress");
+    this.#outputLimiter.addBytes(index, OUTPUT_ITEM_OVERHEAD_BYTES);
+    this.#outputLimiter.addUnrelated(index, JSON.stringify(item));
+    this.#searches.set(id, { index, itemId, query });
+    return [
+      this.#frame("response.output_item.added", { output_index: index, item }),
+      this.#frame("response.web_search_call.in_progress", { output_index: index, item_id: itemId }),
+      this.#frame("response.web_search_call.searching", { output_index: index, item_id: itemId }),
+    ];
+  }
+
+  #finishWebSearch(
+    execution: Extract<CanonicalEvent, { type: "web_search_result" }>["execution"],
+  ): ResponsesSseFrame[] {
+    const frames = this.#searches.has(execution.id)
+      ? []
+      : this.#startWebSearch(execution.id, execution.query);
+    const search = this.#searches.get(execution.id);
+    if (!search || search.query !== execution.query) throw new Error("搜索结果与调用不匹配");
+    const sources = execution.results.map(({ title, url }) => ({ title, url }));
+    // 来源用于后续引用，即使未请求 sources 字段，也必须计入驻留内存限额。
+    this.#outputLimiter.addUnrelated(search.index, JSON.stringify(sources));
+    const item = encodeWebSearchCall(
+      search.itemId,
+      search.query,
+      "completed",
+      this.options.includeWebSearchSources ? sources : undefined,
+    );
+    this.#outputLimiter.addUnrelated(search.index, JSON.stringify(item));
+    this.#searchSources.push(...sources);
+    this.#outputItems.set(search.index, { ...item });
+    this.#searches.delete(execution.id);
+    return [
+      ...frames,
+      this.#frame("response.web_search_call.completed", {
+        output_index: search.index,
+        item_id: search.itemId,
+      }),
+      this.#frame("response.output_item.done", { output_index: search.index, item }),
     ];
   }
 

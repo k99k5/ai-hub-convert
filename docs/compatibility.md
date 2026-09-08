@@ -39,7 +39,7 @@
 | existing search_result | content 退化为 text | content 退化为 text | 支持规范化表示 |
 | upstream refusal | 折为 text 块 + `stop_reason:"refusal"`；SSE 流中 refusal part 在 `output_item.done` 时并入文本块 | 同上 | JSON 保留原生 refusal part；SSE 流中折叠为 text delta |
 | URL citations/annotations | JSON/SSE 支持；SSE 引用在文本块结束前输出，字段与 JSON 一致 | 受 Chat 扩展能力限制 | JSON/SSE 支持 |
-| built-in Web Search execution | 网关 provider 执行；Anthropic 出口生成 `server_tool_use` / `web_search_tool_result` 并报告 `web_search_requests` | 网关 provider 执行；内部 function/tool-result round 后继续生成 | 网关 provider 执行；内部 function-result round 后继续生成 |
+| built-in Web Search execution | 网关 provider 执行；Anthropic 出口生成 `server_tool_use` / `web_search_tool_result` 并报告 `web_search_requests` | 网关 provider 执行；内部 function/tool-result round 后继续生成 | 网关执行，返回 `web_search_call`、SSE 搜索进度、按需来源与链接引用 |
 | ordinary function `web_search` | 普通 function | 普通 function | 普通 function |
 | document/PDF | 不支持 | 不支持 | 不支持 |
 | audio | 不支持 | 不支持 | 不支持 |
@@ -56,6 +56,44 @@
 不使用 prefix matching。Anthropic `response_inclusion` 仅在 `web_search_20260318` 接受 `full | excluded`；OpenAI preview 只接受 preview contract 的 `search_content_types`，stable/versioned 类型使用 `filters.allowed_domains`。
 
 内置 Web Search 由独立 provider registry 执行，当前 provider 为 DuckDuckGo。请求进入 canonical Web Search 后会 materialize 为网关保留的内部 function；上游模型发起该调用时，网关执行搜索、回填结果并继续 completion。Anthropic JSON/SSE 出口会把执行轨迹表示为原生 `server_tool_use` / `web_search_tool_result`，并同步 `usage.server_tool_use.web_search_requests`。网关自身生成的 server-search replay block 在后续 Anthropic 请求中会被识别并过滤，普通名为 `web_search` 的自定义 function 不会被当作内置搜索。
+
+### Responses 网关搜索
+
+协议形状参考 [OpenAI Web Search 指南](https://developers.openai.com/api/docs/guides/tools-web-search) 和 [搜索流式事件](https://platform.openai.com/docs/api-reference/responses-streaming/response/web_search_call)。实际检索由 DuckDuckGo Lite 完成，上游仍接收普通内部函数调用；无需上游提供原生搜索能力。
+
+| 输入 | 网关行为 |
+| --- | --- |
+| `tool_choice:"auto" / "none" / "required"` | 保留模式；完成强制搜索后恢复自动选择，允许模型回答 |
+| `tool_choice:{type:"web_search"}` 及对应已声明版本 | 选择内部搜索函数；`{type:"function",name:"web_search"}` 仍选择普通同名函数 |
+| `tool_choice:{type:"allowed_tools",mode,tools}` | 校验声明后仅发送允许的工具，模式支持 `auto` / `required`；不保留原始完整工具列表的缓存布局 |
+| `include:["web_search_call.action.sources"]` | 在公开搜索项的 `action.sources` 返回去重 URL；未请求则省略，空结果则为 `[]`；不发送给上游 |
+| `include:["reasoning.encrypted_content"]` | 继续发给上游，可与搜索来源请求同时使用；其他 include 值返回 400 |
+| `max_tool_calls` | 正整数，限制本次请求的搜索执行次数；达到上限后移除内部搜索工具。仍受既有最多 8 轮模型调用限制 |
+| `search_context_size` | `low` / `medium` / `high` 对应最多 3 / 5 / 10 条结果；默认 5 条。不模拟原生 token 预算 |
+| stable `filters.allowed_domains` / `filters.blocked_domains` | 每个列表最多 100 个无协议和路径的域名，匹配域名及其子域名；中文域名通过 IDNA 与 Punycode 统一匹配；在已检索结果上过滤 |
+| `user_location.city / region / country` | 作为搜索词的位置提示，并提供给模型；不承诺精确地理定位或原生地区排序 |
+| `user_location.timezone` | 作为模型生成查询时的提示；不会转换为 DuckDuckGo 时区过滤 |
+| `external_web_access:true` 或省略 | 在线检索；`false` 返回 400，网关没有离线搜索缓存 |
+| preview `search_content_types` | 支持文本；包含 `image` 返回 400，不执行图片搜索 |
+
+每次执行在 JSON 中生成独立的 `web_search_call`，包含稳定的网关调用 ID、`status:"completed"`、`action.type:"search"`、`query` 和 `queries`。JSON 搜索记录位于最终模型输出之前；流式则保留实时可见顺序。SSE 生命周期为 `response.output_item.added` → `response.web_search_call.in_progress` → `response.web_search_call.searching` → `response.web_search_call.completed` → `response.output_item.done`，最终响应的搜索项与已发送的完成事件一致。普通文本无需等待搜索轮次全部结束。
+
+来源与引用分别处理：来源列出实际搜索结果，`url_citation` 仅添加到答案里实际出现的匹配 URL 或 Markdown 链接；未引用的来源不生成注解，已有上游引用保留且不重复添加。流式链接可以跨 delta，到文本结束时生成完整引用。新增搜索项、来源及引用复用输出限额；各模型轮次的 usage 继续累计。
+
+无状态多轮支持把 JSON 或 SSE 终态的 `output` 回传到 `input`。合法 `web_search_call` 的搜索、打开页面和页内查找记录会转为历史文本，保留动作、状态、查询及可用 URL；不重新搜索，不把网关生成的调用 ID 发给上游。仅支持历史动作回传，不新增实时打开页面或页内查找能力。此路径不会重建未回传的摘要，也不把 `previous_response_id` 变成网关搜索会话存储；需要完整搜索上下文时应回传历史输出。
+
+既有 DuckDuckGo 降级行为保持不变：请求失败、限流或无结果均作为空结果回填，`completed` 表示搜索尝试结束，不保证结果非空；调用方取消则终止请求。上游在同一轮混合内部搜索和需要客户端执行的函数仍会拒绝，防止缺少函数结果时继续调用模型。
+
+兼容性收紧：同一请求只接受一个内置搜索声明，函数不能占用 `__ai_hub_web_search` 保留名称，显式工具选择必须指向已声明工具。此前重复搜索声明会产生相同内部函数，离线和图片参数可能被忽略；现在返回明确的 400。迁移时保留一个搜索版本、移除无法实现的参数并选择文本在线检索，无配置或数据迁移。
+
+本地复现（不依赖网络服务）：
+
+```powershell
+node node_modules/vitest/vitest.mjs run test/unit/responses-web-search.test.ts test/integration/responses-web-search.test.ts
+node node_modules/typescript/bin/tsc --noEmit
+```
+
+集成测试注入固定 DuckDuckGo HTML 和上游模型响应，验证实际 provider 解析、HTTP JSON/SSE、参数映射、引用、回传与取消。真实搜索可用性仍取决于运行环境访问 DuckDuckGo 的能力。
 
 ## Prompt cache
 

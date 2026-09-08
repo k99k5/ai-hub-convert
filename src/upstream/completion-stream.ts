@@ -188,10 +188,7 @@ export async function* streamCompletion(
         canonical.usage,
       ) as Record<string, unknown>;
     }
-    const previousSearches = session.executions.length;
-    const next = await session.advance(current, responseBody, signal);
-    for (const execution of session.executions.slice(previousSearches))
-      yield { type: "web_search_result", execution };
+    const next = yield* session.advance(current, responseBody, signal);
     if (!next) {
       yield {
         ...completion,

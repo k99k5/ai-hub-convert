@@ -6,13 +6,17 @@ import type {
   ToolChoice,
 } from "../../core/ir.js";
 import { OpenAIAdapterError } from "./types.js";
+import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../providers/web-search/internal.js";
+import { decodeWebSearchHistory } from "./web-search.js";
 
 const errorCode = "INVALID_OPENAI_RESPONSES_REQUEST" as const;
 const supportedTopLevelFields = new Set([
   "background",
   "input",
+  "include",
   "instructions",
   "max_output_tokens",
+  "max_tool_calls",
   "metadata",
   "model",
   "parallel_tool_calls",
@@ -243,6 +247,9 @@ function decodeInput(value: unknown): Message[] {
     if (item.type === "function_call_output") {
       return decodeFunctionResult(item);
     }
+    if (item.type === "web_search_call") {
+      return decodeWebSearchHistory(item);
+    }
     return invalid("Unsupported OpenAI Responses input");
   });
 }
@@ -268,6 +275,12 @@ function validateWebSearchLocation(value: unknown, preview: boolean): void {
 }
 
 function validateWebSearchTool(tool: Record<string, unknown>, preview: boolean): void {
+  if (tool.external_web_access !== undefined && typeof tool.external_web_access !== "boolean") {
+    invalid("external_web_access 必须是布尔值");
+  }
+  if (tool.external_web_access === false) {
+    invalid("DuckDuckGo 搜索不支持 external_web_access=false 的离线缓存模式");
+  }
   if (
     tool.search_context_size !== undefined &&
     tool.search_context_size !== "low" &&
@@ -283,14 +296,26 @@ function validateWebSearchTool(tool: Record<string, unknown>, preview: boolean):
     if (!isRecord(tool.filters)) {
       invalid("Invalid OpenAI Responses request: invalid Web Search filters");
     }
-    const allowedDomains = tool.filters.allowed_domains;
-    if (
-      allowedDomains !== undefined &&
-      allowedDomains !== null &&
-      (!Array.isArray(allowedDomains) ||
-        !allowedDomains.every((domain) => typeof domain === "string"))
-    ) {
-      invalid("Invalid OpenAI Responses request: invalid Web Search filters");
+    for (const key of Object.keys(tool.filters)) {
+      if (key !== "allowed_domains" && key !== "blocked_domains") {
+        invalid("不支持的网页搜索过滤条件");
+      }
+      const domains = tool.filters[key];
+      if (
+        domains !== undefined &&
+        domains !== null &&
+        (!Array.isArray(domains) ||
+          domains.length > 100 ||
+          !domains.every(
+            (domain) =>
+              typeof domain === "string" &&
+              /^(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)*[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?$/u.test(
+                domain,
+              ),
+          ))
+      ) {
+        invalid("网页搜索域名列表最多包含 100 个域名，不能包含协议、路径或空值");
+      }
     }
   }
   if (!preview && tool.search_content_types !== undefined) {
@@ -307,6 +332,9 @@ function validateWebSearchTool(tool: Record<string, unknown>, preview: boolean):
     invalid("Invalid OpenAI Responses request: invalid Web Search content types");
   }
   validateWebSearchLocation(tool.user_location, preview);
+  if (Array.isArray(tool.search_content_types) && tool.search_content_types.includes("image")) {
+    invalid("DuckDuckGo Lite 搜索只支持文本结果，不支持图片搜索");
+  }
 }
 
 function decodeTools(value: unknown): CanonicalTool[] {
@@ -332,10 +360,32 @@ function decodeTools(value: unknown): CanonicalTool[] {
         ...(isRecord(tool.filters) && Array.isArray(tool.filters.allowed_domains)
           ? { allowedDomains: [...tool.filters.allowed_domains] as string[] }
           : {}),
+        ...(isRecord(tool.filters) && Array.isArray(tool.filters.blocked_domains)
+          ? { blockedDomains: [...tool.filters.blocked_domains] as string[] }
+          : {}),
+        ...(tool.search_context_size === undefined
+          ? {}
+          : {
+              searchContextSize: tool.search_context_size as "low" | "medium" | "high",
+            }),
+        ...(isRecord(tool.user_location)
+          ? {
+              userLocation: Object.fromEntries(
+                Object.entries(tool.user_location).filter(
+                  ([key, field]) =>
+                    ["city", "country", "region", "timezone"].includes(key) &&
+                    typeof field === "string",
+                ),
+              ),
+            }
+          : {}),
       };
     }
     if (tool.type !== "function") {
       return invalid("Unsupported OpenAI Responses tool");
+    }
+    if (tool.name === INTERNAL_WEB_SEARCH_TOOL_NAME) {
+      invalid("函数名称与网关保留的搜索工具名称冲突");
     }
     if (tool.description !== undefined && typeof tool.description !== "string") {
       return invalid("Invalid OpenAI Responses request: tool description must be a string");
@@ -353,7 +403,23 @@ function decodeTools(value: unknown): CanonicalTool[] {
   });
 }
 
-function decodeToolChoice(value: unknown): ToolChoice | undefined {
+function selectedTool(value: unknown, tools: CanonicalTool[]): CanonicalTool {
+  const choice = record(value, "tool_choice");
+  const tool = tools.find((candidate) =>
+    choice.type === "function"
+      ? candidate.type === "function" && candidate.name === choice.name
+      : candidate.type === "web_search" &&
+        (choice.type === candidate.version ||
+          choice.type ===
+            (candidate.version.startsWith("web_search_preview")
+              ? "web_search_preview"
+              : "web_search")),
+  );
+  if (!tool) invalid("tool_choice 必须选择已声明的工具");
+  return tool;
+}
+
+function decodeToolChoice(value: unknown, tools: CanonicalTool[]): ToolChoice | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
@@ -361,14 +427,40 @@ function decodeToolChoice(value: unknown): ToolChoice | undefined {
     return { type: value };
   }
   const choice = record(value, "tool_choice");
-  if (choice.type !== "function") {
-    return invalid("Unsupported OpenAI Responses tool choice");
+  if (choice.type === "allowed_tools") {
+    if (
+      (choice.mode !== "auto" && choice.mode !== "required") ||
+      !Array.isArray(choice.tools) ||
+      choice.tools.length === 0
+    ) {
+      invalid("allowed_tools 必须包含非空工具列表，mode 必须是 auto 或 required");
+    }
+    const allowed = new Set(choice.tools.map((tool) => selectedTool(tool, tools)));
+    const selected = tools.filter((tool) => allowed.has(tool));
+    tools.splice(0, tools.length, ...selected);
+    return { type: choice.mode };
   }
-  return { type: "function", name: string(choice.name, "tool_choice name") };
+  const tool = selectedTool(choice, tools);
+  return {
+    type: "function",
+    name: tool.type === "web_search" ? INTERNAL_WEB_SEARCH_TOOL_NAME : tool.name,
+  };
 }
 
 function decodeExtensions(input: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (
+    input.include !== undefined &&
+    input.include !== null &&
+    (!Array.isArray(input.include) ||
+      !input.include.every(
+        (value) =>
+          value === "web_search_call.action.sources" || value === "reasoning.encrypted_content",
+      ))
+  ) {
+    invalid("include 仅支持 web_search_call.action.sources 和 reasoning.encrypted_content");
+  }
   const request = {
+    ...(input.include === undefined ? {} : { include: input.include }),
     ...(input.store === undefined ? {} : { store: input.store }),
     ...(input.previous_response_id === undefined
       ? {}
@@ -448,7 +540,18 @@ export function decodeResponsesRequest(value: unknown): CanonicalRequest {
     input.metadata === undefined || input.metadata === null
       ? undefined
       : jsonRecord(input.metadata, "metadata");
-  const toolChoice = decodeToolChoice(input.tool_choice);
+  const tools = decodeTools(input.tools);
+  if (tools.filter((tool) => tool.type === "web_search").length > 1) {
+    invalid("同一请求只能声明一个内置网页搜索工具");
+  }
+  const maxToolCalls = optionalNumber(input.max_tool_calls, "max_tool_calls");
+  if (maxToolCalls !== undefined && (!Number.isSafeInteger(maxToolCalls) || maxToolCalls < 1)) {
+    invalid("max_tool_calls 必须是正整数");
+  }
+  for (const tool of tools) {
+    if (tool.type === "web_search" && maxToolCalls !== undefined) tool.maxUses = maxToolCalls;
+  }
+  const toolChoice = decodeToolChoice(input.tool_choice, tools);
   const extensions = decodeExtensions(input);
 
   return {
@@ -466,7 +569,7 @@ export function decodeResponsesRequest(value: unknown): CanonicalRequest {
         : []),
       ...decodeInput(input.input),
     ],
-    tools: decodeTools(input.tools),
+    tools,
     ...(toolChoice === undefined ? {} : { toolChoice }),
     ...(typeof input.parallel_tool_calls === "boolean"
       ? { parallelToolCalls: input.parallel_tool_calls }

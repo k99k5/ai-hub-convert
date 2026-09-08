@@ -150,6 +150,8 @@ export class AnthropicStreamEncoder {
         return this.#stopContent(event.index);
       case "response_complete":
         return this.#complete(event);
+      case "web_search_start":
+        return [];
       case "web_search_result": {
         this.#assertStarted();
         if (this.#openBlocks.size > 0)
