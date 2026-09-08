@@ -130,14 +130,7 @@ describe("Responses 内存引用续轮", () => {
     ]);
     expect(seen[0]?.prompt_cache_key).toMatch(/^[a-f0-9]{64}$/);
     expect(seen[1]?.prompt_cache_key).toBe(seen[0]?.prompt_cache_key);
-    const diagnostics = logs
-      .map((line) => JSON.parse(line) as Wire)
-      .filter((line) => line.event === "item_reference_resolved");
-    expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0]).toMatchObject({
-      reference_count: 3,
-      store: store === undefined ? false : store,
-    });
+    expect(logs.join("")).not.toContain("DEBUG-responses");
     for (const secret of [
       "rs_private",
       "msg_private",

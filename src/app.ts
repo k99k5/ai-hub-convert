@@ -58,10 +58,6 @@ import { decodeChatRequest } from "./protocols/openai-chat/request-decode.js";
 import { encodeChatResponse } from "./protocols/openai-chat/response-encode.js";
 import { ChatStreamEncoder } from "./protocols/openai-chat/stream-encode.js";
 import { decodeResponsesRequest } from "./protocols/openai-responses/request-decode.js";
-import {
-  responsesInputDiagnostic,
-  responsesUpstreamDiagnostic,
-} from "./protocols/openai-responses/diagnostics.js";
 import { encodeResponsesResponse } from "./protocols/openai-responses/response-encode.js";
 import {
   addResponsesWebSearch,
@@ -600,10 +596,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         try {
           apiKey = extractResponsesApiKey(request.headers);
           canonicalRequest = decodeResponsesRequest(request.body);
-          const referenceCount = canonicalRequest.messages.filter(
-            (message) => message.itemReference !== undefined,
-          ).length;
-          if (referenceCount > 0) {
+          if (canonicalRequest.messages.some((message) => message.itemReference !== undefined)) {
             let expandedBytes = Buffer.byteLength(JSON.stringify(request.body));
             canonicalRequest.messages = canonicalRequest.messages.flatMap((message) => {
               const reference = message.itemReference;
@@ -627,17 +620,6 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
               return decodeResponsesRequest({ model: canonicalRequest.model, input: [item] })
                 .messages;
             });
-            const store = canonicalRequest.extensions?.request?.store;
-            request.log.info(
-              {
-                request_id: request.id,
-                stage: "request_decode",
-                event: "item_reference_resolved",
-                reference_count: referenceCount,
-                store: store === undefined ? false : store,
-              },
-              "[DEBUG-responses-input-v1] 已从内存展开 Responses 引用",
-            );
           }
         } catch (error) {
           if (error instanceof AuthenticationError) {
@@ -651,10 +633,6 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             });
           }
           if (error instanceof OpenAIAdapterError) {
-            request.log.warn(
-              { request_id: request.id, ...responsesInputDiagnostic(request.body, error) },
-              "[DEBUG-responses-input-v1] Responses 输入校验失败",
-            );
             return reply.code(400).send({
               error: {
                 message: error.message,
@@ -714,10 +692,6 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             );
             return;
           } catch (error) {
-            request.log.warn(
-              { request_id: request.id, ...responsesUpstreamDiagnostic(error) },
-              "[DEBUG-responses-input-v1] Responses 后续处理失败",
-            );
             abortScope.abort(error);
             if (!reply.raw.headersSent) {
               const mapped = mapUpstreamError("openai-responses", error, request.id);
@@ -773,10 +747,6 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           return reply.send(response);
         } catch (error) {
           const mapped = mapUpstreamError("openai-responses", error, request.id);
-          request.log.warn(
-            { request_id: request.id, ...responsesUpstreamDiagnostic(error) },
-            "[DEBUG-responses-input-v1] Responses 后续处理失败",
-          );
           return reply.code(mapped.status).send(mapped.body);
         } finally {
           abortScope.dispose();

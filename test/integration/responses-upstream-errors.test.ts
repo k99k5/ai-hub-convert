@@ -10,40 +10,34 @@ afterEach(async () => {
 const failures = [
   {
     error: { code: "item_not_found", message: "private-item" },
-    hint: "item_not_found",
-    code: "item_not_found",
+    name: "不存在的输出项",
   },
   {
     error: { message: "Item private-item does not exist" },
-    hint: "item_not_found",
-    code: "absent",
+    name: "缺失错误码的输出项错误",
   },
   {
     error: { message: "No tool call found for function call output with call_id private-call" },
-    hint: "tool_call_not_found",
-    code: "absent",
+    name: "工具调用不存在",
   },
   {
     error: { message: "item_reference is not supported: private-item" },
-    hint: "item_reference_unsupported",
-    code: "absent",
+    name: "不支持引用",
   },
   {
     error: { code: "private-code", message: "private-message" },
-    hint: "unknown",
-    code: "unrecognized",
+    name: "未知错误码",
   },
   {
     error: { code: "invalid_value", message: { private: "private-message" } },
-    hint: "unknown",
-    code: "invalid_value",
+    name: "非字符串错误消息",
   },
 ];
 
-describe("Responses 上游失败安全诊断", () => {
+describe("Responses 上游错误清洗", () => {
   it.each(
     [false, true].flatMap((stream) => failures.map((failure) => ({ stream, ...failure }))),
-  )("区分上游错误特征且不暴露原始错误：%j", async ({ stream, error, hint, code }) => {
+  )("清洗$name且不重试或输出临时日志，stream=$stream", async ({ stream, error }) => {
     const logs: string[] = [];
     const upstreamFetch = vi.fn(async () =>
       Response.json(
@@ -57,7 +51,7 @@ describe("Responses 上游失败安全诊断", () => {
     const app = buildApp({
       config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
       logger: {
-        level: "warn",
+        level: "info",
         stream: {
           write: (line: string) => {
             logs.push(line);
@@ -79,27 +73,21 @@ describe("Responses 上游失败安全诊断", () => {
     });
     expect(response.statusCode).toBe(400);
     expect(upstreamFetch).toHaveBeenCalledTimes(1);
-    expect(logs).toHaveLength(1);
-    expect(JSON.parse(logs[0] ?? "")).toMatchObject({
-      msg: "[DEBUG-responses-input-v1] Responses 后续处理失败",
-      request_id: response.json().request_id,
-      stage: "upstream_http",
-      upstream_status: 400,
-      upstream_code: code,
-      reference_hint: hint,
-      has_upstream_semantic_event: false,
-    });
+    expect(response.json().error).toMatchObject({ type: "invalid_request_error" });
+    expect(logs.join("")).not.toContain("DEBUG-responses");
     expect(logs.join("")).not.toContain("private-");
     expect(response.body).not.toContain("private-");
-    expect(response.body).not.toContain("reference_hint");
   });
 
-  it.each([false, true])("非上游 HTTP 错误不标记为上游拒绝，stream=%s", async (stream) => {
+  it.each([
+    false,
+    true,
+  ])("无效上游响应返回清洗后的 500 且不输出临时日志，stream=%s", async (stream) => {
     const logs: string[] = [];
     const app = buildApp({
       config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
       logger: {
-        level: "warn",
+        level: "info",
         stream: {
           write: (line: string) => {
             logs.push(line);
@@ -116,12 +104,9 @@ describe("Responses 上游失败安全诊断", () => {
       payload: { model: "model-test", input: "private-prompt", stream },
     });
     expect(response.statusCode).toBe(500);
-    expect(logs).toHaveLength(1);
-    expect(JSON.parse(logs[0] ?? "")).toMatchObject({
-      stage: "gateway_processing",
-      reference_hint: "unknown",
-    });
-    expect(logs[0]).not.toContain("upstream_status");
-    expect(logs[0]).not.toContain("private-");
+    expect(response.json().error).toMatchObject({ type: "server_error" });
+    expect(logs.join("")).not.toContain("DEBUG-responses");
+    expect(logs.join("")).not.toContain("private-");
+    expect(response.body).not.toContain("private-");
   });
 });

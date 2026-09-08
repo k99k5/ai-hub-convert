@@ -21,7 +21,7 @@ function setup() {
   const app = buildApp({
     config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
     logger: {
-      level: "warn",
+      level: "info",
       stream: {
         write: (line: string) => {
           logs.push(line);
@@ -34,16 +34,15 @@ function setup() {
   return { app, logs, upstreamFetch };
 }
 
-describe("Responses 测试分支输入诊断", () => {
+describe("Responses 请求错误处理", () => {
   it.each([
-    { item: { type: "item_reference", id: null }, path: "input[1]", tag: "item_reference" },
+    { item: { type: "item_reference", id: null }, tag: "item_reference" },
     {
       item: {
         type: "function_call_output",
         call_id: "private-call",
         output: { secret: "private-output" },
       },
-      path: "input[1]",
       tag: "function_call_output",
     },
     {
@@ -52,12 +51,10 @@ describe("Responses 测试分支输入诊断", () => {
         id: "private-id",
         summary: [{ type: "reasoning_text", text: "private-reasoning" }],
       },
-      path: "input[1].summary[0]",
       tag: "reasoning_text",
     },
     {
       item: { role: "user", content: [{ type: "input_file", file_id: "private-file" }] },
-      path: "input[1].content[0]",
       tag: "input_file",
     },
     {
@@ -66,10 +63,9 @@ describe("Responses 测试分支输入诊断", () => {
         call_id: "private-call",
         output: [{ type: "input_image", image_url: "private-image" }],
       },
-      path: "input[1].output[0]",
       tag: "input_image",
     },
-  ])("准确定位拒绝路径 $path 与类型 $tag", async ({ item, path, tag }) => {
+  ])("拒绝非法 $tag 内容且不访问上游或泄露请求内容", async ({ item }) => {
     const { app, logs, upstreamFetch } = setup();
     const response = await app.inject({
       method: "POST",
@@ -80,24 +76,14 @@ describe("Responses 测试分支输入诊断", () => {
     expect(response.statusCode).toBe(400);
     const body = response.json();
     expect(body.error).toMatchObject({ type: "invalid_request_error", code: "invalid_request" });
-    expect(body).not.toHaveProperty("diagnostic_path");
-    expect(logs).toHaveLength(1);
-    expect(JSON.parse(logs[0] ?? "")).toMatchObject({
-      request_id: body.request_id,
-      msg: "[DEBUG-responses-input-v1] Responses 输入校验失败",
-      stage: "request_decode",
-      code: "INVALID_OPENAI_RESPONSES_REQUEST",
-      diagnostic_path: path,
-      input_kind: "array",
-      input_count: 2,
-      rejected_shape: { kind: "object", fields: { type: tag } },
-    });
+    expect(logs.join("")).not.toContain("DEBUG-responses");
     expect(logs.join("")).not.toContain("private-");
+    expect(response.body).not.toContain("private-");
     expect(upstreamFetch).not.toHaveBeenCalled();
   });
 
-  it("长历史末尾的非法内容也能直接定位，未知键名和枚举值不进入日志", async () => {
-    const { app, logs } = setup();
+  it("长历史末尾的非法内容也被拒绝，未知键名和枚举值不进入日志", async () => {
+    const { app, logs, upstreamFetch } = setup();
     const content = Array.from({ length: 100 }, () => ({
       type: "input_text",
       text: "private-prompt",
@@ -127,20 +113,18 @@ describe("Responses 测试分支输入诊断", () => {
       },
     });
     expect(response.statusCode).toBe(400);
-    expect(logs).toHaveLength(1);
-    expect(JSON.parse(logs[0] ?? "")).toMatchObject({
-      diagnostic_path: "input[100].content[100]",
-      rejected_shape: {
-        fields: { type: { kind: "string" }, text: { kind: "string", length: 120000 } },
-        unknown_field_count: 1,
-      },
+    expect(response.json().error).toMatchObject({
+      type: "invalid_request_error",
+      code: "invalid_request",
     });
+    expect(logs.join("")).not.toContain("DEBUG-responses");
     expect(logs.join("")).not.toContain("private-");
-    expect(logs.join("").length).toBeLessThan(2000);
+    expect(response.body).not.toContain("private-");
+    expect(upstreamFetch).not.toHaveBeenCalled();
   });
 
-  it("顶层校验失败记录结构，未知字段名称不进入日志", async () => {
-    const { app, logs } = setup();
+  it("拒绝未知顶层字段且不泄露字段名称和内容", async () => {
+    const { app, logs, upstreamFetch } = setup();
     const response = await app.inject({
       method: "POST",
       url: "/v1/responses",
@@ -148,19 +132,20 @@ describe("Responses 测试分支输入诊断", () => {
       payload: { model: "model-test", input: "private-prompt", "private-field": "private-value" },
     });
     expect(response.statusCode).toBe(400);
-    expect(logs).toHaveLength(1);
-    expect(JSON.parse(logs[0] ?? "")).toMatchObject({
-      diagnostic_path: "request",
-      input_kind: "string",
-      rejected_shape: { unknown_field_count: 1 },
+    expect(response.json().error).toMatchObject({
+      type: "invalid_request_error",
+      code: "invalid_request",
     });
+    expect(logs.join("")).not.toContain("DEBUG-responses");
     expect(logs.join("")).not.toContain("private-");
+    expect(response.body).not.toContain("private-");
+    expect(upstreamFetch).not.toHaveBeenCalled();
   });
 
   it.each([
     true,
     false,
-  ])("合法请求和鉴权失败不产生输入拒绝诊断，authenticated=%s", async (authenticated) => {
+  ])("合法请求和鉴权失败保持原行为且不输出临时日志，authenticated=%s", async (authenticated) => {
     const { app, logs, upstreamFetch } = setup();
     const response = await app.inject({
       method: "POST",
@@ -169,7 +154,9 @@ describe("Responses 测试分支输入诊断", () => {
       payload: { model: "model-test", input: "private-prompt" },
     });
     expect(response.statusCode).toBe(authenticated ? 200 : 401);
-    expect(logs).toEqual([]);
+    expect(logs.join("")).not.toContain("DEBUG-responses");
+    expect(logs.join("")).not.toContain("private-");
+    expect(response.body).not.toContain("private-");
     expect(upstreamFetch).toHaveBeenCalledTimes(authenticated ? 1 : 0);
   });
 });

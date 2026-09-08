@@ -35,17 +35,6 @@ function invalid(message: string): never {
   throw new OpenAIAdapterError(errorCode, message);
 }
 
-function atInputPath<T>(path: string, decode: () => T): T {
-  try {
-    return decode();
-  } catch (error) {
-    if (error instanceof OpenAIAdapterError) {
-      error.inputPath = path + (error.inputPath === undefined ? "" : `.${error.inputPath}`);
-    }
-    throw error;
-  }
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -131,24 +120,22 @@ function decodeMessageContent(value: unknown, role: Message["role"]): Content[] 
   if (!Array.isArray(value)) {
     return invalid("Unsupported OpenAI Responses input");
   }
-  return value.map((rawPart, index) =>
-    atInputPath(`content[${index}]`, () => {
-      const part = record(rawPart, "message content item");
-      if (part.type === "input_text" || (role === "assistant" && part.type === "output_text")) {
-        if (typeof part.text !== "string") {
-          return invalid("Invalid OpenAI Responses request: input_text text must be a string");
-        }
-        return { type: "text" as const, text: part.text };
+  return value.map((rawPart) => {
+    const part = record(rawPart, "message content item");
+    if (part.type === "input_text" || (role === "assistant" && part.type === "output_text")) {
+      if (typeof part.text !== "string") {
+        return invalid("Invalid OpenAI Responses request: input_text text must be a string");
       }
-      if (role === "assistant" && part.type === "refusal" && typeof part.refusal === "string") {
-        return { type: "refusal" as const, refusal: part.refusal };
-      }
-      if (part.type === "input_image" && part.file_id === undefined) {
-        return decodeImage(part.image_url);
-      }
-      return invalid("Unsupported OpenAI Responses input");
-    }),
-  );
+      return { type: "text" as const, text: part.text };
+    }
+    if (role === "assistant" && part.type === "refusal" && typeof part.refusal === "string") {
+      return { type: "refusal" as const, refusal: part.refusal };
+    }
+    if (part.type === "input_image" && part.file_id === undefined) {
+      return decodeImage(part.image_url);
+    }
+    return invalid("Unsupported OpenAI Responses input");
+  });
 }
 
 function decodeMessage(item: Record<string, unknown>): Message {
@@ -165,15 +152,13 @@ function decodeReasoning(item: Record<string, unknown>): Message {
     return invalid("Invalid OpenAI Responses request: reasoning summary must be an array");
   }
   const text = item.summary
-    .map((rawPart, index) =>
-      atInputPath(`summary[${index}]`, () => {
-        const part = record(rawPart, "reasoning summary item");
-        if (part.type !== "summary_text" || typeof part.text !== "string") {
-          return invalid("Unsupported OpenAI Responses input");
-        }
-        return part.text;
-      }),
-    )
+    .map((rawPart) => {
+      const part = record(rawPart, "reasoning summary item");
+      if (part.type !== "summary_text" || typeof part.text !== "string") {
+        return invalid("Unsupported OpenAI Responses input");
+      }
+      return part.text;
+    })
     .join("");
   const encrypted = item.encrypted_content;
   if (encrypted !== undefined && encrypted !== null && typeof encrypted !== "string") {
@@ -225,15 +210,13 @@ function decodeFunctionResult(item: Record<string, unknown>): Message {
   let output = item.output;
   if (Array.isArray(output)) {
     output = output
-      .map((rawPart, index) =>
-        atInputPath(`output[${index}]`, () => {
-          const part = record(rawPart, "function_call_output output item");
-          if (part.type !== "input_text" || typeof part.text !== "string") {
-            return invalid("function_call_output.output 仅支持字符串或 input_text 文本数组");
-          }
-          return part.text;
-        }),
-      )
+      .map((rawPart) => {
+        const part = record(rawPart, "function_call_output output item");
+        if (part.type !== "input_text" || typeof part.text !== "string") {
+          return invalid("function_call_output.output 仅支持字符串或 input_text 文本数组");
+        }
+        return part.text;
+      })
       .join("");
   }
   if (typeof output !== "string") {
@@ -262,37 +245,35 @@ function decodeInput(value: unknown): Message[] {
   if (!Array.isArray(value)) {
     return invalid("Unsupported OpenAI Responses input");
   }
-  return value.map((rawItem, index) =>
-    atInputPath(`input[${index}]`, () => {
-      const item = record(rawItem, "input item");
-      if (item.type === "item_reference") {
-        if (Object.keys(item).some((key) => key !== "type" && key !== "id")) {
-          return invalid("item_reference 仅支持 type 和 id 字段");
-        }
-        return {
-          role: "assistant",
-          content: [],
-          itemReference: { source: "openai-responses", id: string(item.id, "item_reference id") },
-        };
+  return value.map((rawItem) => {
+    const item = record(rawItem, "input item");
+    if (item.type === "item_reference") {
+      if (Object.keys(item).some((key) => key !== "type" && key !== "id")) {
+        return invalid("item_reference 仅支持 type 和 id 字段");
       }
-      if (item.type === undefined || item.type === "message") {
-        return decodeMessage(item);
-      }
-      if (item.type === "reasoning") {
-        return decodeReasoning(item);
-      }
-      if (item.type === "function_call") {
-        return decodeFunctionCall(item);
-      }
-      if (item.type === "function_call_output") {
-        return decodeFunctionResult(item);
-      }
-      if (item.type === "web_search_call") {
-        return decodeWebSearchHistory(item);
-      }
-      return invalid("Unsupported OpenAI Responses input");
-    }),
-  );
+      return {
+        role: "assistant",
+        content: [],
+        itemReference: { source: "openai-responses", id: string(item.id, "item_reference id") },
+      };
+    }
+    if (item.type === undefined || item.type === "message") {
+      return decodeMessage(item);
+    }
+    if (item.type === "reasoning") {
+      return decodeReasoning(item);
+    }
+    if (item.type === "function_call") {
+      return decodeFunctionCall(item);
+    }
+    if (item.type === "function_call_output") {
+      return decodeFunctionResult(item);
+    }
+    if (item.type === "web_search_call") {
+      return decodeWebSearchHistory(item);
+    }
+    return invalid("Unsupported OpenAI Responses input");
+  });
 }
 
 function validateWebSearchLocation(value: unknown, preview: boolean): void {
