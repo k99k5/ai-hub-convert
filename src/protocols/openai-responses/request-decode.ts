@@ -265,6 +265,16 @@ function decodeInput(value: unknown): Message[] {
   return value.map((rawItem, index) =>
     atInputPath(`input[${index}]`, () => {
       const item = record(rawItem, "input item");
+      if (item.type === "item_reference") {
+        if (Object.keys(item).some((key) => key !== "type" && key !== "id")) {
+          return invalid("item_reference 仅支持 type 和 id 字段");
+        }
+        return {
+          role: "assistant",
+          content: [],
+          itemReference: { source: "openai-responses", id: string(item.id, "item_reference id") },
+        };
+      }
       if (item.type === undefined || item.type === "message") {
         return decodeMessage(item);
       }

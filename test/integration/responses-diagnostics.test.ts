@@ -36,7 +36,7 @@ function setup() {
 
 describe("Responses 测试分支输入诊断", () => {
   it.each([
-    { item: { type: "item_reference", id: "private-id" }, path: "input[1]", tag: "item_reference" },
+    { item: { type: "item_reference", id: null }, path: "input[1]", tag: "item_reference" },
     {
       item: {
         type: "function_call_output",

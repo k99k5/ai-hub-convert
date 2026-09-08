@@ -29,6 +29,7 @@ export interface ResponsesFunctionResultItem {
 }
 
 export type ResponsesInputItem =
+  | { type: "item_reference"; id: string }
   | ResponsesMessageItem
   | ResponsesReasoningItem
   | ResponsesFunctionCallItem

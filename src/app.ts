@@ -589,6 +589,22 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         try {
           apiKey = extractResponsesApiKey(request.headers);
           canonicalRequest = decodeResponsesRequest(request.body);
+          const referenceCount = canonicalRequest.messages.filter(
+            (message) => message.itemReference !== undefined,
+          ).length;
+          if (referenceCount > 0) {
+            const store = canonicalRequest.extensions?.request?.store;
+            request.log.info(
+              {
+                request_id: request.id,
+                stage: "request_decode",
+                event: "item_reference_accepted",
+                reference_count: referenceCount,
+                store: store === undefined ? false : store,
+              },
+              "[DEBUG-responses-input-v1] 已接收 Responses 引用",
+            );
+          }
         } catch (error) {
           if (error instanceof AuthenticationError) {
             return reply.code(401).send({

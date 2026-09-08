@@ -152,7 +152,24 @@ export function encodeResponsesRequest(
   request: CanonicalRequest,
   options: EncodeResponsesOptions,
 ): ResponsesRequest {
-  const input = request.messages.flatMap(encodeMessage);
+  const input = request.messages.flatMap((message): ResponsesInputItem[] => {
+    const reference = message.itemReference;
+    if (reference === undefined) return encodeMessage(message);
+    if (
+      request.source !== "openai-responses" ||
+      options.replaySourceExtensions !== true ||
+      reference.source !== "openai-responses" ||
+      typeof reference.id !== "string" ||
+      reference.id.length === 0 ||
+      message.content.length !== 0
+    ) {
+      throw new OpenAIAdapterError(
+        "INVALID_OPENAI_RESPONSES_REQUEST",
+        "item_reference 仅支持作为独立输入项在 Responses 同协议回放",
+      );
+    }
+    return [{ type: "item_reference", id: reference.id }];
+  });
   const extensions =
     options.replaySourceExtensions && request.extensions?.source === "openai-responses"
       ? request.extensions.request

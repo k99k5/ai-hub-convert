@@ -84,6 +84,12 @@ function encodeMessages(
 ): ChatMessage[] {
   const encoded: ChatMessage[] = [];
   for (const [index, message] of messages.entries()) {
+    if (message.itemReference !== undefined) {
+      throw new OpenAIAdapterError(
+        "INVALID_OPENAI_CHAT_REQUEST",
+        "Chat 无法转换 Responses 的 item_reference，请发送完整历史内容",
+      );
+    }
     const messageOptions = options?.[index];
     if (message.role === "tool") {
       for (const part of message.content) {

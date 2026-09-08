@@ -65,6 +65,8 @@ export type Content =
 export interface Message {
   role: "system" | "developer" | "user" | "assistant" | "tool";
   content: Content[];
+  // 引用占据完整输入项，role 仅作容器占位；不推断被引用对象的角色或正文。
+  itemReference?: { source: "openai-responses"; id: string };
 }
 
 export interface FunctionTool {
