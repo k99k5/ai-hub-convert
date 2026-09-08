@@ -28,6 +28,7 @@ import {
 import { ClientSseSender } from "./http/sse.js";
 import { mapUpstreamError } from "./http/upstream-errors.js";
 import { normalizeReadToolArguments } from "./policies/read-tool.js";
+import { ResponsesReferenceCache } from "./policies/responses-reference-cache.js";
 import { finalizeThinkingBlock } from "./policies/thinking-signature.js";
 import {
   assertWebSearchSupported,
@@ -173,6 +174,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       : { webSearchProvider: options.webSearchProvider }),
   });
   const activeStreams = new ActiveStreamRegistry();
+  const referenceCache = new ResponsesReferenceCache();
+  const referenceCleanup = setInterval(() => referenceCache.prune(), 30_000);
+  referenceCleanup.unref();
   const webSearchProviders = createDefaultWebSearchRegistry(options.webSearchProvider);
   const app = Fastify({
     ajv: { customOptions: { coerceTypes: false, removeAdditional: false } },
@@ -190,6 +194,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
   app.addHook("preClose", async () => {
     activeStreams.abortAll();
+  });
+  app.addHook("onClose", async () => {
+    clearInterval(referenceCleanup);
+    referenceCache.clear();
   });
   app.register(registerHealthRoutes);
   app.register(async (api) => {
@@ -596,16 +604,39 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             (message) => message.itemReference !== undefined,
           ).length;
           if (referenceCount > 0) {
+            let expandedBytes = Buffer.byteLength(JSON.stringify(request.body));
+            canonicalRequest.messages = canonicalRequest.messages.flatMap((message) => {
+              const reference = message.itemReference;
+              if (reference === undefined) return [message];
+              const item = referenceCache.resolve(apiKey, canonicalRequest.model, reference.id);
+              if (item === undefined) {
+                throw new OpenAIAdapterError(
+                  "REFERENCE_CACHE_MISS",
+                  "引用缓存已过期或不可用，请新建会话或发送完整历史内容",
+                );
+              }
+              expandedBytes +=
+                Buffer.byteLength(JSON.stringify(item)) -
+                Buffer.byteLength(JSON.stringify({ type: "item_reference", id: reference.id }));
+              if (expandedBytes > config.server.bodyLimitBytes) {
+                throw new OpenAIAdapterError(
+                  "INVALID_OPENAI_RESPONSES_REQUEST",
+                  "展开引用后的请求超过请求体大小限制",
+                );
+              }
+              return decodeResponsesRequest({ model: canonicalRequest.model, input: [item] })
+                .messages;
+            });
             const store = canonicalRequest.extensions?.request?.store;
             request.log.info(
               {
                 request_id: request.id,
                 stage: "request_decode",
-                event: "item_reference_accepted",
+                event: "item_reference_resolved",
                 reference_count: referenceCount,
                 store: store === undefined ? false : store,
               },
-              "[DEBUG-responses-input-v1] 已接收 Responses 引用",
+              "[DEBUG-responses-input-v1] 已从内存展开 Responses 引用",
             );
           }
         } catch (error) {
@@ -628,7 +659,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
               error: {
                 message: error.message,
                 type: "invalid_request_error",
-                code: "invalid_request",
+                code:
+                  error.code === "REFERENCE_CACHE_MISS"
+                    ? "reference_cache_miss"
+                    : "invalid_request",
               },
               request_id: request.id,
             });
@@ -676,6 +710,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
                 onTimeout: (error) => abortScope.abort(error),
               },
               clientStream.send,
+              (output) => referenceCache.remember(apiKey, canonicalRequest.model, output),
             );
             return;
           } catch (error) {
@@ -724,16 +759,18 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             abortScope.signal,
             webSearchOptions(canonicalRequest).webSearch,
           );
-          return reply.send(
-            addResponsesWebSearch(
-              encodeResponsesResponse(
-                decodeResponsesResponse(upstreamResponse, { preserveWireMetadata: true }),
-              ),
-              getWebSearchExecutions(upstreamResponse),
-              includeWebSearchSources(canonicalRequest),
-              outputLimits(config),
+          const response = addResponsesWebSearch(
+            encodeResponsesResponse(
+              decodeResponsesResponse(upstreamResponse, { preserveWireMetadata: true }),
             ),
+            getWebSearchExecutions(upstreamResponse),
+            includeWebSearchSources(canonicalRequest),
+            outputLimits(config),
           );
+          if (response.status === "completed" && Array.isArray(response.output)) {
+            referenceCache.remember(apiKey, canonicalRequest.model, response.output);
+          }
+          return reply.send(response);
         } catch (error) {
           const mapped = mapUpstreamError("openai-responses", error, request.id);
           request.log.warn(
@@ -760,10 +797,12 @@ async function streamResponsesResponse(
   streamOutputLimits: StreamOutputLimits,
   timeoutOptions: StreamTimeoutOptions,
   send: (frame: ResponsesSseFrame | string) => Promise<void>,
+  remember: (output: readonly unknown[]) => void,
 ): Promise<void> {
   const encoder = new ResponsesStreamEncoder(argumentLimits, streamOutputLimits, {
     includeWebSearchSources: includeWebSearchSources(request),
   });
+  let terminal: ResponsesSseFrame | undefined;
   for await (const event of upstream.streamCompletion(
     "responses",
     encodeResponsesRequest(request, {
@@ -781,8 +820,19 @@ async function streamResponsesResponse(
       ...webSearchOptions(request),
     },
   )) {
-    for (const frame of encoder.encode(event)) await send(frame);
+    for (const frame of encoder.encode(event)) {
+      if (frame.event === "response.completed" || frame.event === "response.incomplete") {
+        terminal = frame;
+      } else await send(frame);
+    }
+    if (event.type === "response_error") return;
   }
+  if (terminal === undefined) throw new Error("Responses 流缺少有效终态");
+  signal.throwIfAborted();
+  const response = terminal.data.response as Record<string, unknown>;
+  if (terminal.event === "response.completed" && Array.isArray(response.output))
+    remember(response.output);
+  await send(terminal);
   await send("[DONE]");
 }
 

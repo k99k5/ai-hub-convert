@@ -29,7 +29,6 @@ export interface ResponsesFunctionResultItem {
 }
 
 export type ResponsesInputItem =
-  | { type: "item_reference"; id: string }
   | ResponsesMessageItem
   | ResponsesReasoningItem
   | ResponsesFunctionCallItem
@@ -72,6 +71,7 @@ export interface ResponsesRequest {
 }
 
 export type ResponsesAdapterErrorCode =
+  | "REFERENCE_CACHE_MISS"
   | "INVALID_OPENAI_RESPONSES_REQUEST"
   | "INVALID_OPENAI_RESPONSES_RESPONSE";
 

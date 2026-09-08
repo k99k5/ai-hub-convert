@@ -1,3 +1,4 @@
+import OpenAI from "openai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
@@ -11,112 +12,221 @@ type Wire = Record<string, unknown>;
 const apps: Array<ReturnType<typeof buildApp>> = [];
 afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()));
+  vi.restoreAllMocks();
 });
 
 const input = [
   { type: "message", role: "system", content: [{ type: "input_text", text: "固定提示" }] },
   { type: "message", role: "user", content: [{ type: "input_text", text: "查询" }] },
-  { type: "item_reference", id: "rs_upstream_1" },
-  { type: "function_call", call_id: "search_1", name: "search", arguments: "{}" },
-  { type: "function_call_output", call_id: "search_1", output: "结果" },
-  { type: "item_reference", id: "msg_upstream_2" },
-  { type: "message", role: "user", content: [{ type: "input_text", text: "继续" }] },
+];
+const output = [
+  {
+    type: "reasoning",
+    id: "rs_private",
+    summary: [{ type: "summary_text", text: "分析查询" }],
+    encrypted_content: "opaque-private",
+  },
+  {
+    type: "message",
+    id: "msg_private",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: "准备搜索", annotations: [] }],
+  },
+  {
+    type: "function_call",
+    id: "fc_private",
+    call_id: "search_1",
+    name: "web_search",
+    arguments: '{"query":"假期"}',
+    status: "completed",
+  },
 ];
 const body = { model: "model-test", input };
+const response = {
+  id: "resp_test",
+  object: "response",
+  model: "model-test",
+  status: "completed",
+  output,
+  usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+};
+const references = output.map(({ id }) => ({ type: "item_reference", id }));
+const continuation = [
+  ...input,
+  ...references,
+  {
+    type: "function_call_output",
+    call_id: "search_1",
+    output: [{ type: "input_text", text: "搜索结果" }],
+  },
+  { type: "message", role: "user", content: [{ type: "input_text", text: "继续" }] },
+];
 
-describe("Responses 同协议引用透传", () => {
+function createApp(logs: string[] = []) {
+  const seen: Wire[] = [];
+  const app = buildApp({
+    config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
+    logger: {
+      stream: {
+        write: (line: string) => {
+          logs.push(line);
+        },
+      },
+    },
+    upstreamFetch: async (url, init) => {
+      expect(String(url)).toBe("https://upstream.test/v1/responses");
+      const request = JSON.parse(init?.body as string) as Wire;
+      seen.push(request);
+      // 模拟完全不支持引用的上游，任何漏传都会让续轮失败。
+      if ((request.input as Wire[]).some((item) => item.type === "item_reference")) {
+        return Response.json({ error: { message: "不支持引用" } }, { status: 400 });
+      }
+      return request.stream ? responsesStream(response) : Response.json(response);
+    },
+  });
+  apps.push(app);
+  return { app, seen };
+}
+
+describe("Responses 内存引用续轮", () => {
   it.each(
     [false, true].flatMap((stream) =>
       [undefined, false, true, null].map((store) => ({ stream, store })),
     ),
-  )("保留七项历史的 ID、顺序和存储选项：%j", async ({ stream, store }) => {
-    const seen: Wire[] = [];
+  )("展开完整历史并保持顺序与存储选项：%j", async ({ stream, store }) => {
     const logs: string[] = [];
-    const app = buildApp({
-      config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
-      logger: {
-        stream: {
-          write: (line: string) => {
-            logs.push(line);
-          },
-        },
+    const { app, seen } = createApp(logs);
+    const options = { stream, ...(store === undefined ? {} : { store }) };
+    const inject = (payload: Wire) =>
+      app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        headers: { authorization: "Bearer caller-key" },
+        payload,
+      });
+    expect((await inject({ ...body, ...options })).statusCode).toBe(200);
+    const second = await inject({ ...body, ...options, input: continuation });
+    expect(second.statusCode).toBe(200);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toMatchObject({ store: store === undefined ? false : store, stream });
+    expect(seen[1]?.input).toEqual([
+      ...input,
+      {
+        type: "reasoning",
+        id: "rs_private",
+        summary: [{ type: "summary_text", text: "分析查询" }],
+        encrypted_content: "opaque-private",
       },
-      upstreamFetch: async (url, init) => {
-        expect(String(url)).toBe("https://upstream.test/v1/responses");
-        seen.push(JSON.parse(init?.body as string) as Wire);
-        const response = {
-          id: "resp_test",
-          object: "response",
-          model: "model-test",
-          status: "completed",
-          output: [
-            {
-              type: "message",
-              id: "msg_answer",
-              role: "assistant",
-              status: "completed",
-              content: [{ type: "output_text", text: "上游解析了引用", annotations: [] }],
-            },
-          ],
-          usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
-        };
-        return stream ? responsesStream(response) : Response.json(response);
+      { type: "message", role: "assistant", content: [{ type: "input_text", text: "准备搜索" }] },
+      {
+        type: "function_call",
+        call_id: "search_1",
+        name: "web_search",
+        arguments: '{"query":"假期"}',
       },
-    });
-    apps.push(app);
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/responses",
-      headers: { authorization: "Bearer caller-key" },
-      payload: { ...body, stream, ...(store === undefined ? {} : { store }) },
-    });
-    expect(response.statusCode).toBe(200);
-    expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ input, store: store === undefined ? false : store, stream });
+      { type: "function_call_output", call_id: "search_1", output: "搜索结果" },
+      continuation.at(-1),
+    ]);
     expect(seen[0]?.prompt_cache_key).toMatch(/^[a-f0-9]{64}$/);
+    expect(seen[1]?.prompt_cache_key).toBe(seen[0]?.prompt_cache_key);
     const diagnostics = logs
       .map((line) => JSON.parse(line) as Wire)
-      .filter((line) => line.event === "item_reference_accepted");
+      .filter((line) => line.event === "item_reference_resolved");
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toMatchObject({
-      reference_count: 2,
+      reference_count: 3,
       store: store === undefined ? false : store,
     });
-    expect(logs.join("")).not.toContain("rs_upstream_1");
-    expect(logs.join("")).not.toContain("msg_upstream_2");
-    expect(logs.join("")).not.toContain("caller-key");
+    for (const secret of [
+      "rs_private",
+      "msg_private",
+      "fc_private",
+      "opaque-private",
+      "caller-key",
+      "准备搜索",
+    ]) {
+      expect(logs.join("")).not.toContain(secret);
+    }
     if (stream) {
-      expect(response.body).toContain('"type":"response.completed"');
-      expect(response.body).toContain("data: [DONE]");
-    } else expect(response.json().output[0].content[0].text).toBe("上游解析了引用");
+      expect(second.body).toContain('"type":"response.completed"');
+      expect(second.body).toContain("data: [DONE]");
+    } else expect(second.json().output[1].content[0].text).toBe("准备搜索");
+  });
+
+  it.each([false, true])("官方 SDK 回传上一轮输出引用可续轮，stream=%s", async (stream) => {
+    const { app, seen } = createApp();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("预期 TCP 监听地址");
+    const client = new OpenAI({
+      apiKey: "key",
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+      maxRetries: 0,
+    });
+    const first = await client.responses.create({ model: "model-test", input: "查询" });
+    const next: OpenAI.Responses.ResponseInput = first.output.map((item) => {
+      if (item.id === undefined) throw new Error("预期输出项具有可引用 ID");
+      return { type: "item_reference", id: item.id };
+    });
+    next.push({ type: "function_call_output", call_id: "search_1", output: "结果" });
+    const result = await client.responses.create({ model: "model-test", input: next, stream });
+    if (stream && Symbol.asyncIterator in result) {
+      let completed = false;
+      for await (const event of result) if (event.type === "response.completed") completed = true;
+      expect(completed).toBe(true);
+    } else expect(result).toMatchObject({ status: "completed" });
+    expect(seen).toHaveLength(2);
+    expect(JSON.stringify(seen[1]?.input)).not.toContain("item_reference");
   });
 
   it.each([
-    false,
-    true,
-  ])("上游找不到引用时返回清洗后的错误，不回退重试，stream=%s", async (stream) => {
-    const upstreamFetch = vi.fn(async () =>
-      Response.json(
-        { error: { message: "private-upstream-item-secret", code: "item_not_found" } },
-        { status: 400 },
-      ),
-    );
-    const app = buildApp({
-      config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
-      logger: false,
-      upstreamFetch,
-    });
-    apps.push(app);
-    const response = await app.inject({
+    { key: "another-key", model: "model-test", id: "msg_private" },
+    { key: "caller-key", model: "another-model", id: "msg_private" },
+    { key: "caller-key", model: "model-test", id: "unknown-private" },
+  ])("未知、跨凭据或跨模型引用在上游前拒绝：%j", async ({ key, model, id }) => {
+    const { app, seen } = createApp();
+    await app.inject({
       method: "POST",
       url: "/v1/responses",
       headers: { authorization: "Bearer caller-key" },
-      payload: { ...body, stream },
+      payload: body,
     });
-    expect(response.statusCode).toBe(400);
-    expect(response.json().error).toMatchObject({ type: "invalid_request_error" });
-    expect(response.body).not.toContain("private-upstream-item-secret");
-    expect(upstreamFetch).toHaveBeenCalledTimes(1);
+    const result = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: { authorization: `Bearer ${key}` },
+      payload: { model, input: [{ type: "item_reference", id }], stream: true },
+    });
+    expect(result.statusCode).toBe(400);
+    expect(result.json().error).toMatchObject({
+      type: "invalid_request_error",
+      code: "reference_cache_miss",
+    });
+    expect(result.body).not.toContain(id);
+    expect(result.body).not.toContain(key);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("五分钟到期后不再访问上游，读取不续期", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const { app, seen } = createApp();
+    const inject = (payload: Wire) =>
+      app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        headers: { authorization: "Bearer key" },
+        payload,
+      });
+    await inject(body);
+    now = 299_999;
+    expect((await inject({ ...body, input: references })).statusCode).toBe(200);
+    now = 300_000;
+    const result = await inject({ ...body, input: references });
+    expect(result.statusCode).toBe(400);
+    expect(result.json().error.code).toBe("reference_cache_miss");
+    expect(seen).toHaveLength(2);
   });
 
   it.each([undefined, null, 1, "", {}])("非法引用 ID 在访问上游前拒绝：%j", (id) => {
@@ -125,54 +235,21 @@ describe("Responses 同协议引用透传", () => {
     ).toThrow();
   });
 
-  it("拒绝引用项携带正文，避免静默丢失内容", () => {
+  it("引用不能携带正文，未展开引用不能进入任何上游编码或计数", () => {
     expect(() =>
       decodeResponsesRequest({
         model: "m",
         input: [{ type: "item_reference", id: "item_1", content: "正文" }],
       }),
     ).toThrow();
-  });
-
-  it("禁止跨协议、关闭扩展回放或计数时静默丢弃引用", () => {
-    const canonical = decodeResponsesRequest(body);
+    const canonical = decodeResponsesRequest({ ...body, input: references });
     expect(() => encodeChatRequest(canonical)).toThrow();
     expect(() => encodeResponsesInputTokensRequest(canonical)).toThrow();
     expect(() =>
-      encodeResponsesRequest(canonical, { store: false, promptCache: { kind: "none" } }),
-    ).toThrow();
-    expect(() =>
-      encodeResponsesRequest(
-        { ...canonical, source: "anthropic" },
-        { store: false, promptCache: { kind: "none" }, replaySourceExtensions: true },
-      ),
-    ).toThrow();
-  });
-
-  it("引用 ID 的变化不影响稳定前缀缓存键", () => {
-    const canonical = decodeResponsesRequest(body);
-    const options = {
-      store: false,
-      replaySourceExtensions: true,
-      promptCache: { kind: "prompt-cache-key" as const },
-    };
-    const first = encodeResponsesRequest(canonical, options);
-    const reference = canonical.messages[2]?.itemReference;
-    if (!reference) throw new Error("缺少引用项");
-    reference.id = "rs_another";
-    expect(encodeResponsesRequest(canonical, options).prompt_cache_key).toBe(
-      first.prompt_cache_key,
-    );
-  });
-
-  it("引用容器不能混入正文后被编码器静默丢弃", () => {
-    const canonical = decodeResponsesRequest(body);
-    canonical.messages[2]?.content.push({ type: "text", text: "正文" });
-    expect(() =>
       encodeResponsesRequest(canonical, {
         store: false,
-        replaySourceExtensions: true,
         promptCache: { kind: "none" },
+        replaySourceExtensions: true,
       }),
     ).toThrow();
   });

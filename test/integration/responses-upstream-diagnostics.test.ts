@@ -74,7 +74,7 @@ describe("Responses 上游失败安全诊断", () => {
       payload: {
         model: "model-test",
         stream,
-        input: [{ type: "item_reference", id: "private-id" }],
+        input: "private-prompt",
       },
     });
     expect(response.statusCode).toBe(400);

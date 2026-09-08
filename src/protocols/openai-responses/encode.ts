@@ -153,22 +153,13 @@ export function encodeResponsesRequest(
   options: EncodeResponsesOptions,
 ): ResponsesRequest {
   const input = request.messages.flatMap((message): ResponsesInputItem[] => {
-    const reference = message.itemReference;
-    if (reference === undefined) return encodeMessage(message);
-    if (
-      request.source !== "openai-responses" ||
-      options.replaySourceExtensions !== true ||
-      reference.source !== "openai-responses" ||
-      typeof reference.id !== "string" ||
-      reference.id.length === 0 ||
-      message.content.length !== 0
-    ) {
+    if (message.itemReference !== undefined) {
       throw new OpenAIAdapterError(
         "INVALID_OPENAI_RESPONSES_REQUEST",
-        "item_reference 仅支持作为独立输入项在 Responses 同协议回放",
+        "item_reference 必须在网关展开后才能请求上游",
       );
     }
-    return [{ type: "item_reference", id: reference.id }];
+    return encodeMessage(message);
   });
   const extensions =
     options.replaySourceExtensions && request.extensions?.source === "openai-responses"

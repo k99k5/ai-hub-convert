@@ -1,6 +1,6 @@
 # LLM Protocol Gateway
 
-一个无状态的 OpenAI / Anthropic 协议转换网关。服务使用 TypeScript ESM、Fastify 5 和 Node.js 24，对外提供 Anthropic Messages、Anthropic token counting、OpenAI Responses 与 Chat Completions 接口；不使用数据库，不保存凭据、prompt、会话或响应。
+一个不持久化数据的 OpenAI / Anthropic 协议转换网关。服务使用 TypeScript ESM、Fastify 5 和 Node.js 24，对外提供 Anthropic Messages、Anthropic token counting、OpenAI Responses 与 Chat Completions 接口；不使用数据库。为兼容 Chatbox 1.21.1 的 Responses 引用续轮，仅在进程内短期缓存成功的输出项，按调用凭据和请求模型隔离；不缓存请求 prompt 或整段历史，不保存 API key 原文。
 
 ## 路由
 
@@ -77,7 +77,13 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 
 未提供键时，网关根据版本标识、目标接口、模型、编码后的工具定义及开头连续的 system/developer 消息生成 SHA-256 键。追加对话、切换 JSON/SSE 或调整采样不会改变键；没有工具或系统前缀时不生成。搜索续轮沿用初始键，Messages 回退 Chat 时按目标接口重算自动键。
 
-缓存键仅辅助上游复用提示词前缀，不缓存答案，也不保证命中。缓存命中和写入 token 数仅使用上游 usage；不会从断点规划推算。`count_tokens` 不发送缓存控制字段。要求上游支持 `prompt_cache_key`，不兼容时不会通过删除字段重试。
+缓存键仅辅助上游复用提示词前缀，不保证命中。缓存命中和写入 token 数仅使用上游 usage；不会从断点规划推算。`count_tokens` 不发送缓存控制字段。要求上游支持 `prompt_cache_key`，不兼容时不会通过删除字段重试。下面的 Responses 引用缓存独立于提示词缓存，不影响缓存键或 usage。
+
+## Responses 引用续轮
+
+Chatbox 1.21.1 回传的 `item_reference` 在网关内展开为完整输出项，再交给既有 Responses 转换流程，不要求上游支持引用。网关只缓存经过完整校验的成功 Responses 输出项，固定保留 5 分钟，读取不续期；缓存有容量上限且不写磁盘。具体预算、凭据隔离和淘汰规则见[引用兼容契约](docs/compatibility.md#responses-引用缓存)。
+
+引用缺失、过期、被淘汰、凭据或模型变化时，返回 OpenAI 格式 HTTP 400，错误码为 `reference_cache_miss`，不会静默丢弃历史。重启会清空缓存，旧引用失效后需要新建会话，或让客户端以 `store:false` 回传完整历史。依赖引用续轮时使用单实例部署，或在多实例部署中配置粘性路由；缓存不在实例间共享。该能力不新增配置、依赖或持久化设施，也不因出现引用自动启用上游存储。
 
 ## 配置
 
@@ -189,7 +195,7 @@ HTTP 上游必须显式启用 `ALLOW_INSECURE_UPSTREAM`；使用 HTTPS 时应填
 docker compose down
 ```
 
-Compose 服务是无状态的，不需要挂载数据卷或启动额外依赖。它会复用镜像内置的 `/health/ready` healthcheck；该检查确认网关进程可接受请求，不代表上游服务连通。
+Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖；重建或重启会清空 Responses 引用缓存。它会复用镜像内置的 `/health/ready` healthcheck；该检查确认网关进程可接受请求，不代表上游服务连通。
 
 镜像使用 Node 24 多阶段构建、固定 pnpm 10.6.3，只携带 production dependencies，并以非 root `node` 用户运行。镜像内置 `/health/ready` healthcheck。
 
@@ -217,7 +223,7 @@ Compose 服务是无状态的，不需要挂载数据卷或启动额外依赖。
 - 禁止SDK自动重试，避免重复计费或重复工具执行。
 - body、工具参数、流缓冲和超时必须有上限。
 - client disconnect应传播AbortSignal。
-- 不保存凭据、prompt、会话或响应。
+- 不持久化凭据、prompt、会话或响应；Responses 成功输出项仅在有容量上限的进程内缓存中短期保留，不缓存请求 prompt、整段历史或 API key 原文。
 
 ## 设计依据
 
