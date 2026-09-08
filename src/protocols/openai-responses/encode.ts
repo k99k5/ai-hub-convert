@@ -1,5 +1,6 @@
 import type { CanonicalRequest, Content, Message, ToolChoice } from "../../core/ir.js";
 import type { PromptCacheCapability } from "../../policies/cache/capabilities.js";
+import { withPromptCacheKey } from "../../policies/cache/key.js";
 import {
   INTERNAL_WEB_SEARCH_TOOL_DESCRIPTION,
   INTERNAL_WEB_SEARCH_TOOL_NAME,
@@ -16,7 +17,7 @@ import {
 export interface EncodeResponsesOptions {
   store: boolean;
   promptCache: PromptCacheCapability;
-  promptCacheKey?: string;
+  promptCacheKey?: string | null;
   replaySourceExtensions?: boolean;
 }
 
@@ -169,8 +170,9 @@ export function encodeResponsesRequest(
           !Array.isArray(extensionReasoning)
         ? { ...extensionReasoning, effort: request.reasoningEffort }
         : { effort: request.reasoningEffort };
-  const extensionPromptCacheKey = extensions?.prompt_cache_key;
-  return {
+  // 缓存键是三个入口共用的已验证字段，不重放其他跨协议扩展。
+  const extensionPromptCacheKey = request.extensions?.request?.prompt_cache_key;
+  const body: ResponsesRequest = {
     model: request.model,
     input,
     ...(request.tools.length === 0
@@ -246,4 +248,7 @@ export function encodeResponsesRequest(
           : {}
       : {}),
   };
+  return options.promptCache.kind === "prompt-cache-key"
+    ? withPromptCacheKey("responses", body)
+    : body;
 }

@@ -5,6 +5,7 @@
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`
 - `POST /v1/responses`
+- `POST /v1/chat/completions`
 - `GET /health/live`
 - `GET /health/ready`
 
@@ -17,6 +18,7 @@
 | Anthropic Messages JSON/SSE | Responses | 仅在明确 endpoint 不存在且零语义事件、零客户端写入时允许 |
 | Anthropic count_tokens | Responses input_tokens | 永不回退 |
 | OpenAI Responses JSON/SSE | Responses | 永不回退 |
+| OpenAI Chat Completions JSON/SSE | Chat Completions | 直接请求，不回退或重试 |
 
 明确 endpoint 不存在仅包括 HTTP 405、501，或携带 `route_not_found`、`endpoint_not_found`、`unsupported_endpoint`、`not_implemented` 的 HTTP 404。认证、限流、服务端错误、timeout/disconnect、model missing、模糊 404、HTTP 200 后 malformed SSE 都不会触发回退。
 
@@ -95,13 +97,36 @@ node node_modules/typescript/bin/tsc --noEmit
 
 集成测试注入固定 DuckDuckGo HTML 和上游模型响应，验证实际 provider 解析、HTTP JSON/SSE、参数映射、引用、回传与取消。真实搜索可用性仍取决于运行环境访问 DuckDuckGo 的能力。
 
+## Chat 对外入口
+
+Chat 请求也经过独立 decoder → canonical IR → encoder，直接发送到固定的上游 `/chat/completions` 路径。Bearer 凭据、模型和已支持的语义保持一致，不透传任意请求体。
+
+| 能力 | 行为 |
+| --- | --- |
+| 消息 | 支持 system/developer/user/assistant/tool；保留 developer、消息 name、文本、URL/data URL 图片及 detail |
+| 函数工具 | 支持工具定义、strict 缺省/null/false/true、调用及结果、tool_choice、parallel_tool_calls；网关保留的内部工具名称不可由客户端声明 |
+| reasoning/refusal | 支持 reasoning_content 与独立 refusal 字段，JSON/SSE 保持语义；Chat 同协议保留原始 finish_reason |
+| 输出格式 | 支持 text、json_object、json_schema；保留 schema 名称、description 和 strict |
+| 输出长度 | 支持 max_tokens 或 max_completion_tokens，两者同时提供返回 400 |
+| 采样及同协议选项 | 支持 temperature、top_p、stop、frequency_penalty、presence_penalty、seed、logit_bias、reasoning_effort、user、safety_identifier、service_tier、metadata、store；白名单字段按类型校验 |
+| 候选数及不支持字段 | 仅支持 n=1；n>1、音频、logprobs、旧式 functions/function_call、内置搜索及其他未知字段返回 400 |
+| 工具参数字符串 | Chat 直连保留上游字符串，包含被 length 截断的非完整 JSON；客户端负责解析和执行。Messages 回退维持既有严格参数校验 |
+| 流式输出 | 实时 data chunk，正常结束输出原始 `[DONE]`；仅客户端指定 include_usage=true 时发送最终 usage chunk，缓存统计只保留上游已报告字段 |
+| 错误和生命周期 | 首次输出前返回 OpenAI HTTP 错误，输出后发送清洗后的 error 并关闭，不发送成功终止标记；超时、断连、输出限额和优雅关闭复用现有机制 |
+
+Chat 入口不执行内置 Web Search；名为 `web_search` 的普通函数工具交由客户端执行。
+
 ## Prompt cache
 
 Anthropic `cache_control` 只进入 request-local positional sidecar，不进入 canonical IR extension bag。只有恰好落在 canonical tool/system/message 节点末端的 marker 才能保存；非终端、同节点重复、malformed、unsupported block marker 返回固定安全错误。
 
-Claude Code cache policy 只有 strict SemVer 识别成功且范围内才启用。planner 最多输出四个断点；每个 Responses/Chat attempt 独立规划。generic provider capability 为 `none`，所以当前不会编码显式 cache metadata。`planned`、`encoded` 与 provider usage 报告的 hit/write 是三个不同状态。
+Responses 和 Chat 默认 capability 为 `prompt-cache-key`，三个生成入口默认发送提示词缓存键，不增加配置。调用方字符串原样使用；显式 null 保留并抑制自动生成。Messages 的 prompt_cache_key 是网关扩展，仅校验该字段，不跨协议回放其他私有扩展。
 
-`count_tokens` 不规划或发送 cache-write metadata。
+自动键取版本标识、目标接口、模型、实际编码后的工具定义和开头连续的 system/developer 消息的 SHA-256；保留工具、消息、内容的原有顺序。没有工具和系统前缀时不生成。后续对话、采样参数和流式选项不参与生成。搜索续轮保留初始键，回退时按目标接口重新生成自动键。显式键和 null 在所有轮次及回退中保持不变。
+
+Claude Code 断点规划仍要求有效版本且开关启用，最多四个断点。该开关不控制默认缓存键。当前不会编码 Anthropic cache_control、TTL 或假想的等价断点。`planned`、`encoded` 与 provider usage 报告的 hit/write 是不同状态。
+
+`count_tokens` 不规划或发送缓存控制字段。缓存键不保证命中，网关不缓存答案，不估算命中或写入 token。上游需支持 prompt_cache_key；如果上游拒绝该字段，不进行删字段重试。此次默认行为变化无需数据库迁移，回滚通过恢复上一版本完成。
 
 ## Reasoning 与 signature
 
@@ -124,7 +149,7 @@ Claude Code cache policy 只有 strict SemVer 识别成功且范围内才启用�
 - 模型轮次、搜索执行和受限回退共享请求总超时；最终 token/cache usage 累计所有轮次，后续轮次的 HTTP 错误不能触发 Chat 回退。
 - `CONNECTION_TIMEOUT_MS=0` 默认禁用 socket 空闲超时，避免在上游总超时或 SSE 首字节/idle 超时之前截断有效请求。
 - 首帧前错误返回入口协议的 HTTP JSON；首帧后错误返回入口协议的流内 error。
-- 三条 POST route 使用保留未知字段、禁止类型强转的浅层 wire schema；adapter 继续负责精确语义校验。schema 与 malformed JSON 返回入口协议的固定 HTTP 400，body 超限返回固定 HTTP 413。
+- 四条 POST route 使用保留未知字段、禁止类型强转的浅层 wire schema；adapter 继续负责精确语义校验。schema 与 malformed JSON 返回入口协议的固定 HTTP 400，body 超限返回固定 HTTP 413。
 - 单帧 SSE、成功 JSON body、错误外壳 body、单输出项/保留状态、整条流输出/状态、工具参数、请求 body、首字节等待、流 idle 与请求总时长都有上限；malformed upstream SSE UTF-8 fail-closed。
 - 请求关闭、响应连接关闭、SSE reply 关闭和 graceful shutdown 均传播 AbortSignal 并取消上游 body。
 
@@ -136,4 +161,4 @@ Claude Code cache policy 只有 strict SemVer 识别成功且范围内才启用�
 - Anthropic `stop_sequences` 仅 Chat fallback 可表达（`stop`）；发往 Responses 上游时被丢弃。Anthropic `top_k` 在两条上游路径都无可表达字段，不转发。
 - Anthropic citation 不伪造 encrypted index；仅保留可表达的 URL、title 与文本区间。
 - Chat-compatible upstream 的 reasoning、citation 和 usage 扩展并非统一标准，只有已识别字段进入 canonical 表示。
-- generic profile 不声明显式 prompt-cache 能力，因此依赖上游自动 prefix caching（如有），不伪造 breakpoint 等价关系。
+- 默认 prompt_cache_key 只辅助上游前缀缓存，不声明 Anthropic breakpoint 或 TTL 的等价关系。

@@ -23,6 +23,8 @@ import { forceNonStreamingBody, hasInternalWebSearchTool } from "./web-search-lo
 import { WebSearchSession } from "./web-search-session.js";
 
 export interface CompletionStreamOptions {
+  preserveChatWireMetadata?: boolean;
+  validateChatToolArguments?: boolean;
   webSearch?: WebSearchTool;
   argumentLimits?: ToolArgumentLimits;
   outputLimits?: StreamOutputLimits;
@@ -56,7 +58,10 @@ async function* decodeRound(
     const decoder =
       path === "responses"
         ? new ResponsesStreamDecoder(options.argumentLimits, options.outputLimits)
-        : new ChatStreamDecoder(options.argumentLimits, options.outputLimits);
+        : new ChatStreamDecoder(options.argumentLimits, options.outputLimits, {
+            preserveWireMetadata: options.preserveChatWireMetadata ?? false,
+            validateToolArguments: options.validateChatToolArguments ?? true,
+          });
     for await (const frame of parseSseStream(
       response.body,
       {

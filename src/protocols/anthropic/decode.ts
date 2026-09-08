@@ -969,7 +969,15 @@ function decodeRequest(input: Record<string, unknown>, maxTokens?: number): Cano
   const metadata = parseMetadata(input.metadata);
   const outputConfig = parseOutputConfig(input.output_config);
   const thinking = parseThinking(input.thinking);
+  if (
+    input.prompt_cache_key !== undefined &&
+    input.prompt_cache_key !== null &&
+    typeof input.prompt_cache_key !== "string"
+  ) {
+    return invalidRequest();
+  }
   const extensionRequest = {
+    ...(input.prompt_cache_key === undefined ? {} : { prompt_cache_key: input.prompt_cache_key }),
     ...(topK !== undefined ? { top_k: topK } : {}),
     ...(thinking !== undefined ? { thinking } : {}),
   };

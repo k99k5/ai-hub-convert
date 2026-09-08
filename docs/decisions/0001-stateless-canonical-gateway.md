@@ -10,7 +10,7 @@ Accepted
 
 ## 背景
 
-服务需要同时接受 Anthropic Messages 与 OpenAI Responses wire protocol，并连接一个 generic OpenAI-compatible 上游。首版必须支持 JSON/SSE、工具调用、reasoning、usage 与 citation，同时满足严格回退、零持久化和凭据透传要求。
+服务需要接受 Anthropic Messages、OpenAI Responses 与 Chat Completions wire protocol，并连接一个 OpenAI-compatible 上游。服务支持 JSON/SSE、工具调用、reasoning、usage 与 citation，同时满足严格回退、零持久化和凭据透传要求。
 
 直接在 Fastify route 中逐字段互转会把 wire validation、兼容策略、上游路由和 SSE 生命周期混在一起。直接复用 AxonHub 的 pipeline 又会引入不需要的数据库、provider/channel 管理和模型映射。
 
@@ -21,11 +21,13 @@ Accepted
 1. 每个 public protocol 有独立 decoder/encoder；
 2. decoder 先生成有序、provider-neutral canonical IR/events；
 3. provider-private continuation 与 prompt-cache marker 放在受限 sidecar/opaque 类型中，不使用任意 extension bag 跨 provider 回放；
-4. Claude Code cache、Read 和 signature 作为 request-local compatibility policy；
-5. Anthropic Messages 以 Responses 为主路径，只通过严格 classifier 进行一次 Chat fallback；
+4. Claude Code 断点规划、Read 和 signature 作为 request-local compatibility policy；默认提示词缓存键独立于 Claude Code 策略，适用于三个生成入口；
+5. Anthropic Messages 以 Responses 为主路径，只通过严格 classifier 进行一次 Chat fallback；Chat 对外入口直接请求上游 Chat，不回退或重试；
 6. Web Search 通过独立 provider registry 扩展，unsupported provider 在路由预检阶段返回 501；
 7. 所有上游路径为代码中的固定枚举，URL 只来自启动配置；
-8. 不使用数据库、session 或本地 token estimate。
+8. 不使用数据库、session 或本地 token estimate；提示词缓存交由上游处理，不在网关缓存答案。
+
+Chat 入口复用 canonical IR/events，协议专有字段仅通过受限同协议扩展保存。三个生成入口共用已验证的 prompt_cache_key 字段；默认生成键的规则及 Chat 支持范围以[兼容性契约](../compatibility.md)为准。上游支持该字段是部署前提，不增加缓存配置或删字段重试路径。
 
 ## 备选方案
 
@@ -51,5 +53,5 @@ Chat 对 reasoning continuation、Responses item/event 和 citation 的表达更
 - fallback 边界可由状态机和测试精确证明；
 - provider-private 字段只在来源协议和结构允许时回放；
 - 新增一种 wire event 可能需要同时更新 canonical event union 与两个 stream encoder；
-- generic provider 默认保守，未知 capability 不会被猜测；
+- 上游默认支持用户确认的 prompt_cache_key，不假定 Anthropic 断点和 TTL 的等价语义；
 - 未来主动 Web Search 供应商需实现 registry contract，并继续遵守启动配置 URL 与日志保密约束。

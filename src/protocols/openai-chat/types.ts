@@ -1,6 +1,6 @@
 export type ChatContentPart =
   | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
 
 export interface ChatFunctionCall {
   id: string;
@@ -9,13 +9,16 @@ export interface ChatFunctionCall {
 }
 
 export interface ChatStandardMessage {
-  role: "system" | "user";
+  role: "system" | "developer" | "user";
   content: ChatContentPart[];
+  name?: string;
 }
 
 export interface ChatAssistantMessage {
   role: "assistant";
-  content?: ChatContentPart[];
+  content?: ChatContentPart[] | null;
+  name?: string;
+  refusal?: string;
   reasoning_content?: string;
   tool_calls?: ChatFunctionCall[];
 }
@@ -37,26 +40,67 @@ export interface ChatRequest {
       name: string;
       description?: string;
       parameters: Record<string, unknown>;
-      strict: boolean;
+      strict?: boolean | null;
     };
   }>;
   tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
   parallel_tool_calls?: boolean;
   max_completion_tokens?: number;
-  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
-  response_format?: {
-    type: "json_schema";
-    json_schema: {
-      name: string;
-      strict: true;
-      schema: Record<string, unknown>;
-    };
-  };
+  max_tokens?: number;
+  reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+  response_format?: ChatResponseFormat;
+  frequency_penalty?: number;
+  presence_penalty?: number;
+  seed?: number;
+  logit_bias?: Record<string, number>;
+  user?: string;
+  safety_identifier?: string;
+  service_tier?: "auto" | "default" | "flex" | "priority";
+  metadata?: Record<string, string>;
+  store?: boolean;
+  prompt_cache_key?: string | null;
   stream: boolean;
   stream_options?: { include_usage: boolean };
   temperature?: number;
   top_p?: number;
   stop?: string[];
+}
+
+export type ChatResponseFormat =
+  | { type: "text" | "json_object" }
+  | {
+      type: "json_schema";
+      json_schema: {
+        name: string;
+        description?: string;
+        strict?: boolean | null;
+        schema: Record<string, unknown>;
+      };
+    };
+
+export interface ChatMessageOptions {
+  name?: string;
+  contentNull?: boolean;
+  imageDetails?: Array<"auto" | "low" | "high" | undefined>;
+}
+
+export interface ChatRequestExtensions {
+  message_options?: ChatMessageOptions[];
+  tool_strict?: Array<boolean | null | undefined>;
+  max_tokens?: number;
+  response_format?: ChatResponseFormat;
+  stream_options?: { include_usage: boolean };
+  reasoning_effort?: ChatRequest["reasoning_effort"];
+  frequency_penalty?: number;
+  presence_penalty?: number;
+  seed?: number;
+  logit_bias?: Record<string, number>;
+  user?: string;
+  safety_identifier?: string;
+  service_tier?: ChatRequest["service_tier"];
+  metadata?: Record<string, string>;
+  store?: boolean;
+  prompt_cache_key?: string | null;
 }
 
 export class OpenAIAdapterError extends Error {

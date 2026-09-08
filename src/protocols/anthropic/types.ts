@@ -136,6 +136,7 @@ export interface AnthropicMetadata {
 }
 
 export interface AnthropicMessageRequest {
+  prompt_cache_key?: string | null;
   model: string;
   max_tokens: number;
   messages: AnthropicMessageParam[];

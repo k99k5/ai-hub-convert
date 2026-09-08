@@ -1,6 +1,6 @@
 # LLM Protocol Gateway
 
-一个无状态的 OpenAI / Anthropic 协议转换网关。服务使用 TypeScript ESM、Fastify 5 和 Node.js 24，对外提供 Anthropic Messages、Anthropic token counting 与 OpenAI Responses 接口；不使用数据库，不保存凭据、prompt、会话或响应。
+一个无状态的 OpenAI / Anthropic 协议转换网关。服务使用 TypeScript ESM、Fastify 5 和 Node.js 24，对外提供 Anthropic Messages、Anthropic token counting、OpenAI Responses 与 Chat Completions 接口；不使用数据库，不保存凭据、prompt、会话或响应。
 
 ## 路由
 
@@ -9,6 +9,7 @@
 | `POST /v1/messages` | `/v1/responses` | 默认路径；仅在明确不存在 Responses endpoint 时受限回退 `/v1/chat/completions` |
 | `POST /v1/messages/count_tokens` | `/v1/responses/input_tokens` | 精确委托；不本地估算，不回退 Chat |
 | `POST /v1/responses` | `/v1/responses` | 完整 decode → canonical IR → encode；永不回退 Chat |
+| `POST /v1/chat/completions` | `/v1/chat/completions` | 完整 decode → canonical IR → encode；直接请求 Chat，不回退或重试 |
 | `GET /health/live` | 无 | 进程存活检查 |
 | `GET /health/ready` | 无 | 就绪检查 |
 
@@ -25,7 +26,7 @@
 
 - Node.js 24；
 - pnpm 10.6.3；
-- 一个支持 OpenAI-compatible Responses 的上游；如需 Anthropic Chat 回退，上游还需支持 Chat Completions。
+- 一个支持目标接口的 OpenAI-compatible 上游：Responses/Anthropic 主路径使用 Responses，Chat 入口及 Anthropic 回退使用 Chat Completions；生成接口需接受 `prompt_cache_key`。
 
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
@@ -39,7 +40,7 @@ pnpm dev
 UPSTREAM_BASE_URL=https://gateway.example.com/v1
 ```
 
-调用方凭据按入口协议读取并转成上游 Bearer：Anthropic 接受 `x-api-key`，并兼容 Bearer；Responses 接受 Bearer。`model` 原样透传。Anthropic SDK 或 Chatbox 的调用端 base URL 应填写 `http://127.0.0.1:3000`，不要追加 `/v1`；SDK 会自行请求 `/v1/messages`。这与可包含 `/v1` 的 `UPSTREAM_BASE_URL` 是两个不同配置。
+调用方凭据按入口协议读取并转成上游 Bearer：Anthropic 接受 `x-api-key`，并兼容 Bearer；Responses 和 Chat 接受 Bearer。`model` 原样透传。Anthropic SDK 或 Chatbox 的 Anthropic 模式 base URL 应填写 `http://127.0.0.1:3000`，不要追加 `/v1`；SDK 会自行请求 `/v1/messages`。OpenAI SDK 的 base URL 填写 `http://127.0.0.1:3000/v1`。这与上游地址 `UPSTREAM_BASE_URL` 是两个不同配置。
 
 Anthropic 示例：
 
@@ -59,7 +60,24 @@ curl http://127.0.0.1:3000/v1/responses \
   -d '{"model":"vendor/model","input":"hello"}'
 ```
 
-两个入口都支持请求中的 `stream:true`。三条 POST route 先做不改写 body 的浅层 wire schema 校验，再由 adapter 做精确语义校验；错误分别使用入口协议的固定 HTTP 400 外壳。超过 `BODY_LIMIT_BYTES` 时返回固定 HTTP 413，且不会回传 validation path 或请求内容。
+Chat 示例：
+
+```bash
+curl http://127.0.0.1:3000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer YOUR_UPSTREAM_KEY' \
+  -d '{"model":"vendor/model","messages":[{"role":"system","content":"请用中文回答。"},{"role":"user","content":"hello"}]}'
+```
+
+三个生成入口都支持 `stream:true`。Chat 使用标准 `data:` chunk 和 `[DONE]`；只有请求 `stream_options:{"include_usage":true}` 时才输出最终 usage chunk。四条 POST route 先做不改写 body 的浅层 wire schema 校验，再由 adapter 做精确语义校验；错误分别使用入口协议的固定 HTTP 400 外壳。超过 `BODY_LIMIT_BYTES` 时返回固定 HTTP 413，且不会回传 validation path 或请求内容。
+
+## 默认提示词缓存
+
+生成请求默认使用 `prompt_cache_key`，不需要增加配置。三个入口都接受字符串键并原样发送；显式 `null` 禁止自动生成。Anthropic Messages 中的这个字段是网关扩展。
+
+未提供键时，网关根据版本标识、目标接口、模型、编码后的工具定义及开头连续的 system/developer 消息生成 SHA-256 键。追加对话、切换 JSON/SSE 或调整采样不会改变键；没有工具或系统前缀时不生成。搜索续轮沿用初始键，Messages 回退 Chat 时按目标接口重算自动键。
+
+缓存键仅辅助上游复用提示词前缀，不缓存答案，也不保证命中。缓存命中和写入 token 数仅使用上游 usage；不会从断点规划推算。`count_tokens` 不发送缓存控制字段。要求上游支持 `prompt_cache_key`，不兼容时不会通过删除字段重试。
 
 ## 配置
 
@@ -110,7 +128,7 @@ User-Agent: claude-cli/2.1.220 (external, cli)
 
 system attribution 与 User-Agent 冲突时以前者为准。只有严格、有效且位于配置范围内的版本启用以下三个独立 shim；缺失或 malformed 版本作为普通 Anthropic SDK 请求放行，合法但越界版本返回 Anthropic HTTP 400 `invalid_request_error`。
 
-- prompt-cache planner：显式 breakpoint 优先，最多四个；Responses 与 Chat attempt 分别规划。generic profile 的 capability 是 `none`，因此不会发送 `cache_control`、`prompt_cache_key` 或伪造的 breakpoint 字段，也不会把 planned 冒充 encoded/hit。
+- prompt-cache planner：显式 breakpoint 优先，最多四个；当前上游能力为 `prompt-cache-key`，不编码 Anthropic `cache_control`、TTL 或断点字段。`PROMPT_CACHE_BREAKPOINTS_ENABLED` 只控制断点规划，不控制默认缓存键，也不会把 planned 冒充 encoded/hit。
 - `Read` 参数修正：仅删除顶层、string 且严格等于空字符串的 `pages`，其余 JSON 字节语义保持不变。
 - thinking signature：为缺失签名的 thinking block 生成 `Buffer.from(crypto.randomUUID(), "utf8").toString("base64")`；真实签名优先。synthetic 值不会作为 OpenAI encrypted reasoning 回放。
 
@@ -129,6 +147,8 @@ Responses JSON/SSE 出口会生成 `web_search_call`，SSE 在实际搜索前发
 Responses 支持显式搜索 `tool_choice`、`allowed_tools`、`max_tool_calls`、上下文大小及域名过滤。DuckDuckGo Lite 的位置只作为检索提示；不支持离线缓存和图片检索，相关请求返回 400。具体映射、历史回传和兼容性变化见 [Responses 搜索兼容说明](docs/compatibility.md#responses-网关搜索)。
 
 ## 兼容范围
+
+Chat 入口支持单候选答案、文本、图片输入（保留 detail）、developer 角色、函数工具及调用回传、reasoning/refusal、采样控制，以及 text/json_object/json_schema 输出格式（保留名称和 strict）。`max_tokens` 与 `max_completion_tokens` 均支持，但不能同时提供。`n>1`、音频、logprobs、旧式 functions/function_call 和内置搜索参数返回 400；普通搜索函数由客户端执行。
 
 支持 JSON 与 SSE：text、system、URL/Base64 image、function tool、tool call/result、并行与交错工具调用、reasoning/thinking、usage、已有 search result、URL citation/annotation。Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 会转为 Responses `reasoning.effort`，token counting 同样保留，Chat fallback 转为 `reasoning_effort`。Anthropic `output_config.format` 支持 `null` 或 `{ type: "json_schema", schema: {...} }`：Responses 映射到 `text.format`，token counting 同样保留，Chat fallback 映射到 `response_format.json_schema`。
 

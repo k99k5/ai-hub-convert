@@ -22,6 +22,7 @@ import { registerHealthRoutes } from "./http/health.js";
 import {
   AnthropicMessagesBodySchema,
   AnthropicTokenCountBodySchema,
+  OpenAIChatBodySchema,
   OpenAIResponsesBodySchema,
 } from "./http/schemas.js";
 import { ClientSseSender } from "./http/sse.js";
@@ -52,6 +53,9 @@ import {
 } from "./protocols/anthropic/stream-encode.js";
 import { decodeChatResponse } from "./protocols/openai-chat/decode.js";
 import { encodeChatRequest } from "./protocols/openai-chat/encode.js";
+import { decodeChatRequest } from "./protocols/openai-chat/request-decode.js";
+import { encodeChatResponse } from "./protocols/openai-chat/response-encode.js";
+import { ChatStreamEncoder } from "./protocols/openai-chat/stream-encode.js";
 import { decodeResponsesRequest } from "./protocols/openai-responses/request-decode.js";
 import { encodeResponsesResponse } from "./protocols/openai-responses/response-encode.js";
 import {
@@ -96,7 +100,7 @@ interface AnthropicMessageBody {
   system?: string | Array<{ type?: string; text?: string }>;
 }
 
-type RouteProtocol = "anthropic" | "openai-responses";
+type RouteProtocol = "anthropic" | "openai-responses" | "openai-chat";
 
 interface FastifyBoundaryError extends Error {
   code?: string;
@@ -130,6 +134,7 @@ function outputLimits(config: AppConfig): StreamOutputLimits {
 }
 
 function routeProtocol(url: string): RouteProtocol {
+  if (url === "/v1/chat/completions") return "openai-chat";
   return url === "/v1/responses" ? "openai-responses" : "anthropic";
 }
 
@@ -449,6 +454,129 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     );
 
     api.post<{ Body: unknown }>(
+      "/v1/chat/completions",
+      {
+        schema: { body: OpenAIChatBodySchema },
+        sse: { kind: "manual", heartbeat: false },
+      },
+      async (request, reply) => {
+        let apiKey: string;
+        let canonicalRequest: CanonicalRequest;
+        try {
+          apiKey = extractResponsesApiKey(request.headers);
+          canonicalRequest = decodeChatRequest(request.body);
+        } catch (error) {
+          if (error instanceof AuthenticationError) {
+            return reply.code(401).send({
+              error: {
+                type: "authentication_error",
+                code: "invalid_api_key",
+                message: "需要有效的 Bearer 凭据",
+              },
+              request_id: request.id,
+            });
+          }
+          if (error instanceof ChatAdapterError) {
+            return sendOpenAIRequestError(reply, 400, "invalid_request", error.message);
+          }
+          throw error;
+        }
+
+        const abortScope = createRequestAbortScope(
+          request.raw,
+          reply.raw,
+          config.upstream.timeoutMs,
+        );
+        if (!canonicalRequest.stream) {
+          try {
+            const response = await upstream.postJson(
+              "chat/completions",
+              encodeChatRequest(canonicalRequest),
+              apiKey,
+              abortScope.signal,
+            );
+            return reply.send(
+              encodeChatResponse(
+                decodeChatResponse(response, {
+                  preserveWireMetadata: true,
+                  validateToolArguments: false,
+                }),
+              ),
+            );
+          } catch (error) {
+            const mapped = mapUpstreamError("openai-chat", error, request.id);
+            return reply.code(mapped.status).send(mapped.body);
+          } finally {
+            abortScope.dispose();
+          }
+        }
+
+        const removeActiveStream = activeStreams.add(abortScope);
+        const clientStream = new ClientSseSender(reply);
+        reply.sse.onClose(() => abortScope.abort(new Error("客户端已断开连接")));
+        const streamOptions = canonicalRequest.extensions?.request?.stream_options;
+        const includeUsage =
+          typeof streamOptions === "object" &&
+          streamOptions !== null &&
+          "include_usage" in streamOptions &&
+          streamOptions.include_usage === true;
+        const encoder = new ChatStreamEncoder({ includeUsage });
+        let completed = false;
+        try {
+          for await (const event of upstream.streamCompletion(
+            "chat/completions",
+            encodeChatRequest(canonicalRequest),
+            apiKey,
+            abortScope.signal,
+            {
+              preserveChatWireMetadata: true,
+              validateChatToolArguments: false,
+              argumentLimits: toolArgumentLimits(config),
+              outputLimits: outputLimits(config),
+              timeouts: {
+                firstByteTimeoutMs: config.upstream.firstByteTimeoutMs,
+                idleTimeoutMs: config.upstream.streamIdleTimeoutMs,
+                onTimeout: (error) => abortScope.abort(error),
+              },
+              maxFrameBytes: config.upstream.sseFrameLimitBytes,
+            },
+          )) {
+            for (const frame of encoder.encode(event)) {
+              // 等到上游流完整校验结束再发送成功标记，避免尾部错误被客户端忽略。
+              if (frame.data === "[DONE]") completed = true;
+              else await clientStream.send(frame);
+            }
+            if (event.type === "response_error") return;
+          }
+          if (completed) await clientStream.send("[DONE]");
+          return;
+        } catch (error) {
+          abortScope.abort(error);
+          if (!reply.raw.headersSent) {
+            const mapped = mapUpstreamError("openai-chat", error, request.id);
+            return reply.code(mapped.status).send(mapped.body);
+          }
+          await clientStream.sendError({
+            data: {
+              error: {
+                type: "server_error",
+                code:
+                  error instanceof ToolArgumentLimitError || error instanceof StreamOutputLimitError
+                    ? error.code
+                    : "upstream_stream_error",
+                message: "上游流式响应失败",
+              },
+            },
+          });
+          return;
+        } finally {
+          removeActiveStream();
+          abortScope.dispose();
+        }
+      },
+    );
+
+    api.post<{ Body: unknown }>(
       "/v1/responses",
       {
         schema: { body: OpenAIResponsesBodySchema },
@@ -562,7 +690,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             encodeResponsesRequest(canonicalRequest, {
               store: false,
               replaySourceExtensions: true,
-              promptCache: { kind: "none" },
+              promptCache: GENERIC_PROMPT_CACHE_CAPABILITIES.responses,
             }),
             apiKey,
             abortScope.signal,
@@ -609,7 +737,7 @@ async function streamResponsesResponse(
     encodeResponsesRequest(request, {
       store: false,
       replaySourceExtensions: true,
-      promptCache: { kind: "none" },
+      promptCache: GENERIC_PROMPT_CACHE_CAPABILITIES.responses,
     }),
     apiKey,
     signal,
@@ -666,7 +794,10 @@ async function streamAnthropicResponse(
     try {
       yield* upstream.streamCompletion(
         "responses",
-        encodeResponsesRequest(request, { store: false, promptCache: { kind: "none" } }),
+        encodeResponsesRequest(request, {
+          store: false,
+          promptCache: promptCacheCapabilities.responses,
+        }),
         apiKey,
         signal,
         options,
@@ -741,7 +872,10 @@ async function requestAnthropicCompletion(
     });
     const response = await upstream.postJson(
       "responses",
-      encodeResponsesRequest(request, { store: false, promptCache: { kind: "none" } }),
+      encodeResponsesRequest(request, {
+        store: false,
+        promptCache: promptCacheCapabilities.responses,
+      }),
       apiKey,
       signal,
       webSearchOptions(request).webSearch,

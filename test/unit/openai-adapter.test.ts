@@ -1248,6 +1248,7 @@ describe("OpenAI Chat adapter", () => {
       tool_choice: "required",
       parallel_tool_calls: true,
       max_completion_tokens: 256,
+      prompt_cache_key: expect.stringMatching(/^[a-f0-9]{64}$/),
       stream: false,
       temperature: 0.1,
       top_p: 0.8,

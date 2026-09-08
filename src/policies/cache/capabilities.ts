@@ -15,6 +15,6 @@ export interface PromptCacheCapabilities {
 }
 
 export const GENERIC_PROMPT_CACHE_CAPABILITIES: PromptCacheCapabilities = {
-  responses: { kind: "none" },
-  chatCompletions: { kind: "none" },
+  responses: { kind: "prompt-cache-key" },
+  chatCompletions: { kind: "prompt-cache-key" },
 };

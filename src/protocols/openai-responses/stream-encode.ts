@@ -4,6 +4,7 @@ import type {
   Citation,
   FunctionCallContent,
   ReasoningContent,
+  RefusalContent,
   TextContent,
   Usage,
 } from "../../core/ir.js";
@@ -33,6 +34,7 @@ interface ResponseIdentity {
 
 type OpenItem =
   | { type: "text"; itemId: string; content: TextContent }
+  | { type: "refusal"; itemId: string; content: RefusalContent }
   | { type: "reasoning"; itemId: string; content: ReasoningContent }
   | { type: "function_call"; itemId: string; content: FunctionCallContent };
 
@@ -130,6 +132,28 @@ export class ResponsesStreamEncoder {
     if (content.type === "text") {
       return this.#startText(index, itemId, content);
     }
+    if (content.type === "refusal") {
+      this.#openItems.set(index, { type: "refusal", itemId, content: { ...content } });
+      this.#outputLimiter.add(index, content.refusal);
+      return [
+        this.#frame("response.output_item.added", {
+          output_index: index,
+          item: {
+            id: itemId,
+            type: "message",
+            role: "assistant",
+            status: "in_progress",
+            content: [],
+          },
+        }),
+        this.#frame("response.content_part.added", {
+          item_id: itemId,
+          output_index: index,
+          content_index: 0,
+          part: { type: "refusal", refusal: content.refusal },
+        }),
+      ];
+    }
     if (content.type === "reasoning") {
       return this.#startReasoning(index, itemId, content);
     }
@@ -210,6 +234,18 @@ export class ResponsesStreamEncoder {
 
   #textDelta(index: number, delta: string): ResponsesSseFrame[] {
     const item = this.#openItems.get(index);
+    if (item?.type === "refusal") {
+      this.#outputLimiter.add(index, delta);
+      item.content.refusal += delta;
+      return [
+        this.#frame("response.refusal.delta", {
+          item_id: item.itemId,
+          output_index: index,
+          content_index: 0,
+          delta,
+        }),
+      ];
+    }
     if (item?.type !== "text") {
       throw new Error(`Responses output item ${index} is not open as text`);
     }
@@ -334,6 +370,32 @@ export class ResponsesStreamEncoder {
     }
     if (item.type === "function_call") {
       return this.#stopFunctionCall(index, item);
+    }
+    if (item.type === "refusal") {
+      const part = { type: "refusal", refusal: item.content.refusal };
+      const outputItem = {
+        id: item.itemId,
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [part],
+      };
+      this.#outputItems.set(index, outputItem);
+      return [
+        this.#frame("response.refusal.done", {
+          item_id: item.itemId,
+          output_index: index,
+          content_index: 0,
+          refusal: part.refusal,
+        }),
+        this.#frame("response.content_part.done", {
+          item_id: item.itemId,
+          output_index: index,
+          content_index: 0,
+          part,
+        }),
+        this.#frame("response.output_item.done", { output_index: index, item: outputItem }),
+      ];
     }
 
     const part = {

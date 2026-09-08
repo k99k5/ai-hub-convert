@@ -58,8 +58,9 @@ function decodeText(value: unknown): Content[] {
   return content;
 }
 
-function validateArguments(value: unknown): string {
+function validateArguments(value: unknown, validate: boolean): string {
   const argumentsJson = string(value, "tool arguments");
+  if (!validate) return argumentsJson;
   try {
     JSON.parse(argumentsJson);
   } catch {
@@ -68,7 +69,7 @@ function validateArguments(value: unknown): string {
   return argumentsJson;
 }
 
-function decodeToolCalls(value: unknown): Content[] {
+function decodeToolCalls(value: unknown, validateToolArguments: boolean): Content[] {
   if (value === undefined) {
     return [];
   }
@@ -85,7 +86,7 @@ function decodeToolCalls(value: unknown): Content[] {
       type: "function_call" as const,
       id: string(call.id, "tool call id"),
       name: string(fn.name, "tool function name"),
-      arguments: validateArguments(fn.arguments),
+      arguments: validateArguments(fn.arguments, validateToolArguments),
     };
   });
 }
@@ -138,13 +139,22 @@ function decodeFinish(value: unknown, content: readonly Content[]): FinishReason
   return "incomplete";
 }
 
-export function decodeChatResponse(input: unknown): CanonicalResponse {
+export function decodeChatResponse(
+  input: unknown,
+  options: { preserveWireMetadata?: boolean; validateToolArguments?: boolean } = {},
+): CanonicalResponse {
   const body = record(input, "body");
   if (!Array.isArray(body.choices) || body.choices.length !== 1) {
     invalid("Invalid OpenAI Chat response: expected exactly one choice");
   }
   const choice = record(body.choices[0], "choice");
   const message = record(choice.message, "choice message");
+  if (choice.index !== undefined && choice.index !== 0) {
+    invalid("Chat 响应的候选索引必须为 0");
+  }
+  if (message.role !== undefined && message.role !== "assistant") {
+    invalid("Chat 响应的消息角色必须为 assistant");
+  }
   const content: Content[] = [];
   if (message.reasoning_content !== undefined && message.reasoning_content !== null) {
     content.push({
@@ -157,12 +167,23 @@ export function decodeChatResponse(input: unknown): CanonicalResponse {
   if (message.refusal !== undefined && message.refusal !== null) {
     content.push({ type: "refusal", refusal: string(message.refusal, "refusal") });
   }
-  content.push(...decodeToolCalls(message.tool_calls));
+  content.push(...decodeToolCalls(message.tool_calls, options.validateToolArguments !== false));
   return {
     id: string(body.id, "id"),
     model: string(body.model, "model"),
     content,
     finishReason: decodeFinish(choice.finish_reason, content),
     usage: decodeUsage(body.usage),
+    ...(options.preserveWireMetadata
+      ? {
+          extensions: {
+            source: "openai-chat" as const,
+            response: {
+              ...(body.created === undefined ? {} : { created: number(body.created, "created") }),
+              finish_reason: choice.finish_reason,
+            },
+          },
+        }
+      : {}),
   };
 }

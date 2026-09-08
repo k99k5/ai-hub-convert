@@ -41,3 +41,12 @@ export const OpenAIResponsesBodySchema = Type.Object(
   },
   { additionalProperties: true },
 );
+
+export const OpenAIChatBodySchema = Type.Object(
+  {
+    model: Type.String(),
+    messages: Type.Array(JsonObject),
+    stream: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: true },
+);

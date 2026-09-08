@@ -1813,7 +1813,7 @@ describe("Anthropic Messages conversion", () => {
     ]);
   });
 
-  it("does not send cache write metadata through the generic upstream profile", async () => {
+  it("默认发送缓存键，回退时重新生成且不伪造断点元数据", async () => {
     const upstreamBodies: Array<Record<string, unknown>> = [];
     const app = createApp({}, async (input, init) => {
       const request = new Request(input, init);
@@ -1869,10 +1869,11 @@ describe("Anthropic Messages conversion", () => {
     for (const body of upstreamBodies) {
       const wire = JSON.stringify(body);
       expect(wire).not.toContain("cache_control");
-      expect(wire).not.toContain("prompt_cache_key");
+      expect(body.prompt_cache_key).toMatch(/^[a-f0-9]{64}$/);
       expect(wire).not.toContain("prompt_cache_options");
       expect(wire).not.toContain("prompt_cache_breakpoint");
     }
+    expect(upstreamBodies[0]?.prompt_cache_key).not.toBe(upstreamBodies[1]?.prompt_cache_key);
   });
 
   it("does not fall back to Chat for an ambiguous Responses 404", async () => {
@@ -2079,7 +2080,7 @@ describe("OpenAI Responses conversion", () => {
     });
   });
 
-  it("suppresses caller prompt cache keys for the generic profile", async () => {
+  it("默认保留调用方显式缓存键", async () => {
     let upstreamBody: Record<string, unknown> | undefined;
     const app = createApp({}, async (input, init) => {
       upstreamBody = (await new Request(input, init).json()) as Record<string, unknown>;
@@ -2105,7 +2106,7 @@ describe("OpenAI Responses conversion", () => {
     });
 
     expect(response.statusCode, response.body).toBe(200);
-    expect(upstreamBody).not.toHaveProperty("prompt_cache_key");
+    expect(upstreamBody).toHaveProperty("prompt_cache_key", "caller-cache-key");
   });
 
   it("normalizes a Responses text stream without Chat fallback", async () => {

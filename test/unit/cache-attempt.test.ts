@@ -42,10 +42,10 @@ const blockCapability: PromptCacheCapability = {
 };
 
 describe("preparePromptCacheAttempt", () => {
-  it("makes generic prompt caching explicitly unsupported for both upstream paths", () => {
+  it("两条上游路径默认支持提示词缓存键", () => {
     expect(GENERIC_PROMPT_CACHE_CAPABILITIES).toEqual({
-      responses: { kind: "none" },
-      chatCompletions: { kind: "none" },
+      responses: { kind: "prompt-cache-key" },
+      chatCompletions: { kind: "prompt-cache-key" },
     });
   });
 

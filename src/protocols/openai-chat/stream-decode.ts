@@ -17,6 +17,7 @@ const OUTPUT_ITEM_OVERHEAD_BYTES = 256;
 interface StreamIdentity {
   id: string;
   model: string;
+  created?: number;
 }
 
 interface ToolState {
@@ -30,10 +31,12 @@ export class ChatStreamDecoder {
   #identity?: StreamIdentity;
   #terminal = false;
   #finishReason?: FinishReason;
+  #wireFinishReason?: string;
   #usage: Usage = { inputTokens: 0, outputTokens: 0 };
   #nextContentIndex = 0;
   #reasoningIndex?: number;
   #textIndex?: number;
+  #refusalIndex?: number;
   readonly #tools = new Map<number, ToolState>();
   readonly #openIndices = new Set<number>();
   readonly #argumentLimiter: ToolArgumentStreamLimiter;
@@ -42,6 +45,10 @@ export class ChatStreamDecoder {
   constructor(
     limits: ToolArgumentLimits = DEFAULT_TOOL_ARGUMENT_LIMITS,
     outputLimits: StreamOutputLimits = DEFAULT_STREAM_OUTPUT_LIMITS,
+    private readonly options: {
+      preserveWireMetadata?: boolean;
+      validateToolArguments?: boolean;
+    } = {},
   ) {
     this.#argumentLimiter = new ToolArgumentStreamLimiter(limits);
     this.#outputLimiter = new StreamOutputLimiter(outputLimits);
@@ -86,14 +93,18 @@ export class ChatStreamDecoder {
     this.#validateRole(delta.role);
     events.push(...this.#decodeReasoning(delta));
     events.push(...this.#decodeText(delta.content));
-    events.push(...this.#decodeText(delta.refusal));
+    events.push(...this.#decodeRefusal(delta.refusal));
     events.push(...this.#decodeTools(delta.tool_calls));
 
     if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
       if (this.#finishReason !== undefined) {
         throw new Error("Chat stream emitted finish_reason more than once");
       }
-      this.#finishReason = decodeFinishReason(choice.finish_reason);
+      this.#finishReason = decodeFinishReason(
+        choice.finish_reason,
+        this.#refusalIndex !== undefined,
+      );
+      this.#wireFinishReason = requireString(choice.finish_reason, "finish_reason");
       this.#validateToolArguments();
       for (const index of [...this.#openIndices].sort((left, right) => left - right)) {
         events.push({ type: "content_stop", index });
@@ -113,12 +124,28 @@ export class ChatStreamDecoder {
   #startOrValidate(payload: Record<string, unknown>): CanonicalEvent[] {
     const id = requireString(payload.id, "id");
     const model = requireString(payload.model, "model");
+    const created =
+      payload.created === undefined
+        ? undefined
+        : requireNonNegativeInteger(payload.created, "created");
     if (!this.#identity) {
-      this.#identity = { id, model };
-      return [{ type: "response_start", id, model }];
+      this.#identity = { id, model, ...(created === undefined ? {} : { created }) };
+      return [
+        {
+          type: "response_start",
+          id,
+          model,
+          ...(this.options.preserveWireMetadata && created !== undefined
+            ? { extensions: { source: "openai-chat", response: { created } } }
+            : {}),
+        },
+      ];
     }
     if (this.#identity.id !== id || this.#identity.model !== model) {
       throw new Error("Chat stream id and model must remain stable");
+    }
+    if (created !== undefined && created !== this.#identity.created) {
+      throw new Error("Chat 流的 created 必须保持不变");
     }
     return [];
   }
@@ -150,6 +177,7 @@ export class ChatStreamDecoder {
       });
     }
     if (text.length > 0) {
+      this.#outputLimiter.add(this.#reasoningIndex, text);
       events.push({ type: "reasoning_delta", index: this.#reasoningIndex, delta: text });
     }
     return events;
@@ -170,7 +198,27 @@ export class ChatStreamDecoder {
       });
     }
     if (text.length > 0) {
+      this.#outputLimiter.add(this.#textIndex, text);
       events.push({ type: "text_delta", index: this.#textIndex, delta: text });
+    }
+    return events;
+  }
+
+  #decodeRefusal(value: unknown): CanonicalEvent[] {
+    if (value === undefined || value === null) return [];
+    const text = requireString(value, "refusal delta");
+    const events: CanonicalEvent[] = [];
+    if (this.#refusalIndex === undefined) {
+      this.#refusalIndex = this.#open();
+      events.push({
+        type: "content_start",
+        index: this.#refusalIndex,
+        content: { type: "refusal", refusal: "" },
+      });
+    }
+    if (text.length > 0) {
+      this.#outputLimiter.add(this.#refusalIndex, text);
+      events.push({ type: "text_delta", index: this.#refusalIndex, delta: text });
     }
     return events;
   }
@@ -221,7 +269,8 @@ export class ChatStreamDecoder {
       if (fn.arguments !== undefined && fn.arguments !== null) {
         const argumentsDelta = requireString(fn.arguments, "tool arguments delta");
         this.#argumentLimiter.add(sourceIndex, argumentsDelta);
-        state.arguments += argumentsDelta;
+        this.#outputLimiter.add(state.canonicalIndex, argumentsDelta);
+        if (this.options.validateToolArguments !== false) state.arguments += argumentsDelta;
         if (argumentsDelta.length > 0) {
           events.push({
             type: "function_arguments_delta",
@@ -245,14 +294,16 @@ export class ChatStreamDecoder {
 
   #validateToolArguments(): void {
     for (const [sourceIndex, tool] of this.#tools) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(tool.arguments);
-      } catch {
-        throw new Error("Chat stream tool arguments must contain complete JSON");
-      }
-      if (!isObject(parsed)) {
-        throw new Error("Chat stream tool arguments must contain a JSON object");
+      if (this.options.validateToolArguments !== false) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(tool.arguments);
+        } catch {
+          throw new Error("Chat stream tool arguments must contain complete JSON");
+        }
+        if (!isObject(parsed)) {
+          throw new Error("Chat stream tool arguments must contain a JSON object");
+        }
       }
       this.#argumentLimiter.finish(sourceIndex);
     }
@@ -274,6 +325,19 @@ export class ChatStreamDecoder {
         type: "response_complete",
         finishReason: this.#finishReason,
         usage: this.#usage,
+        ...(this.options.preserveWireMetadata
+          ? {
+              extensions: {
+                source: "openai-chat" as const,
+                response: {
+                  ...(this.#identity.created === undefined
+                    ? {}
+                    : { created: this.#identity.created }),
+                  finish_reason: this.#wireFinishReason,
+                },
+              },
+            }
+          : {}),
       },
     ];
   }
@@ -303,7 +367,7 @@ function parsePayload(data: string): Record<string, unknown> {
   return requireObject(value, "event");
 }
 
-function decodeFinishReason(value: unknown): FinishReason {
+function decodeFinishReason(value: unknown, hasRefusal: boolean): FinishReason {
   const reason = requireString(value, "finish_reason");
   if (reason === "tool_calls" || reason === "function_call") {
     return "tool_use";
@@ -311,7 +375,7 @@ function decodeFinishReason(value: unknown): FinishReason {
   if (reason === "length") {
     return "max_tokens";
   }
-  if (reason === "content_filter") {
+  if (reason === "content_filter" || hasRefusal) {
     return "refusal";
   }
   if (reason === "stop") {

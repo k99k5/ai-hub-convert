@@ -4,11 +4,18 @@ import type {
   Content,
   FinishReason,
   OpaqueContinuation,
+  ProviderExtensions,
   Usage,
 } from "./ir.js";
 
 export type CanonicalEvent =
-  | { type: "response_start"; id: string; model: string; usage?: Usage }
+  | {
+      type: "response_start";
+      id: string;
+      model: string;
+      usage?: Usage;
+      extensions?: ProviderExtensions;
+    }
   | { type: "content_start"; index: number; itemId?: string; content: Content }
   | { type: "text_delta"; index: number; delta: string }
   | { type: "reasoning_delta"; index: number; delta: string }
@@ -26,7 +33,13 @@ export type CanonicalEvent =
         results: Array<{ title: string; url: string; content: string }>;
       };
     }
-  | { type: "response_complete"; finishReason: FinishReason; usage: Usage; stopSequence?: string }
+  | {
+      type: "response_complete";
+      finishReason: FinishReason;
+      usage: Usage;
+      stopSequence?: string;
+      extensions?: ProviderExtensions;
+    }
   | { type: "response_error"; error: CanonicalError };
 
 export interface CanonicalError {
@@ -61,6 +74,8 @@ export function foldCanonicalEvents(events: readonly CanonicalEvent[]): Canonica
     }
     if (event.type === "text_delta" && content.type === "text") {
       content.text += event.delta;
+    } else if (event.type === "text_delta" && content.type === "refusal") {
+      content.refusal += event.delta;
     } else if (event.type === "reasoning_delta" && content.type === "reasoning") {
       content.text += event.delta;
     } else if (event.type === "reasoning_continuation" && content.type === "reasoning") {
@@ -83,5 +98,8 @@ export function foldCanonicalEvents(events: readonly CanonicalEvent[]): Canonica
     finishReason: complete.finishReason,
     ...(complete.stopSequence ? { stopSequence: complete.stopSequence } : {}),
     usage: complete.usage,
+    ...((complete.extensions ?? start.extensions)
+      ? { extensions: complete.extensions ?? start.extensions }
+      : {}),
   };
 }

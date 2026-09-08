@@ -1,6 +1,6 @@
 import { UpstreamHttpError } from "../upstream/client.js";
 
-export type ErrorProtocol = "anthropic" | "openai-responses";
+export type ErrorProtocol = "anthropic" | "openai-responses" | "openai-chat";
 
 export interface MappedHttpError {
   status: number;

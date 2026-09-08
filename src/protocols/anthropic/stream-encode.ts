@@ -81,7 +81,8 @@ export class AnthropicStreamEncoder {
       case "content_start":
         return this.#startContent(event.index, event.content);
       case "text_delta": {
-        const block = this.#assertOpen(event.index, "text");
+        const kind = this.#openBlocks.get(event.index)?.content.type;
+        const block = this.#assertOpen(event.index, kind === "refusal" ? "refusal" : "text");
         const outputIndex = this.#outputIndex(event.index);
         this.#outputLimiter.add(outputIndex, event.delta);
         if (event.delta.length > 0) {
