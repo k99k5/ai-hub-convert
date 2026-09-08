@@ -30,7 +30,7 @@
 | URL image | 支持 | 支持 | 支持 |
 | Base64 image | 支持 | 支持 | 支持 |
 | function tools | 支持 | 支持 | 支持 |
-| tool calls/results | 支持；`tool_result` 中的 image/search_result 内容返回 HTTP 400 | 同上；不触发 Chat 回退 | 支持 |
+| tool calls/results | 支持；`tool_result` 中的 image/search_result 内容返回 HTTP 400 | 同上；不触发 Chat 回退 | 支持；`function_call_output.output` 接受字符串或纯 `input_text` 数组，图片和文件结果返回 HTTP 400 |
 | parallel/interleaved calls | 支持 | 支持 | 支持 |
 | reasoning/thinking | Anthropic thinking 可返回客户端；历史 thinking 不伪造成 Responses reasoning continuation | 支持常见 Chat reasoning 扩展 | 支持；真实 item `id` 与 `encrypted_content` 只作同协议 continuation |
 | `output_config.effort` | `reasoning.effort` | `reasoning_effort` | 不适用；完整 `reasoning` 对象同协议回放 |
@@ -47,6 +47,8 @@
 | audio | 不支持 | 不支持 | 不支持 |
 | file upload/file_id | 不支持 | 不支持 | 不支持 |
 | background lifecycle | 不支持 | 不支持 | `background:true` 被拒绝 |
+
+Responses 的工具结果文本数组按原顺序直接拼接为字符串，保留空白和换行，不自动插入分隔符；空数组归一化为空字符串。JSON 与 SSE 请求采用相同规则，适用于客户端执行普通搜索函数后的结果回传。混入图片、文件或未知内容类型时整条请求返回 HTTP 400，不会仅提取文字并丢弃其他内容。
 
 ## Web Search discriminator
 

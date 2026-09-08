@@ -5,8 +5,8 @@ import type {
   Message,
   ToolChoice,
 } from "../../core/ir.js";
-import { OpenAIAdapterError } from "./types.js";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../providers/web-search/internal.js";
+import { OpenAIAdapterError } from "./types.js";
 import { decodeWebSearchHistory } from "./web-search.js";
 
 const errorCode = "INVALID_OPENAI_RESPONSES_REQUEST" as const;
@@ -207,7 +207,19 @@ function decodeFunctionCall(item: Record<string, unknown>): Message {
 }
 
 function decodeFunctionResult(item: Record<string, unknown>): Message {
-  if (typeof item.output !== "string") {
+  let output = item.output;
+  if (Array.isArray(output)) {
+    output = output
+      .map((rawPart) => {
+        const part = record(rawPart, "function_call_output output item");
+        if (part.type !== "input_text" || typeof part.text !== "string") {
+          return invalid("function_call_output.output 仅支持字符串或 input_text 文本数组");
+        }
+        return part.text;
+      })
+      .join("");
+  }
+  if (typeof output !== "string") {
     return invalid("Unsupported OpenAI Responses input");
   }
   return {
@@ -216,7 +228,7 @@ function decodeFunctionResult(item: Record<string, unknown>): Message {
       {
         type: "function_result",
         callId: string(item.call_id, "function_call_output call_id"),
-        output: item.output,
+        output,
         isError: false,
       },
     ],
