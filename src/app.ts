@@ -57,6 +57,7 @@ import { decodeChatRequest } from "./protocols/openai-chat/request-decode.js";
 import { encodeChatResponse } from "./protocols/openai-chat/response-encode.js";
 import { ChatStreamEncoder } from "./protocols/openai-chat/stream-encode.js";
 import { decodeResponsesRequest } from "./protocols/openai-responses/request-decode.js";
+import { responsesInputDiagnostic } from "./protocols/openai-responses/diagnostics.js";
 import { encodeResponsesResponse } from "./protocols/openai-responses/response-encode.js";
 import {
   addResponsesWebSearch,
@@ -600,6 +601,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             });
           }
           if (error instanceof OpenAIAdapterError) {
+            request.log.warn(
+              { request_id: request.id, ...responsesInputDiagnostic(request.body, error) },
+              "[DEBUG-responses-input-v1] Responses 输入校验失败",
+            );
             return reply.code(400).send({
               error: {
                 message: error.message,

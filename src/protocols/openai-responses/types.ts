@@ -76,6 +76,7 @@ export type ResponsesAdapterErrorCode =
 
 export class OpenAIAdapterError extends Error {
   readonly code: ResponsesAdapterErrorCode;
+  inputPath?: string;
 
   constructor(code: ResponsesAdapterErrorCode, message: string) {
     super(message);
