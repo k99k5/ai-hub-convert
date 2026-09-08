@@ -1,4 +1,5 @@
 import type { OpenAIAdapterError } from "./types.js";
+import { UpstreamHttpError } from "../../upstream/client.js";
 
 const knownTags = new Set([
   "system",
@@ -108,4 +109,33 @@ export function responsesInputDiagnostic(body: unknown, error: OpenAIAdapterErro
     ...(Array.isArray(input) ? { input_count: input.length } : {}),
     rejected_shape: shape(rejected),
   };
+}
+
+export function responsesUpstreamDiagnostic(error: unknown) {
+  const knownCodes = new Set([
+    "item_not_found",
+    "tool_call_not_found",
+    "invalid_request_error",
+    "invalid_request",
+    "invalid_value",
+    "unsupported_value",
+    "unsupported_parameter",
+    "model_not_found",
+    "context_length_exceeded",
+  ]);
+  if (error instanceof UpstreamHttpError) {
+    return {
+      stage: "upstream_http",
+      upstream_status: error.status,
+      upstream_code:
+        error.code === undefined
+          ? "absent"
+          : knownCodes.has(error.code)
+            ? error.code
+            : "unrecognized",
+      reference_hint: error.referenceHint ?? "unknown",
+      has_upstream_semantic_event: error.hasUpstreamSemanticEvent,
+    };
+  }
+  return { stage: "gateway_processing", reference_hint: "unknown" };
 }

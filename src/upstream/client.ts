@@ -28,20 +28,56 @@ const MAX_WEB_SEARCH_ROUNDS = 8;
 interface UpstreamErrorEnvelope {
   error?: {
     code?: string | number;
+    message?: unknown;
   };
   code?: string | number;
+}
+
+type ReferenceErrorHint =
+  | "item_not_found"
+  | "item_reference_unsupported"
+  | "tool_call_not_found"
+  | "unknown";
+
+function referenceErrorHint(envelope: UpstreamErrorEnvelope | undefined): ReferenceErrorHint {
+  const code = envelope?.error?.code ?? envelope?.code;
+  const rawMessage = envelope?.error?.message;
+  const message = typeof rawMessage === "string" ? rawMessage.toLowerCase() : "";
+  // 只保留固定分类，不把上游错误正文、引用 ID 或其他任意字符串带入日志。
+  if (code === "tool_call_not_found" || message.includes("no tool call found")) {
+    return "tool_call_not_found";
+  }
+  if (
+    message.includes("item_reference") &&
+    (message.includes("unsupported") || message.includes("not supported"))
+  ) {
+    return "item_reference_unsupported";
+  }
+  if (
+    code === "item_not_found" ||
+    (message.includes("item") &&
+      (message.includes("not found") || message.includes("does not exist")))
+  ) {
+    return "item_not_found";
+  }
+  return "unknown";
 }
 
 export class UpstreamHttpError extends Error {
   readonly status: number;
   readonly code?: string;
   readonly requestId?: string;
+  readonly referenceHint?: ReferenceErrorHint;
   hasUpstreamSemanticEvent = false;
 
-  constructor(status: number, options: { code?: string; requestId?: string }) {
+  constructor(
+    status: number,
+    options: { code?: string; requestId?: string; referenceHint?: ReferenceErrorHint },
+  ) {
     super(`Upstream request failed with status ${status}`);
     this.name = "UpstreamHttpError";
     this.status = status;
+    if (options.referenceHint !== undefined) this.referenceHint = options.referenceHint;
     if (options.code) {
       this.code = options.code;
     }
@@ -201,6 +237,7 @@ export class UpstreamClient {
       const code = envelope?.error?.code ?? envelope?.code;
       const requestId = response.headers.get("x-request-id");
       throw new UpstreamHttpError(response.status, {
+        ...(path === "responses" ? { referenceHint: referenceErrorHint(envelope) } : {}),
         ...(code !== undefined ? { code: String(code) } : {}),
         ...(requestId ? { requestId } : {}),
       });

@@ -29,6 +29,8 @@ docker compose logs -f --since=5m gateway
 
 有效引用通过解析时，会另输出一条 `info` 日志，标记为 `[DEBUG-responses-input-v1] 已接收 Responses 引用`，包含 `event:"item_reference_accepted"`、引用数量和实际采用的 `store` 值，不记录引用 ID。出现该日志说明已通过引用解析；它不表示上游已成功解析引用。如果随后仍返回错误，应结合相同 `request_id` 的 HTTP 状态检查上游是否能访问这些历史对象。
 
+后续 JSON/SSE 处理失败时输出 `[DEBUG-responses-input-v1] Responses 后续处理失败`：`stage:"upstream_http"` 表示确实收到上游非成功 HTTP 状态，`upstream_status` 是原状态，`upstream_code` 仅输出白名单值，其他值统一为 `unrecognized` 或 `absent`。`reference_hint` 根据有限错误码或英文错误文本特征归类为 `item_not_found`、`item_reference_unsupported`、`tool_call_not_found` 或 `unknown`；它是定位线索，不是对上游存储状态的证明。非 HTTP 错误标为 `gateway_processing`。不记录原始错误正文、请求 ID 响应头或未知错误码；客户端仍收到原有清洗后的错误。
+
 透传仅接受显式 `type:"item_reference"` 与非空字符串 `id`，保持输入顺序。不会自动开启存储，也不会在网关缓存历史；默认 `store:false`，显式 `true | false | null` 保持原值。若上游无法解析引用，需要客户端使用 `store:false` 发送完整历史，或在上游支持的前提下由调用方明确启用上游存储。
 
 如果没有该标记，先核对是否已构建并启动测试分支；请求若在 HTTP/schema 层或上游失败，也不会进入这条诊断。

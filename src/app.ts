@@ -57,7 +57,10 @@ import { decodeChatRequest } from "./protocols/openai-chat/request-decode.js";
 import { encodeChatResponse } from "./protocols/openai-chat/response-encode.js";
 import { ChatStreamEncoder } from "./protocols/openai-chat/stream-encode.js";
 import { decodeResponsesRequest } from "./protocols/openai-responses/request-decode.js";
-import { responsesInputDiagnostic } from "./protocols/openai-responses/diagnostics.js";
+import {
+  responsesInputDiagnostic,
+  responsesUpstreamDiagnostic,
+} from "./protocols/openai-responses/diagnostics.js";
 import { encodeResponsesResponse } from "./protocols/openai-responses/response-encode.js";
 import {
   addResponsesWebSearch,
@@ -676,6 +679,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             );
             return;
           } catch (error) {
+            request.log.warn(
+              { request_id: request.id, ...responsesUpstreamDiagnostic(error) },
+              "[DEBUG-responses-input-v1] Responses 后续处理失败",
+            );
             abortScope.abort(error);
             if (!reply.raw.headersSent) {
               const mapped = mapUpstreamError("openai-responses", error, request.id);
@@ -729,6 +736,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           );
         } catch (error) {
           const mapped = mapUpstreamError("openai-responses", error, request.id);
+          request.log.warn(
+            { request_id: request.id, ...responsesUpstreamDiagnostic(error) },
+            "[DEBUG-responses-input-v1] Responses 后续处理失败",
+          );
           return reply.code(mapped.status).send(mapped.body);
         } finally {
           abortScope.dispose();
