@@ -32,7 +32,6 @@ interface MessagePart {
   annotationHash: Hash;
   annotationCount: number;
   textOffset: number;
-  done: boolean;
 }
 
 interface ParsedMessageBody {
@@ -54,6 +53,9 @@ const CONTENT_PART_OVERHEAD_BYTES = 256;
 
 const IGNORED_EVENTS = new Set([
   "response.in_progress",
+  // 兼容上游可重复或不完整的内容块快照；正文和引用以增量及最终输出项为准。
+  "response.content_part.added",
+  "response.content_part.done",
   "response.output_text.done",
   "response.refusal.done",
   "response.function_call_arguments.done",
@@ -104,10 +106,6 @@ export class ResponsesStreamDecoder {
         return this.#decodeItemAdded(payload);
       case "response.output_text.delta":
         return [this.#decodeDelta(payload, "message", "text_delta")];
-      case "response.content_part.added":
-        return this.#decodePartAdded(payload);
-      case "response.content_part.done":
-        return this.#decodePartDone(payload);
       case "response.refusal.delta": {
         const index = readInteger(payload, "output_index");
         const item = this.#items.get(index);
@@ -302,50 +300,6 @@ export class ResponsesStreamDecoder {
     return { type: "function_arguments_delta", index, delta };
   }
 
-  #decodePartAdded(payload: Record<string, unknown>): CanonicalEvent[] {
-    const { index, item, contentIndex } = this.#readMessagePartTarget(payload);
-    const parsed = readMessageBody({ content: [readObject(payload, "part")] }, index).parts[0];
-    if (!parsed) throw new Error("Responses 内容块不能为空");
-    const part = this.#initializePart(index, item, contentIndex, parsed);
-    if (parsed.type === "refusal") return [];
-    item.bodyHash.update(parsed.text, "utf8");
-    return [
-      ...(parsed.text.length === 0
-        ? []
-        : ([{ type: "text_delta", index, delta: parsed.text }] satisfies CanonicalEvent[])),
-      ...parsed.annotations.map(
-        ({ citation }): CanonicalEvent => ({
-          type: "citation_delta",
-          index,
-          citation: offsetCitation(citation, part.textOffset),
-        }),
-      ),
-    ];
-  }
-
-  #decodePartDone(payload: Record<string, unknown>): CanonicalEvent[] {
-    const { index, item, contentIndex } = this.#readMessagePartTarget(payload);
-    const part = item.messageParts?.get(contentIndex);
-    const parsed = readMessageBody({ content: [readObject(payload, "part")] }, index).parts[0];
-    if (!part || part.done || !parsed) throw new Error("Responses 内容块尚未开始或已经结束");
-    assertPartMatches(index, part, parsed);
-    part.done = true;
-    return [];
-  }
-
-  #readMessagePartTarget(payload: Record<string, unknown>) {
-    this.#assertStarted();
-    const index = readInteger(payload, "output_index");
-    const item = this.#items.get(index);
-    if (
-      item?.type !== "message" ||
-      (payload.item_id !== undefined && payload.item_id !== item.itemId)
-    ) {
-      throw new Error("Responses 内容块与当前消息不匹配");
-    }
-    return { index, item, contentIndex: readContentIndex(payload) };
-  }
-
   #initializePart(
     index: number,
     item: StreamItem,
@@ -353,17 +307,16 @@ export class ResponsesStreamDecoder {
     parsed: ParsedMessageBody["parts"][number],
   ): MessagePart {
     const parts = item.messageParts;
-    if (!parts || contentIndex !== parts.size) {
-      throw new Error("Responses 内容块索引必须从零开始按顺序添加");
+    if (!parts) {
+      throw new Error("Responses 消息缺少内容块状态");
     }
     this.#outputLimiter.addBytes(index, CONTENT_PART_OVERHEAD_BYTES);
     const part: MessagePart = {
       type: parsed.type,
-      bodyHash: createHash("sha256").update(parsed.text, "utf8"),
+      bodyHash: createHash("sha256").update(parsed.type === "refusal" ? "" : parsed.text, "utf8"),
       annotationHash: createHash("sha256"),
       annotationCount: parsed.annotations.length,
       textOffset: item.textLength ?? 0,
-      done: false,
     };
     for (const annotation of parsed.annotations) {
       updateAnnotationHash(part.annotationHash, annotation.hashValue);
@@ -374,9 +327,6 @@ export class ResponsesStreamDecoder {
         this.#activateTextPart(item, part, contentIndex);
         item.textLength = (item.textLength ?? 0) + parsed.text.length;
       }
-    } else {
-      item.refusalHash ??= createHash("sha256");
-      item.refusalHash.update(parsed.text, "utf8");
     }
     return part;
   }
@@ -390,8 +340,8 @@ export class ResponsesStreamDecoder {
     const part =
       item.messageParts?.get(contentIndex) ??
       this.#initializePart(index, item, contentIndex, { type, text: "", annotations: [] });
-    if (part.type !== type || part.done) {
-      throw new Error("Responses 内容块类型不匹配或已经结束");
+    if (part.type !== type) {
+      throw new Error("Responses 内容块类型不匹配");
     }
     return part;
   }
@@ -505,7 +455,8 @@ export class ResponsesStreamDecoder {
       doneBody = message.text;
       for (const [contentIndex, part] of message.parts.entries()) {
         const tracked = openItem.messageParts?.get(contentIndex);
-        if (tracked) {
+        // 拒答可以只在最终输出项出现；占位快照不代表已经收到拒答增量。
+        if (tracked && (part.type !== "refusal" || openItem.refusalHash)) {
           assertPartMatches(index, tracked, part);
         } else if (
           part.type === "output_text" &&
@@ -514,8 +465,10 @@ export class ResponsesStreamDecoder {
           throw new Error(`Responses output item ${index} done body does not match`);
         }
       }
-      if ((openItem.messageParts?.size ?? 0) > message.parts.length) {
-        throw new Error(`Responses output item ${index} done body does not match`);
+      for (const contentIndex of openItem.messageParts?.keys() ?? []) {
+        if (contentIndex >= message.parts.length) {
+          throw new Error(`Responses output item ${index} done body does not match`);
+        }
       }
     } else if (openItem.type === "reasoning") {
       doneBody = readReasoningText(doneItem, index);

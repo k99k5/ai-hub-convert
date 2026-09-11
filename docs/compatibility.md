@@ -171,6 +171,7 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 - Anthropic thinking 没有 Responses reasoning item `id` 或 provider continuation，因此在 Anthropic → Responses 历史编码中省略；assistant text、function call 与匹配的 function result 仍按原顺序发送。Chat fallback 继续使用已识别的 `reasoning_content` 扩展。
 - Responses 的真实 reasoning item `id` 和 `encrypted_content` 只允许同协议、kind=`reasoning`、非 synthetic continuation 回放；SSE 的 `encrypted_content` 在 `response.output_item.done` 提取。
 - Responses `output_item.done` 的 item identity、完整正文/参数和 URL annotation 顺序必须与 added + delta 状态一致；校验使用固定大小 hash，不额外无界缓存正文。
+- Responses `content_part.added/done` 作为辅助快照忽略，兼容重复、字段缺省和预填正文或引用；不重复累加内容，也不以此提前关闭内容块。正文和引用由 `output_item.added` 与实际增量累计，在 `output_item.done` 核对。没有拒答增量时，允许在最终输出项中一次性返回完整拒答；只有实际保留的内容块状态计入输出预算，索引可以跳过没有增量的空块。
 - 同一 Responses 消息的多个文本块按顺序合并；每个内容块独立校验引用序号，输出引用位置按前置文本长度偏移，块状态计入输出预算。后续块开始输出文本后不能再向前置块追加文本，以保持已经输出的引用位置有效；前置块的延迟引用仍可处理。`output_item.done` 保留上游的输出项状态。
 - Responses 同协议 SSE 允许状态为 `incomplete` 的客户端函数保留截断参数并正常返回未完成终态；成功工具调用、网关内部搜索工具和 Anthropic 出口继续要求完整 JSON 对象。未完成响应不进入引用缓存。
 - 已关闭的 Responses output index 与 Anthropic content block index 不可复用。
@@ -202,4 +203,5 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 
 ```powershell
 pnpm exec vitest run test/unit/protocol-request-gaps.test.ts test/unit/responses-stream-gaps.test.ts test/integration/protocol-conversion-gaps.test.ts test/integration/protocol-stream-gaps.test.ts
+pnpm exec vitest run test/integration/claude-code-stream-compatibility.test.ts
 ```

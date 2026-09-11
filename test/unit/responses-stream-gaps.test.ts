@@ -91,6 +91,52 @@ function messageFrames(parts: Array<{ text: string; annotations: Record<string, 
 }
 
 describe("Responses 流式协议遗漏回归", () => {
+  it("初始消息已有空文本块时辅助快照不重复创建内容块", () => {
+    const inputs = messageFrames([{ text: "正常答案", annotations: [] }]);
+    inputs[1] = frame("response.output_item.added", {
+      output_index: 0,
+      item: {
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "", annotations: [] }],
+      },
+    });
+    expect(roundTrip(inputs).events.filter((event) => event.type === "text_delta")).toEqual([
+      { type: "text_delta", index: 0, delta: "正常答案" },
+    ]);
+  });
+
+  it("初始空拒答占位块允许仅在最终输出项中提供完整拒答", () => {
+    const item = { id: "msg_1", type: "message", role: "assistant" };
+    const output = roundTrip([
+      created(),
+      frame("response.output_item.added", {
+        output_index: 0,
+        item: { ...item, content: [{ type: "refusal", refusal: "" }] },
+      }),
+      frame("response.output_item.done", {
+        output_index: 0,
+        item: { ...item, content: [{ type: "refusal", refusal: "无法回答" }] },
+      }),
+      terminal(),
+    ]);
+    expect(output.events).toContainEqual({ type: "text_delta", index: 0, delta: "无法回答" });
+  });
+
+  it("前置空内容块没有增量时后续文本块仍可正常输出", () => {
+    const inputs = messageFrames([
+      { text: "", annotations: [] },
+      { text: "后续答案", annotations: [] },
+    ]).filter((input) => {
+      const payload = JSON.parse(input.data) as Record<string, unknown>;
+      return !(input.event === "response.output_text.delta" && payload.content_index === 0);
+    });
+    expect(roundTrip(inputs).events.filter((event) => event.type === "text_delta")).toEqual([
+      { type: "text_delta", index: 0, delta: "后续答案" },
+    ]);
+  });
+
   it("兼容仅通过输出序号定位的旧内容块事件", () => {
     const inputs = messageFrames([{ text: "内容", annotations: [] }]).map((input) => {
       if (!input.event.startsWith("response.content_part.")) return input;
@@ -101,20 +147,6 @@ describe("Responses 流式协议遗漏回归", () => {
     expect(roundTrip(inputs).frames.at(-1)?.data).toMatchObject({
       response: { output: [{ content: [{ text: "内容" }] }] },
     });
-  });
-
-  it.each([
-    "response.content_part.added",
-    "response.content_part.done",
-  ])("%s 显式消息编号错误时仍拒绝", (event) => {
-    for (const itemId of [null, "other_message", 1]) {
-      const inputs = messageFrames([{ text: "内容", annotations: [] }]).map((input) =>
-        input.event === event
-          ? frame(event, { ...JSON.parse(input.data), item_id: itemId })
-          : input,
-      );
-      expect(() => roundTrip(inputs)).toThrow(/内容块与当前消息不匹配/);
-    }
   });
 
   it("截断工具参数以原始字符串和未完成状态往返", () => {
@@ -272,19 +304,24 @@ describe("Responses 流式协议遗漏回归", () => {
     expect(() => roundTrip(inputs)).toThrow(/annotations must be emitted in order/);
   });
 
-  it("内容块完成事件中的引用必须与已发送内容一致", () => {
+  it("最终输出项的引用必须与已发送内容一致", () => {
     const inputs = messageFrames([
       { text: "内容", annotations: [citation("https://x.test/first")] },
     ]);
-    const doneIndex = inputs.findIndex((input) => input.event === "response.content_part.done");
-    inputs[doneIndex] = frame("response.content_part.done", {
+    const doneIndex = inputs.findIndex((input) => input.event === "response.output_item.done");
+    inputs[doneIndex] = frame("response.output_item.done", {
       output_index: 0,
-      item_id: "msg_1",
-      content_index: 0,
-      part: {
-        type: "output_text",
-        text: "内容",
-        annotations: [citation("https://x.test/changed")],
+      item: {
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: "内容",
+            annotations: [citation("https://x.test/changed")],
+          },
+        ],
       },
     });
     expect(() => roundTrip(inputs)).toThrow(/annotations do not match/);
@@ -335,7 +372,7 @@ describe("Responses 流式协议遗漏回归", () => {
     ).toThrow(/前置内容块/);
   });
 
-  it("大量空内容块也受保留状态预算限制", () => {
+  it("大量空内容块增量也受保留状态预算限制", () => {
     const decoder = new ResponsesStreamDecoder(undefined, {
       perItemBytes: 800,
       perStreamBytes: 800,
@@ -348,11 +385,11 @@ describe("Responses 流式协议遗漏回归", () => {
       }),
     );
     const part = (contentIndex: number) =>
-      frame("response.content_part.added", {
+      frame("response.output_text.delta", {
         output_index: 0,
         item_id: "msg_1",
         content_index: contentIndex,
-        part: { type: "output_text", text: "", annotations: [] },
+        delta: "",
       });
     decoder.decode(part(0));
     decoder.decode(part(1));
@@ -362,5 +399,14 @@ describe("Responses 流式协议遗漏回归", () => {
         scope: "item",
       }),
     );
+  });
+
+  it("最终输出项不能遗漏实际出现的稀疏内容块", () => {
+    const inputs = messageFrames([{ text: "", annotations: [] }]).map((input) =>
+      input.event === "response.output_text.delta"
+        ? frame(input.event, { ...JSON.parse(input.data), content_index: 2 })
+        : input,
+    );
+    expect(() => roundTrip(inputs)).toThrow(/done body does not match/);
   });
 });

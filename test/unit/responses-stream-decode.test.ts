@@ -738,7 +738,7 @@ describe("ResponsesStreamDecoder", () => {
       }),
     ).toThrow(/role must be assistant/);
   });
-  it("rejects malformed annotation and done events", () => {
+  it("拒绝格式错误的引用和最终输出项事件", () => {
     const base = () => {
       const decoder = new ResponsesStreamDecoder();
       decode(decoder, "response.created", { response: { id: "resp_1", model: "m" } });
@@ -776,11 +776,11 @@ describe("ResponsesStreamDecoder", () => {
       decode(badContentIndex, "response.output_text.annotation.added", {
         output_index: 0,
         item_id: "msg_1",
-        content_index: 1,
+        content_index: -1,
         annotation_index: 0,
         annotation: { type: "url_citation", url: "https://x.test/s" },
       }),
-    ).toThrow(/内容块索引必须从零开始按顺序添加/);
+    ).toThrow(/内容块索引不能为负数/);
 
     const outOfOrder = base();
     decode(outOfOrder, "response.output_text.annotation.added", {
