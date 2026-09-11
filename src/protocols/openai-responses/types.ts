@@ -1,6 +1,10 @@
+import type OpenAI from "openai";
+
+export type ResponsesTextConfig = OpenAI.Responses.ResponseTextConfig;
+
 export type ResponsesInputContent =
   | { type: "input_text"; text: string }
-  | { type: "input_image"; detail: "auto"; image_url: string };
+  | { type: "input_image"; detail: "auto" | "low" | "high" | "original"; image_url: string };
 
 export interface ResponsesMessageItem {
   type: "message";
@@ -39,7 +43,7 @@ export interface ResponsesFunctionTool {
   name: string;
   description?: string;
   parameters: Record<string, unknown>;
-  strict: boolean;
+  strict?: boolean | null;
 }
 
 export type ResponsesToolChoice = "auto" | "none" | "required" | { type: "function"; name: string };
@@ -59,14 +63,7 @@ export interface ResponsesRequest {
   store: boolean | null;
   previous_response_id?: string | null;
   reasoning?: Record<string, unknown> | null;
-  text?: {
-    format: {
-      type: "json_schema";
-      name: string;
-      schema: Record<string, unknown>;
-      strict: true;
-    };
-  };
+  text?: ResponsesTextConfig;
   prompt_cache_key?: string | null;
 }
 

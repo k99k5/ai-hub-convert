@@ -780,7 +780,7 @@ describe("ResponsesStreamDecoder", () => {
         annotation_index: 0,
         annotation: { type: "url_citation", url: "https://x.test/s" },
       }),
-    ).toThrow(/content index must be zero/);
+    ).toThrow(/内容块索引必须从零开始按顺序添加/);
 
     const outOfOrder = base();
     decode(outOfOrder, "response.output_text.annotation.added", {

@@ -57,7 +57,7 @@ it("accepts output_text without annotations in a real Responses stream", () => {
         item,
       }),
     ),
-  ).toEqual([{ type: "content_stop", index: 1 }]);
+  ).toEqual([{ type: "content_stop", index: 1, status: "completed" }]);
 
   expect(
     decoder.decode(

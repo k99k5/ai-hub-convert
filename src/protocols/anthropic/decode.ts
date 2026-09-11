@@ -519,6 +519,17 @@ function parseTools(value: unknown): CanonicalTool[] {
         type: "web_search" as const,
         provider: "web-search" as const,
         version: tool.type,
+        ...(isRecord(tool.user_location)
+          ? {
+              userLocation: Object.fromEntries(
+                Object.entries(tool.user_location).filter(
+                  ([key, field]) =>
+                    ["city", "country", "region", "timezone"].includes(key) &&
+                    typeof field === "string",
+                ),
+              ),
+            }
+          : {}),
         ...(typeof tool.max_uses === "number" ? { maxUses: tool.max_uses } : {}),
         ...(Array.isArray(tool.allowed_domains)
           ? { allowedDomains: [...tool.allowed_domains] as string[] }

@@ -31,7 +31,12 @@ export function responsesFrames(response: Wire): string[] {
         frames.push(
           frame("response.content_part.added", {
             ...fields,
-            part: { ...part, text: "", refusal: "" },
+            part: {
+              ...part,
+              text: "",
+              refusal: "",
+              ...(part.type === "output_text" ? { annotations: [] } : {}),
+            },
           }),
         );
         if (part.type === "output_text") {

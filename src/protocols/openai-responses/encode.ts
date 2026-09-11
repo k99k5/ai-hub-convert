@@ -6,6 +6,7 @@ import {
   INTERNAL_WEB_SEARCH_TOOL_NAME,
   INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
 } from "../../providers/web-search/internal.js";
+import { encodeToolResultOutput } from "../tool-result.js";
 import {
   OpenAIAdapterError,
   type ResponsesInputContent,
@@ -34,7 +35,11 @@ function encodeMessageContent(content: readonly Content[]): ResponsesInputConten
     if (part.type === "text") {
       encoded.push({ type: "input_text", text: part.text });
     } else if (part.type === "image") {
-      encoded.push({ type: "input_image", detail: "auto", image_url: imageUrl(part) });
+      encoded.push({
+        type: "input_image",
+        detail: part.detail ?? "auto",
+        image_url: imageUrl(part),
+      });
     }
   }
   return encoded;
@@ -61,23 +66,39 @@ function replayableReasoning(
 
 function encodeMessage(message: Message): ResponsesInputItem[] {
   const items: ResponsesInputItem[] = [];
-  const messageContent = encodeMessageContent(message.content);
-  if (messageContent.length > 0) {
-    if (message.role === "tool") {
-      throw new OpenAIAdapterError(
-        "INVALID_OPENAI_RESPONSES_REQUEST",
-        "Responses tool messages may contain only function results",
-      );
-    }
-    items.push({ type: "message", role: message.role, content: messageContent });
-  } else if (message.role === "assistant" && message.content.length === 0) {
+  const role = message.role;
+  if (role === "tool") {
+    return message.content.map((part) => {
+      if (part.type !== "function_result") {
+        throw new OpenAIAdapterError(
+          "INVALID_OPENAI_RESPONSES_REQUEST",
+          "Responses 工具消息只能包含函数结果",
+        );
+      }
+      return {
+        type: "function_call_output",
+        call_id: part.callId,
+        output: encodeToolResultOutput(part),
+      };
+    });
+  }
+  if (message.role === "assistant" && message.content.length === 0) {
     items.push({ type: "message", role: "assistant", content: [] });
   }
+  let pending: Content[] = [];
+  const flushText = (): void => {
+    if (pending.length === 0) return;
+    items.push({ type: "message", role, content: encodeMessageContent(pending) });
+    pending = [];
+  };
 
   for (const part of message.content) {
-    if (part.type === "reasoning") {
+    if (part.type === "text" || part.type === "image") {
+      pending.push(part);
+    } else if (part.type === "reasoning") {
       const replay = replayableReasoning(part);
       if (replay !== undefined) {
+        flushText();
         items.push({
           id: replay.id,
           type: "reasoning",
@@ -88,6 +109,7 @@ function encodeMessage(message: Message): ResponsesInputItem[] {
         });
       }
     } else if (part.type === "function_call") {
+      flushText();
       items.push({
         type: "function_call",
         call_id: part.id,
@@ -95,37 +117,29 @@ function encodeMessage(message: Message): ResponsesInputItem[] {
         arguments: part.arguments,
       });
     } else if (part.type === "function_result") {
+      flushText();
       items.push({
         type: "function_call_output",
         call_id: part.callId,
-        output: part.output,
+        output: encodeToolResultOutput(part),
       });
     } else if (part.type === "refusal") {
-      if (message.role === "tool") {
-        throw new OpenAIAdapterError(
-          "INVALID_OPENAI_RESPONSES_REQUEST",
-          "Responses tool messages may contain only function results",
-        );
-      }
+      flushText();
       items.push({
         type: "message",
-        role: message.role,
+        role,
         content: [{ type: "input_text", text: part.refusal }],
       });
     } else if (part.type === "search_result") {
-      if (message.role === "tool") {
-        throw new OpenAIAdapterError(
-          "INVALID_OPENAI_RESPONSES_REQUEST",
-          "Responses tool messages may contain only function results",
-        );
-      }
+      flushText();
       items.push({
         type: "message",
-        role: message.role,
+        role,
         content: [{ type: "input_text", text: part.content }],
       });
     }
   }
+  flushText();
   return items;
 }
 
@@ -194,11 +208,11 @@ export function encodeResponsesRequest(
                 description:
                   INTERNAL_WEB_SEARCH_TOOL_DESCRIPTION +
                   (request.source === "openai-responses"
-                    ? " 请在答案中以 Markdown 链接引用实际使用的搜索结果，链接必须来自工具返回的 URL。" +
-                      (tool.userLocation === undefined
-                        ? ""
-                        : ` 用户近似位置和时区：${JSON.stringify(tool.userLocation)}。`)
-                    : ""),
+                    ? " 请在答案中以 Markdown 链接引用实际使用的搜索结果，链接必须来自工具返回的 URL。"
+                    : "") +
+                  (tool.userLocation === undefined
+                    ? ""
+                    : ` 用户近似位置和时区：${JSON.stringify(tool.userLocation)}。`),
                 parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
                 strict: true,
               };
@@ -208,7 +222,7 @@ export function encodeResponsesRequest(
               name: tool.name,
               ...(tool.description === undefined ? {} : { description: tool.description }),
               parameters: tool.inputSchema,
-              strict: tool.strict,
+              ...(tool.strict === undefined ? {} : { strict: tool.strict }),
             };
           }),
         }),
@@ -236,18 +250,20 @@ export function encodeResponsesRequest(
     ...(reasoning === null || (typeof reasoning === "object" && !Array.isArray(reasoning))
       ? { reasoning: reasoning as Record<string, unknown> | null }
       : {}),
-    ...(request.outputFormat === undefined
-      ? {}
-      : {
-          text: {
-            format: {
-              type: "json_schema" as const,
-              name: "response",
-              schema: request.outputFormat.schema,
-              strict: true as const,
+    ...(extensions?.text !== undefined
+      ? { text: extensions.text as NonNullable<ResponsesRequest["text"]> }
+      : request.outputFormat === undefined
+        ? {}
+        : {
+            text: {
+              format: {
+                type: "json_schema" as const,
+                name: "response",
+                schema: request.outputFormat.schema,
+                strict: true as const,
+              },
             },
-          },
-        }),
+          }),
     ...(options.promptCache.kind === "prompt-cache-key"
       ? options.promptCacheKey !== undefined
         ? { prompt_cache_key: options.promptCacheKey }

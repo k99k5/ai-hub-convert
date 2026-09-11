@@ -35,6 +35,9 @@
 | reasoning/thinking | Anthropic thinking 可返回客户端；历史 thinking 不伪造成 Responses reasoning continuation | 支持常见 Chat reasoning 扩展 | 支持；真实 item `id` 与 `encrypted_content` 只作同协议 continuation |
 | `output_config.effort` | `reasoning.effort` | `reasoning_effort` | 不适用；完整 `reasoning` 对象同协议回放 |
 | `output_config.format` | `{type:"json_schema", schema}` → `text.format`；`responses/input_tokens` 同样保留；`null` 不发送格式约束 | → `response_format.json_schema` | 不适用 |
+| `text.format` / `text.verbosity` | 不适用 | 不适用 | 支持 text/json_object/json_schema；保留名称、schema、description、strict 的缺省/null/false/true 以及 verbosity |
+| 图片 `detail` | 默认 auto | 未指定精度 | 保留 auto/low/high/original；非法值在上游调用前返回 400 |
+| 函数工具 `strict` | 沿用 Anthropic 的显式设置，缺省 false | 同左 | 保留缺省/null/false/true；不将缺省强制设为 false |
 | `stop_sequences` | 丢弃（Responses 无对应参数） | `stop` | 不支持（无对应字段） |
 | `top_k` | 丢弃（无对应参数） | 丢弃（无对应参数） | 不适用 |
 | usage/cache-read/reasoning tokens | 支持已报告字段 | 支持已报告字段 | 支持已报告字段 |
@@ -49,6 +52,8 @@
 | background lifecycle | 不支持 | 不支持 | `background:true` 被拒绝 |
 
 Responses 的工具结果文本数组按原顺序直接拼接为字符串，保留空白和换行，不自动插入分隔符；空数组归一化为空字符串。JSON 与 SSE 请求采用相同规则，适用于客户端执行普通搜索函数后的结果回传。混入图片、文件或未知内容类型时整条请求返回 HTTP 400，不会仅提取文字并丢弃其他内容。
+
+Anthropic `tool_result.is_error:true` 在 Responses 和 Chat 上游的结果正文中编码为 JSON 字符串 `{"is_error":true,"output":"原始结果文本"}`；成功结果继续保持原文，包括空白和换行。不会在 OpenAI 工具结果对象上增加协议不支持的字段。发往 Responses 的历史中，文本、图片与工具调用按原顺序编码，只合并连续的文本和图片内容。
 
 ### Responses 引用缓存
 
@@ -83,6 +88,8 @@ Responses 的工具结果文本数组按原顺序直接拼接为字符串，保�
 不使用 prefix matching。Anthropic `response_inclusion` 仅在 `web_search_20260318` 接受 `full | excluded`；OpenAI preview 只接受 preview contract 的 `search_content_types`，stable/versioned 类型使用 `filters.allowed_domains`。
 
 内置 Web Search 由独立 provider registry 执行，当前 provider 为 DuckDuckGo。请求进入 canonical Web Search 后会 materialize 为网关保留的内部 function；上游模型发起该调用时，网关执行搜索、回填结果并继续 completion。Anthropic JSON/SSE 出口会把执行轨迹表示为原生 `server_tool_use` / `web_search_tool_result`，并同步 `usage.server_tool_use.web_search_requests`。网关自身生成的 server-search replay block 在后续 Anthropic 请求中会被识别并过滤，普通名为 `web_search` 的自定义 function 不会被当作内置搜索。
+
+Anthropic `user_location` 的 city、country、region、timezone 字符串进入同一搜索位置配置，空值忽略；位置提示同时提供给模型和搜索执行器，Responses 主路径与 Chat 回退均保留。DuckDuckGo 使用位置作为查询提示，不承诺精确定位或原生地区排序。
 
 ### Responses 网关搜索
 
@@ -156,6 +163,7 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 ## Reasoning 与 signature
 
 - Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 进入 canonical 请求：Responses 与 `responses/input_tokens` 编码为 `reasoning.effort`，Chat fallback 编码为 `reasoning_effort`；字段缺失时不发送。网关不预判目标模型支持的等级，也不从旧 `thinking.budget_tokens` 推断 effort。
+- Anthropic `thinking` 的 enabled/disabled/adaptive、budget_tokens 和 display 当前只校验并保留为来源扩展，不映射到上游开关或显示控制；需要控制上游推理强度时使用 `output_config.effort`。`redacted_thinking` 历史块暂不支持，返回 400。
 - Anthropic `output_config.format` 接受 `null` 或 `{ type: "json_schema", schema: {...} }`。非 null 时 schema 进入 canonical structured-output 配置：Responses 与 `responses/input_tokens` 编码到 `text.format`，Chat fallback 编码到 `response_format.json_schema`。未知的 `output_config` 子字段、未知 format 类型、额外 format 字段或非 JSON object schema 都 fail-closed，返回 Anthropic HTTP 400。
 - Anthropic 历史真实 signature 原样作为 opaque compatibility data 处理；缺失或空 signature 可由普通 Anthropic 客户端回传，不会导致请求被拒绝。
 - Claude Code synthetic signature 是 UUID v4 文本的标准 Base64，不是 provider continuation。
@@ -163,6 +171,8 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 - Anthropic thinking 没有 Responses reasoning item `id` 或 provider continuation，因此在 Anthropic → Responses 历史编码中省略；assistant text、function call 与匹配的 function result 仍按原顺序发送。Chat fallback 继续使用已识别的 `reasoning_content` 扩展。
 - Responses 的真实 reasoning item `id` 和 `encrypted_content` 只允许同协议、kind=`reasoning`、非 synthetic continuation 回放；SSE 的 `encrypted_content` 在 `response.output_item.done` 提取。
 - Responses `output_item.done` 的 item identity、完整正文/参数和 URL annotation 顺序必须与 added + delta 状态一致；校验使用固定大小 hash，不额外无界缓存正文。
+- 同一 Responses 消息的多个文本块按顺序合并；每个内容块独立校验引用序号，输出引用位置按前置文本长度偏移，块状态计入输出预算。后续块开始输出文本后不能再向前置块追加文本，以保持已经输出的引用位置有效；前置块的延迟引用仍可处理。`output_item.done` 保留上游的输出项状态。
+- Responses 同协议 SSE 允许状态为 `incomplete` 的客户端函数保留截断参数并正常返回未完成终态；成功工具调用、网关内部搜索工具和 Anthropic 出口继续要求完整 JSON 对象。未完成响应不进入引用缓存。
 - 已关闭的 Responses output index 与 Anthropic content block index 不可复用。
 
 ## 流与错误
@@ -187,3 +197,9 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 - Anthropic citation 不伪造 encrypted index；仅保留可表达的 URL、title 与文本区间。
 - Chat-compatible upstream 的 reasoning、citation 和 usage 扩展并非统一标准，只有已识别字段进入 canonical 表示。
 - 默认 prompt_cache_key 只辅助上游前缀缓存，不声明 Anthropic breakpoint 或 TTL 的等价关系。
+
+2026-09-11 的字段保留修复无需数据迁移。Responses 客户端若依赖非严格函数调用，应显式发送 `strict:false`，不再依赖网关将缺省改写成 false。Anthropic 工具失败的原始文本保存在结果 JSON 的 `output` 中。回滚可恢复上一版本；进程重启会清空既有短期引用缓存。相关本地回归：
+
+```powershell
+pnpm exec vitest run test/unit/protocol-request-gaps.test.ts test/unit/responses-stream-gaps.test.ts test/integration/protocol-conversion-gaps.test.ts test/integration/protocol-stream-gaps.test.ts
+```

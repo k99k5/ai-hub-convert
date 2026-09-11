@@ -232,7 +232,6 @@ describe("OpenAI Responses adapter", () => {
         type: "function",
         name: "web_search",
         inputSchema: { type: "object", properties: {} },
-        strict: false,
       },
     ]);
     expect(versioned).toEqual([

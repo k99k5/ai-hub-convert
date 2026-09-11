@@ -23,7 +23,11 @@ export type CanonicalEvent =
   | { type: "signature_delta"; index: number; delta: string }
   | { type: "function_arguments_delta"; index: number; delta: string }
   | { type: "citation_delta"; index: number; citation: Citation }
-  | { type: "content_stop"; index: number }
+  | {
+      type: "content_stop";
+      index: number;
+      status?: "in_progress" | "completed" | "incomplete";
+    }
   | { type: "web_search_start"; id: string; query: string }
   | {
       type: "web_search_result";

@@ -849,7 +849,7 @@ describe("decodeAnthropicRequest", () => {
     ).toThrowError(AnthropicDecodeError);
   });
 
-  it("accepts fully specified Web Search options and rejects malformed ones", () => {
+  it("保留有效搜索选项并拒绝非法参数", () => {
     expect(
       decodeAnthropicRequest({
         model: "claude-test",
@@ -869,7 +869,13 @@ describe("decodeAnthropicRequest", () => {
         ],
       }).tools,
     ).toEqual([
-      { type: "web_search", provider: "web-search", version: "web_search_20250305", maxUses: 3 },
+      {
+        type: "web_search",
+        provider: "web-search",
+        version: "web_search_20250305",
+        maxUses: 3,
+        userLocation: { city: "Paris", country: "FR" },
+      },
     ]);
 
     const malformedOptions: Record<string, unknown>[] = [

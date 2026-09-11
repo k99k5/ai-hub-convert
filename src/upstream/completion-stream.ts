@@ -1,12 +1,12 @@
 import type { CanonicalEvent } from "../core/events.js";
 import type { WebSearchTool } from "../core/ir.js";
-import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../providers/web-search/internal.js";
-import type { WebSearchProvider } from "../providers/web-search/types.js";
 import { encodeChatRequest } from "../protocols/openai-chat/encode.js";
 import { ChatStreamDecoder } from "../protocols/openai-chat/stream-decode.js";
 import { decodeResponsesResponse } from "../protocols/openai-responses/decode.js";
 import { ResponsesStreamDecoder } from "../protocols/openai-responses/stream-decode.js";
 import { ResponsesStreamEncoder } from "../protocols/openai-responses/stream-encode.js";
+import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../providers/web-search/internal.js";
+import type { WebSearchProvider } from "../providers/web-search/types.js";
 import { DEFAULT_STREAM_OUTPUT_LIMITS, type StreamOutputLimits } from "../stream/output-limits.js";
 import {
   parseSseStream,
@@ -15,16 +15,17 @@ import {
 } from "../stream/sse-parser.js";
 import {
   DEFAULT_TOOL_ARGUMENT_LIMITS,
-  ToolArgumentStreamLimiter,
   type ToolArgumentLimits,
+  ToolArgumentStreamLimiter,
 } from "../stream/tool-argument-limits.js";
-import { replaceCompletionUsage, type CompletionPath } from "./usage.js";
+import { type CompletionPath, replaceCompletionUsage } from "./usage.js";
 import { forceNonStreamingBody, hasInternalWebSearchTool } from "./web-search-loop.js";
 import { WebSearchSession } from "./web-search-session.js";
 
 export interface CompletionStreamOptions {
   preserveChatWireMetadata?: boolean;
   validateChatToolArguments?: boolean;
+  allowIncompleteToolArguments?: boolean;
   webSearch?: WebSearchTool;
   argumentLimits?: ToolArgumentLimits;
   outputLimits?: StreamOutputLimits;
@@ -57,7 +58,9 @@ async function* decodeRound(
     if (!response.body) throw new Error("Upstream stream has no body");
     const decoder =
       path === "responses"
-        ? new ResponsesStreamDecoder(options.argumentLimits, options.outputLimits)
+        ? new ResponsesStreamDecoder(options.argumentLimits, options.outputLimits, {
+            allowIncompleteToolArguments: options.allowIncompleteToolArguments ?? false,
+          })
         : new ChatStreamDecoder(options.argumentLimits, options.outputLimits, {
             preserveWireMetadata: options.preserveChatWireMetadata ?? false,
             validateToolArguments: options.validateChatToolArguments ?? true,

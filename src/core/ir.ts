@@ -8,6 +8,7 @@ export interface TextContent {
 
 export interface ImageContent {
   type: "image";
+  detail?: "auto" | "low" | "high" | "original";
   source:
     | { type: "url"; url: string }
     | {
@@ -74,7 +75,7 @@ export interface FunctionTool {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
-  strict: boolean;
+  strict?: boolean | null;
 }
 
 export interface WebSearchTool {

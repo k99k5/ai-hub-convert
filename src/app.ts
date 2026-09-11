@@ -783,6 +783,7 @@ async function streamResponsesResponse(
     apiKey,
     signal,
     {
+      allowIncompleteToolArguments: true,
       argumentLimits,
       outputLimits: streamOutputLimits,
       timeouts: timeoutOptions,

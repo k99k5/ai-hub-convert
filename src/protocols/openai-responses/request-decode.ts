@@ -6,7 +6,7 @@ import type {
   ToolChoice,
 } from "../../core/ir.js";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../providers/web-search/internal.js";
-import { OpenAIAdapterError } from "./types.js";
+import { OpenAIAdapterError, type ResponsesTextConfig } from "./types.js";
 import { decodeWebSearchHistory } from "./web-search.js";
 
 const errorCode = "INVALID_OPENAI_RESPONSES_REQUEST" as const;
@@ -26,6 +26,7 @@ const supportedTopLevelFields = new Set([
   "store",
   "stream",
   "temperature",
+  "text",
   "tool_choice",
   "tools",
   "top_p",
@@ -132,7 +133,17 @@ function decodeMessageContent(value: unknown, role: Message["role"]): Content[] 
       return { type: "refusal" as const, refusal: part.refusal };
     }
     if (part.type === "input_image" && part.file_id === undefined) {
-      return decodeImage(part.image_url);
+      const detail = part.detail;
+      if (
+        detail !== undefined &&
+        detail !== "auto" &&
+        detail !== "low" &&
+        detail !== "high" &&
+        detail !== "original"
+      ) {
+        return invalid("图片 detail 必须是 auto、low、high 或 original");
+      }
+      return { ...decodeImage(part.image_url), ...(detail === undefined ? {} : { detail }) };
     }
     return invalid("Unsupported OpenAI Responses input");
   });
@@ -412,7 +423,7 @@ function decodeTools(value: unknown): CanonicalTool[] {
     if (tool.description !== undefined && typeof tool.description !== "string") {
       return invalid("Invalid OpenAI Responses request: tool description must be a string");
     }
-    if (tool.strict !== undefined && typeof tool.strict !== "boolean") {
+    if (tool.strict !== undefined && tool.strict !== null && typeof tool.strict !== "boolean") {
       return invalid("Invalid OpenAI Responses request: tool strict must be a boolean");
     }
     return {
@@ -420,7 +431,7 @@ function decodeTools(value: unknown): CanonicalTool[] {
       name: string(tool.name, "tool name"),
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
       inputSchema: jsonRecord(tool.parameters, "tool parameters"),
-      strict: tool.strict ?? false,
+      ...(tool.strict === undefined ? {} : { strict: tool.strict }),
     };
   });
 }
@@ -469,6 +480,61 @@ function decodeToolChoice(value: unknown, tools: CanonicalTool[]): ToolChoice | 
   };
 }
 
+function decodeText(value: unknown): ResponsesTextConfig | undefined {
+  if (value === undefined) return undefined;
+  const text = record(value, "text");
+  if (Object.keys(text).some((key) => key !== "format" && key !== "verbosity")) {
+    return invalid("text 包含不支持的字段");
+  }
+  const verbosity = text.verbosity;
+  if (
+    verbosity !== undefined &&
+    verbosity !== null &&
+    verbosity !== "low" &&
+    verbosity !== "medium" &&
+    verbosity !== "high"
+  ) {
+    return invalid("text.verbosity 必须是 low、medium、high 或 null");
+  }
+  const result: ResponsesTextConfig = {
+    ...(verbosity === undefined ? {} : { verbosity }),
+  };
+  if (text.format === undefined) return result;
+  const format = record(text.format, "text.format");
+  if (format.type === "text" || format.type === "json_object") {
+    if (Object.keys(format).some((key) => key !== "type")) {
+      return invalid("文本格式包含不支持的字段");
+    }
+    return { ...result, format: { type: format.type } };
+  }
+  if (
+    format.type !== "json_schema" ||
+    Object.keys(format).some(
+      (key) => !["type", "name", "schema", "description", "strict"].includes(key),
+    )
+  ) {
+    return invalid("不支持的 text.format");
+  }
+  const name = string(format.name, "text.format.name");
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) return invalid("文本格式名称不合法");
+  if (format.description !== undefined && typeof format.description !== "string") {
+    return invalid("文本格式 description 必须是字符串");
+  }
+  if (format.strict !== undefined && format.strict !== null && typeof format.strict !== "boolean") {
+    return invalid("文本格式 strict 必须是布尔值或 null");
+  }
+  return {
+    ...result,
+    format: {
+      type: "json_schema",
+      name,
+      schema: jsonRecord(format.schema, "text.format.schema"),
+      ...(format.description === undefined ? {} : { description: format.description }),
+      ...(format.strict === undefined ? {} : { strict: format.strict }),
+    },
+  };
+}
+
 function decodeExtensions(input: Record<string, unknown>): Record<string, unknown> | undefined {
   if (
     input.include !== undefined &&
@@ -481,7 +547,9 @@ function decodeExtensions(input: Record<string, unknown>): Record<string, unknow
   ) {
     invalid("include 仅支持 web_search_call.action.sources 和 reasoning.encrypted_content");
   }
+  const text = decodeText(input.text);
   const request = {
+    ...(text === undefined ? {} : { text }),
     ...(input.include === undefined ? {} : { include: input.include }),
     ...(input.store === undefined ? {} : { store: input.store }),
     ...(input.previous_response_id === undefined

@@ -1,5 +1,4 @@
 import type { CanonicalEvent } from "../../core/events.js";
-import { encodeWebSearchCall, webSearchCitations, webSearchItemId } from "./web-search.js";
 import type {
   Citation,
   FunctionCallContent,
@@ -10,14 +9,15 @@ import type {
 } from "../../core/ir.js";
 import {
   DEFAULT_STREAM_OUTPUT_LIMITS,
-  type StreamOutputLimits,
   StreamOutputLimiter,
+  type StreamOutputLimits,
 } from "../../stream/output-limits.js";
 import {
   DEFAULT_TOOL_ARGUMENT_LIMITS,
   type ToolArgumentLimits,
   ToolArgumentStreamLimiter,
 } from "../../stream/tool-argument-limits.js";
+import { encodeWebSearchCall, webSearchCitations, webSearchItemId } from "./web-search.js";
 
 export interface ResponsesSseFrame {
   event: string;
@@ -80,7 +80,7 @@ export class ResponsesStreamEncoder {
       case "text_delta":
         return this.#textDelta(event.index, event.delta);
       case "content_stop":
-        return this.#stopContent(event.index);
+        return this.#stopContent(event.index, event.status);
       case "response_complete":
         return this.#complete(event.finishReason, event.usage);
       case "response_error":
@@ -349,7 +349,10 @@ export class ResponsesStreamEncoder {
     ];
   }
 
-  #stopContent(index: number): ResponsesSseFrame[] {
+  #stopContent(
+    index: number,
+    status: Extract<CanonicalEvent, { type: "content_stop" }>["status"] = "completed",
+  ): ResponsesSseFrame[] {
     const item = this.#openItems.get(index);
     if (!item) {
       throw new Error(`Responses output item ${index} is not open`);
@@ -366,10 +369,10 @@ export class ResponsesStreamEncoder {
     }
     this.#openItems.delete(index);
     if (item.type === "reasoning") {
-      return this.#stopReasoning(index, item);
+      return this.#stopReasoning(index, item, status);
     }
     if (item.type === "function_call") {
-      return this.#stopFunctionCall(index, item);
+      return this.#stopFunctionCall(index, item, status);
     }
     if (item.type === "refusal") {
       const part = { type: "refusal", refusal: item.content.refusal };
@@ -377,7 +380,7 @@ export class ResponsesStreamEncoder {
         id: item.itemId,
         type: "message",
         role: "assistant",
-        status: "completed",
+        status,
         content: [part],
       };
       this.#outputItems.set(index, outputItem);
@@ -407,7 +410,7 @@ export class ResponsesStreamEncoder {
       id: item.itemId,
       type: "message",
       role: "assistant",
-      status: "completed",
+      status,
       content: [part],
     };
     this.#outputItems.set(index, outputItem);
@@ -433,6 +436,7 @@ export class ResponsesStreamEncoder {
   #stopReasoning(
     index: number,
     item: Extract<OpenItem, { type: "reasoning" }>,
+    status: NonNullable<Extract<CanonicalEvent, { type: "content_stop" }>["status"]>,
   ): ResponsesSseFrame[] {
     const part = { type: "summary_text", text: item.content.text };
     const encrypted =
@@ -445,7 +449,7 @@ export class ResponsesStreamEncoder {
     const outputItem = {
       id: item.itemId,
       type: "reasoning",
-      status: "completed",
+      status,
       summary: [part],
       ...(encrypted === undefined ? {} : { encrypted_content: encrypted }),
     };
@@ -470,6 +474,7 @@ export class ResponsesStreamEncoder {
   #stopFunctionCall(
     index: number,
     item: Extract<OpenItem, { type: "function_call" }>,
+    status: NonNullable<Extract<CanonicalEvent, { type: "content_stop" }>["status"]>,
   ): ResponsesSseFrame[] {
     this.#argumentLimiter.finish(index);
     const outputItem = {
@@ -478,7 +483,7 @@ export class ResponsesStreamEncoder {
       call_id: item.content.id,
       name: item.content.name,
       arguments: item.content.arguments,
-      status: "completed",
+      status,
     };
     this.#outputItems.set(index, outputItem);
     return [

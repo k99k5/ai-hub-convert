@@ -1,10 +1,11 @@
 import { createHash, type Hash } from "node:crypto";
 import type { CanonicalError, CanonicalEvent } from "../../core/events.js";
 import type { FinishReason, Usage } from "../../core/ir.js";
+import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../providers/web-search/internal.js";
 import {
   DEFAULT_STREAM_OUTPUT_LIMITS,
-  type StreamOutputLimits,
   StreamOutputLimiter,
+  type StreamOutputLimits,
 } from "../../stream/output-limits.js";
 import type { SseEvent } from "../../stream/sse-parser.js";
 import {
@@ -19,14 +20,29 @@ interface StreamItem {
   callId?: string;
   name?: string;
   bodyHash: Hash;
+  refusalHash?: Hash;
+  messageParts?: Map<number, MessagePart>;
+  textLength?: number;
+  lastTextIndex?: number;
+}
+
+interface MessagePart {
+  type: "output_text" | "refusal";
+  bodyHash: Hash;
   annotationHash: Hash;
   annotationCount: number;
-  refusalHash?: Hash;
+  textOffset: number;
+  done: boolean;
 }
 
 interface ParsedMessageBody {
   text: string;
   refusalText: string;
+  parts: Array<{
+    type: MessagePart["type"];
+    text: string;
+    annotations: ParsedMessageBody["annotations"];
+  }>;
   annotations: Array<{
     hashValue: string;
     citation: Extract<CanonicalEvent, { type: "citation_delta" }>["citation"];
@@ -34,11 +50,10 @@ interface ParsedMessageBody {
 }
 
 const OUTPUT_ITEM_OVERHEAD_BYTES = 256;
+const CONTENT_PART_OVERHEAD_BYTES = 256;
 
 const IGNORED_EVENTS = new Set([
   "response.in_progress",
-  "response.content_part.added",
-  "response.content_part.done",
   "response.output_text.done",
   "response.refusal.done",
   "response.function_call_arguments.done",
@@ -60,6 +75,7 @@ export class ResponsesStreamDecoder {
   constructor(
     limits: ToolArgumentLimits = DEFAULT_TOOL_ARGUMENT_LIMITS,
     outputLimits: StreamOutputLimits = DEFAULT_STREAM_OUTPUT_LIMITS,
+    private readonly options: { allowIncompleteToolArguments?: boolean } = {},
   ) {
     this.#argumentLimiter = new ToolArgumentStreamLimiter(limits);
     this.#outputLimiter = new StreamOutputLimiter(outputLimits);
@@ -88,14 +104,22 @@ export class ResponsesStreamDecoder {
         return this.#decodeItemAdded(payload);
       case "response.output_text.delta":
         return [this.#decodeDelta(payload, "message", "text_delta")];
+      case "response.content_part.added":
+        return this.#decodePartAdded(payload);
+      case "response.content_part.done":
+        return this.#decodePartDone(payload);
       case "response.refusal.delta": {
         const index = readInteger(payload, "output_index");
         const item = this.#items.get(index);
         if (item?.type !== "message" || readString(payload, "item_id") !== item.itemId) {
           throw new Error("Responses refusal does not match an open message");
         }
+        const contentIndex = readContentIndex(payload);
+        const part = this.#getPart(index, item, contentIndex, "refusal");
+        const delta = readString(payload, "delta");
+        part.bodyHash.update(delta, "utf8");
         item.refusalHash ??= createHash("sha256");
-        item.refusalHash.update(readString(payload, "delta"), "utf8");
+        item.refusalHash.update(delta, "utf8");
         return [];
       }
       case "response.output_text.annotation.added":
@@ -165,14 +189,15 @@ export class ResponsesStreamDecoder {
         type: "message",
         itemId,
         bodyHash: createHash("sha256"),
-        annotationHash: createHash("sha256"),
-        annotationCount: body.annotations.length,
+        messageParts: new Map(),
+        textLength: 0,
+        lastTextIndex: -1,
       };
       streamItem.bodyHash.update(body.text, "utf8");
-      for (const annotation of body.annotations) {
-        updateAnnotationHash(streamItem.annotationHash, annotation.hashValue);
-      }
       this.#items.set(index, streamItem);
+      for (const [contentIndex, part] of body.parts.entries()) {
+        this.#initializePart(index, streamItem, contentIndex, part);
+      }
       return [
         { type: "content_start", index, itemId, content: { type: "text", text: "" } },
         ...(body.text.length === 0
@@ -189,8 +214,6 @@ export class ResponsesStreamDecoder {
         type: "reasoning",
         itemId,
         bodyHash: createHash("sha256"),
-        annotationHash: createHash("sha256"),
-        annotationCount: 0,
       };
       streamItem.bodyHash.update(body, "utf8");
       this.#items.set(index, streamItem);
@@ -218,8 +241,6 @@ export class ResponsesStreamDecoder {
         callId,
         name,
         bodyHash: createHash("sha256"),
-        annotationHash: createHash("sha256"),
-        annotationCount: 0,
       };
       streamItem.bodyHash.update(body, "utf8");
       if (body.length > 0) {
@@ -257,6 +278,13 @@ export class ResponsesStreamDecoder {
       throw new Error(`Responses output item ${index} is not open as ${expected}`);
     }
     const delta = readString(payload, "delta");
+    if (expected === "message") {
+      const contentIndex = readContentIndex(payload);
+      const part = this.#getPart(index, item, contentIndex, "output_text");
+      this.#activateTextPart(item, part, contentIndex);
+      part.bodyHash.update(delta, "utf8");
+      item.textLength = (item.textLength ?? 0) + delta.length;
+    }
     item.bodyHash.update(delta, "utf8");
     return { type: eventType, index, delta };
   }
@@ -274,6 +302,111 @@ export class ResponsesStreamDecoder {
     return { type: "function_arguments_delta", index, delta };
   }
 
+  #decodePartAdded(payload: Record<string, unknown>): CanonicalEvent[] {
+    const { index, item, contentIndex } = this.#readMessagePartTarget(payload);
+    const parsed = readMessageBody({ content: [readObject(payload, "part")] }, index).parts[0];
+    if (!parsed) throw new Error("Responses 内容块不能为空");
+    const part = this.#initializePart(index, item, contentIndex, parsed);
+    if (parsed.type === "refusal") return [];
+    item.bodyHash.update(parsed.text, "utf8");
+    return [
+      ...(parsed.text.length === 0
+        ? []
+        : ([{ type: "text_delta", index, delta: parsed.text }] satisfies CanonicalEvent[])),
+      ...parsed.annotations.map(
+        ({ citation }): CanonicalEvent => ({
+          type: "citation_delta",
+          index,
+          citation: offsetCitation(citation, part.textOffset),
+        }),
+      ),
+    ];
+  }
+
+  #decodePartDone(payload: Record<string, unknown>): CanonicalEvent[] {
+    const { index, item, contentIndex } = this.#readMessagePartTarget(payload);
+    const part = item.messageParts?.get(contentIndex);
+    const parsed = readMessageBody({ content: [readObject(payload, "part")] }, index).parts[0];
+    if (!part || part.done || !parsed) throw new Error("Responses 内容块尚未开始或已经结束");
+    assertPartMatches(index, part, parsed);
+    part.done = true;
+    return [];
+  }
+
+  #readMessagePartTarget(payload: Record<string, unknown>) {
+    this.#assertStarted();
+    const index = readInteger(payload, "output_index");
+    const item = this.#items.get(index);
+    if (
+      item?.type !== "message" ||
+      (payload.item_id !== undefined && payload.item_id !== item.itemId)
+    ) {
+      throw new Error("Responses 内容块与当前消息不匹配");
+    }
+    return { index, item, contentIndex: readContentIndex(payload) };
+  }
+
+  #initializePart(
+    index: number,
+    item: StreamItem,
+    contentIndex: number,
+    parsed: ParsedMessageBody["parts"][number],
+  ): MessagePart {
+    const parts = item.messageParts;
+    if (!parts || contentIndex !== parts.size) {
+      throw new Error("Responses 内容块索引必须从零开始按顺序添加");
+    }
+    this.#outputLimiter.addBytes(index, CONTENT_PART_OVERHEAD_BYTES);
+    const part: MessagePart = {
+      type: parsed.type,
+      bodyHash: createHash("sha256").update(parsed.text, "utf8"),
+      annotationHash: createHash("sha256"),
+      annotationCount: parsed.annotations.length,
+      textOffset: item.textLength ?? 0,
+      done: false,
+    };
+    for (const annotation of parsed.annotations) {
+      updateAnnotationHash(part.annotationHash, annotation.hashValue);
+    }
+    parts.set(contentIndex, part);
+    if (part.type === "output_text") {
+      if (parsed.text.length > 0 || parsed.annotations.length > 0) {
+        this.#activateTextPart(item, part, contentIndex);
+        item.textLength = (item.textLength ?? 0) + parsed.text.length;
+      }
+    } else {
+      item.refusalHash ??= createHash("sha256");
+      item.refusalHash.update(parsed.text, "utf8");
+    }
+    return part;
+  }
+
+  #getPart(
+    index: number,
+    item: StreamItem,
+    contentIndex: number,
+    type: MessagePart["type"],
+  ): MessagePart {
+    const part =
+      item.messageParts?.get(contentIndex) ??
+      this.#initializePart(index, item, contentIndex, { type, text: "", annotations: [] });
+    if (part.type !== type || part.done) {
+      throw new Error("Responses 内容块类型不匹配或已经结束");
+    }
+    return part;
+  }
+
+  #activateTextPart(item: StreamItem, part: MessagePart, contentIndex: number): void {
+    const previous = item.lastTextIndex ?? -1;
+    if (contentIndex < previous) {
+      throw new Error("Responses 文本增量不能返回已经合并的前置内容块");
+    }
+    if (contentIndex > previous) {
+      part.textOffset = item.textLength ?? 0;
+      item.lastTextIndex = contentIndex;
+    }
+  }
+
   #decodeAnnotation(payload: Record<string, unknown>): CanonicalEvent {
     this.#assertStarted();
     const index = readInteger(payload, "output_index");
@@ -284,20 +417,22 @@ export class ResponsesStreamDecoder {
     if (readString(payload, "item_id") !== item.itemId) {
       throw new Error(`Responses output item ${index} changed its item ID`);
     }
-    if (readInteger(payload, "content_index") !== 0) {
-      throw new Error("Responses message annotation content index must be zero");
+    const contentIndex = readContentIndex(payload);
+    const part = this.#getPart(index, item, contentIndex, "output_text");
+    if (contentIndex >= (item.lastTextIndex ?? -1)) {
+      this.#activateTextPart(item, part, contentIndex);
     }
     const annotationIndex = readInteger(payload, "annotation_index");
-    if (annotationIndex !== item.annotationCount) {
+    if (annotationIndex !== part.annotationCount) {
       throw new Error("Responses message annotations must be emitted in order");
     }
     const annotation = parseAnnotation(readObject(payload, "annotation"));
-    updateAnnotationHash(item.annotationHash, annotation.hashValue);
-    item.annotationCount++;
+    updateAnnotationHash(part.annotationHash, annotation.hashValue);
+    part.annotationCount++;
     return {
       type: "citation_delta",
       index,
-      citation: annotation.citation,
+      citation: offsetCitation(annotation.citation, part.textOffset),
     };
   }
 
@@ -309,6 +444,7 @@ export class ResponsesStreamDecoder {
       throw new Error(`Responses output item ${index} is not open`);
     }
     const doneItem = readObject(payload, "item");
+    const status = readItemStatus(doneItem);
     const doneBody = this.#assertDoneItemMatches(index, openItem, doneItem);
     this.#items.delete(index);
     if (openItem.type === "function_call") {
@@ -337,7 +473,7 @@ export class ResponsesStreamDecoder {
         });
       }
     }
-    events.push({ type: "content_stop", index });
+    events.push({ type: "content_stop", index, ...(status === undefined ? {} : { status }) });
     return events;
   }
 
@@ -354,7 +490,6 @@ export class ResponsesStreamDecoder {
     }
 
     let doneBody: string;
-    let doneAnnotations: string[] = [];
     let message: ParsedMessageBody | undefined;
     if (openItem.type === "message") {
       if (doneItem.role !== "assistant") {
@@ -368,7 +503,20 @@ export class ResponsesStreamDecoder {
         throw new Error(`Responses output item ${index} done refusal does not match`);
       }
       doneBody = message.text;
-      doneAnnotations = message.annotations.map((annotation) => annotation.hashValue);
+      for (const [contentIndex, part] of message.parts.entries()) {
+        const tracked = openItem.messageParts?.get(contentIndex);
+        if (tracked) {
+          assertPartMatches(index, tracked, part);
+        } else if (
+          part.type === "output_text" &&
+          (part.text.length > 0 || part.annotations.length > 0)
+        ) {
+          throw new Error(`Responses output item ${index} done body does not match`);
+        }
+      }
+      if ((openItem.messageParts?.size ?? 0) > message.parts.length) {
+        throw new Error(`Responses output item ${index} done body does not match`);
+      }
     } else if (openItem.type === "reasoning") {
       doneBody = readReasoningText(doneItem, index);
     } else {
@@ -379,21 +527,17 @@ export class ResponsesStreamDecoder {
         throw new Error(`Responses output item ${index} done function does not match`);
       }
       doneBody = readString(doneItem, "arguments");
-      assertJsonObject(doneBody, `Responses output item ${index} arguments`);
+      if (
+        doneItem.status !== "incomplete" ||
+        this.options.allowIncompleteToolArguments !== true ||
+        openItem.name === INTERNAL_WEB_SEARCH_TOOL_NAME
+      ) {
+        assertJsonObject(doneBody, `Responses output item ${index} arguments`);
+      }
     }
 
     if (openItem.bodyHash.digest("hex") !== hashText(doneBody)) {
       throw new Error(`Responses output item ${index} done body does not match`);
-    }
-    const doneAnnotationHash = createHash("sha256");
-    for (const annotation of doneAnnotations) {
-      updateAnnotationHash(doneAnnotationHash, annotation);
-    }
-    if (
-      doneAnnotations.length !== openItem.annotationCount ||
-      openItem.annotationHash.digest("hex") !== doneAnnotationHash.digest("hex")
-    ) {
-      throw new Error(`Responses output item ${index} done annotations do not match`);
     }
     return message;
   }
@@ -460,8 +604,10 @@ function readMessageBody(item: Record<string, unknown>, index: number): ParsedMe
     throw new Error(`Responses output item ${index} content does not match`);
   }
   const annotations: ParsedMessageBody["annotations"] = [];
+  const parts: ParsedMessageBody["parts"] = [];
   const textParts: string[] = [];
   const refusalParts: string[] = [];
+  let textOffset = 0;
   for (const rawPart of item.content) {
     if (!isObject(rawPart)) {
       throw new Error(`Responses output item ${index} content does not match`);
@@ -472,17 +618,80 @@ function readMessageBody(item: Record<string, unknown>, index: number): ParsedMe
         throw new Error(`Responses output item ${index} annotations do not match`);
       }
       const partAnnotations = Array.isArray(rawAnnotations) ? rawAnnotations : [];
-      annotations.push(...partAnnotations.map((value) => parseAnnotationValue(value)));
-      textParts.push(readString(rawPart, "text"));
+      const parsedAnnotations = partAnnotations.map((value) => parseAnnotationValue(value));
+      const text = readString(rawPart, "text");
+      annotations.push(
+        ...parsedAnnotations.map((annotation) => ({
+          ...annotation,
+          citation: offsetCitation(annotation.citation, textOffset),
+        })),
+      );
+      parts.push({ type: "output_text", text, annotations: parsedAnnotations });
+      textParts.push(text);
+      textOffset += text.length;
       continue;
     }
     if (rawPart.type === "refusal") {
-      refusalParts.push(readString(rawPart, "refusal"));
+      const text = readString(rawPart, "refusal");
+      parts.push({ type: "refusal", text, annotations: [] });
+      refusalParts.push(text);
       continue;
     }
     throw new Error(`Responses output item ${index} content does not match`);
   }
-  return { text: textParts.join(""), refusalText: refusalParts.join(""), annotations };
+  return { text: textParts.join(""), refusalText: refusalParts.join(""), annotations, parts };
+}
+
+function assertPartMatches(
+  index: number,
+  tracked: MessagePart,
+  part: ParsedMessageBody["parts"][number],
+): void {
+  if (tracked.type !== part.type || tracked.bodyHash.copy().digest("hex") !== hashText(part.text)) {
+    throw new Error(`Responses output item ${index} done body does not match`);
+  }
+  const annotationHash = createHash("sha256");
+  for (const annotation of part.annotations) {
+    updateAnnotationHash(annotationHash, annotation.hashValue);
+  }
+  if (
+    tracked.annotationCount !== part.annotations.length ||
+    tracked.annotationHash.copy().digest("hex") !== annotationHash.digest("hex")
+  ) {
+    throw new Error(`Responses output item ${index} done annotations do not match`);
+  }
+}
+
+function offsetCitation(
+  citation: Extract<CanonicalEvent, { type: "citation_delta" }>["citation"],
+  offset: number,
+): typeof citation {
+  return {
+    ...citation,
+    ...(citation.startIndex === undefined ? {} : { startIndex: citation.startIndex + offset }),
+    ...(citation.endIndex === undefined ? {} : { endIndex: citation.endIndex + offset }),
+  };
+}
+
+function readContentIndex(payload: Record<string, unknown>): number {
+  const index = payload.content_index === undefined ? 0 : readInteger(payload, "content_index");
+  if (index < 0) throw new Error("Responses 内容块索引不能为负数");
+  return index;
+}
+
+function readItemStatus(
+  item: Record<string, unknown>,
+): Extract<CanonicalEvent, { type: "content_stop" }>["status"] {
+  const status = item.status;
+  if (
+    status === undefined ||
+    status === "completed" ||
+    status === "in_progress" ||
+    status === "incomplete"
+  ) {
+    return status;
+  }
+  throw new Error("Responses 输出项状态无效");
 }
 
 function readReasoningText(item: Record<string, unknown>, index: number): string {

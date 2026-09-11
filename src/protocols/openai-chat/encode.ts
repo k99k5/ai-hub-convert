@@ -5,6 +5,7 @@ import {
   INTERNAL_WEB_SEARCH_TOOL_NAME,
   INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
 } from "../../providers/web-search/internal.js";
+import { encodeToolResultOutput } from "../tool-result.js";
 import {
   type ChatAssistantMessage,
   type ChatContentPart,
@@ -99,7 +100,11 @@ function encodeMessages(
             "Chat 工具消息只能包含函数调用结果",
           );
         }
-        encoded.push({ role: "tool", tool_call_id: part.callId, content: part.output });
+        encoded.push({
+          role: "tool",
+          tool_call_id: part.callId,
+          content: encodeToolResultOutput(part),
+        });
       }
     } else if (message.role === "assistant") {
       encoded.push(encodeAssistant(message, messageOptions));
@@ -156,7 +161,11 @@ export function encodeChatRequest(request: CanonicalRequest): ChatRequest {
                 type: "function" as const,
                 function: {
                   name: INTERNAL_WEB_SEARCH_TOOL_NAME,
-                  description: INTERNAL_WEB_SEARCH_TOOL_DESCRIPTION,
+                  description:
+                    INTERNAL_WEB_SEARCH_TOOL_DESCRIPTION +
+                    (tool.userLocation === undefined
+                      ? ""
+                      : ` 用户近似位置和时区：${JSON.stringify(tool.userLocation)}。`),
                   parameters: INTERNAL_WEB_SEARCH_TOOL_SCHEMA,
                   strict: true,
                 },
@@ -172,7 +181,9 @@ export function encodeChatRequest(request: CanonicalRequest): ChatRequest {
                   ? extensions.tool_strict[index] === undefined
                     ? {}
                     : { strict: extensions.tool_strict[index] }
-                  : { strict: tool.strict }),
+                  : tool.strict === undefined
+                    ? {}
+                    : { strict: tool.strict }),
               },
             };
           }),
