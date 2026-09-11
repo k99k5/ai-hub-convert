@@ -262,6 +262,115 @@ describe("Chat 对外入口和官方 SDK", () => {
     expect(sent.map((body) => body.prompt_cache_key)).toEqual([key, key]);
   });
 
+  it.each([
+    { thinking: { type: "enabled" }, reasoning_effort: "high" },
+    { thinking: { type: "disabled" } },
+    { enable_thinking: false },
+    { reasoning_split: true },
+    { reasoning: { effort: "high" } },
+    { reasoning: { effort: "none" } },
+  ])("CCS 思考扩展在 JSON、SSE 和工具续轮中保留 %#", async (extension) => {
+    const sent: Array<Record<string, unknown>> = [];
+    const urls: string[] = [];
+    const app = createApp(async (input, init) => {
+      const request = new Request(input, init);
+      urls.push(request.url);
+      const body = (await request.json()) as Record<string, unknown>;
+      sent.push(body);
+      return body.stream
+        ? sse([chunk({ content: "回答" }, "stop"), "[DONE]"])
+        : Response.json(completion());
+    });
+    for (const stream of [false, true]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: "Bearer key" },
+        payload: {
+          ...requestBody,
+          model: "glm-5.3-flash",
+          ...extension,
+          stream,
+          messages: [
+            ...requestBody.messages,
+            {
+              role: "assistant",
+              content: null,
+              reasoning_content: "需要查询天气",
+              tool_calls: [
+                {
+                  id: "call_ccs",
+                  type: "function",
+                  function: { name: "weather", arguments: '{"city":"上海"}' },
+                },
+              ],
+            },
+            { role: "tool", tool_call_id: "call_ccs", content: "晴" },
+          ],
+          tools: [{ type: "function", function: { name: "weather", parameters: {} } }],
+        },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      if (stream) {
+        expect(response.body).toContain('"content":"回答"');
+        expect(response.body).toContain("data: [DONE]");
+      } else {
+        expect(response.json().choices[0].message.content).toBe("回答");
+      }
+    }
+    expect(urls).toEqual([
+      "https://gateway.example.test/v1/chat/completions",
+      "https://gateway.example.test/v1/chat/completions",
+    ]);
+    for (const body of sent) {
+      expect(body).toMatchObject({ model: "glm-5.3-flash", ...extension });
+      expect(body.messages).toContainEqual({
+        role: "tool",
+        tool_call_id: "call_ccs",
+        content: "晴",
+      });
+      expect(body.messages).toContainEqual({
+        role: "assistant",
+        content: null,
+        reasoning_content: "需要查询天气",
+        tool_calls: [
+          {
+            id: "call_ccs",
+            type: "function",
+            function: { name: "weather", arguments: '{"city":"上海"}' },
+          },
+        ],
+      });
+      if (!("reasoning_effort" in extension)) expect(body).not.toHaveProperty("reasoning_effort");
+    }
+  });
+
+  it.each([
+    { thinking: { type: "enabled", extra: "不要回显" } },
+    { enable_thinking: "不要回显" },
+    { reasoning_split: null },
+    { reasoning: { effort: "不要回显" } },
+    { thinking: { type: "enabled" }, unknown: "不要回显" },
+  ])("非法 CCS 思考扩展在调用上游前拒绝 %#", async (extension) => {
+    let calls = 0;
+    const app = createApp(async () => {
+      calls++;
+      return Response.json(completion());
+    });
+    for (const stream of [false, true]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: "Bearer key" },
+        payload: { ...requestBody, ...extension, stream },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.type).toBe("invalid_request_error");
+      expect(response.body).not.toContain("不要回显");
+    }
+    expect(calls).toBe(0);
+  });
+
   it.each([401, 429, 500])("上游 %s 不触发其他接口或重试，且清洗错误", async (status) => {
     let calls = 0;
     const app = createApp(async () => {

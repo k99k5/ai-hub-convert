@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { decodeChatRequest } from "../../src/protocols/openai-chat/request-decode.js";
 import { encodeChatRequest } from "../../src/protocols/openai-chat/encode.js";
+import { encodeResponsesRequest } from "../../src/protocols/openai-responses/encode.js";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
 
 const base = { model: "gpt-test", messages: [{ role: "user", content: "你好" }] };
@@ -152,6 +153,59 @@ describe("Chat 请求适配", () => {
     ).toHaveProperty("max_completion_tokens", 20);
   });
 
+  it.each([
+    { thinking: { type: "enabled" }, reasoning_effort: "high" },
+    { thinking: { type: "disabled" } },
+    { enable_thinking: true },
+    { enable_thinking: false },
+    { reasoning_split: true },
+    { reasoning_split: false },
+    ...["none", "minimal", "low", "medium", "high", "xhigh", "max"].map((effort) => ({
+      reasoning: { effort },
+    })),
+  ])("保留 CCS 思考扩展及显式关闭值 %#", (extension) => {
+    const request = decodeChatRequest({ ...base, ...extension });
+    const encoded = encodeChatRequest(request);
+    expect(request.extensions?.request).toMatchObject(extension);
+    expect(encoded).toMatchObject(extension);
+    for (const key of ["thinking", "enable_thinking", "reasoning_split", "reasoning"]) {
+      if (!(key in extension)) expect(encoded).not.toHaveProperty(key);
+    }
+    if (!("reasoning_effort" in extension)) {
+      expect(request).not.toHaveProperty("reasoningEffort");
+      expect(encoded).not.toHaveProperty("reasoning_effort");
+    }
+  });
+
+  it("缺省请求不自动开启或关闭供应商思考", () => {
+    const encoded = encodeChatRequest(decodeChatRequest(base));
+    for (const key of ["thinking", "enable_thinking", "reasoning_split", "reasoning"]) {
+      expect(encoded).not.toHaveProperty(key);
+    }
+  });
+
+  it("CCS 思考扩展不进入 Responses 或其他来源的 Chat 请求", () => {
+    const request = decodeChatRequest({
+      ...base,
+      thinking: { type: "disabled" },
+      enable_thinking: false,
+      reasoning_split: false,
+      reasoning: { effort: "none" },
+    });
+    const responses = encodeResponsesRequest(request, {
+      store: false,
+      promptCache: { kind: "none" },
+    });
+    request.source = "anthropic";
+    const otherSourceChat = encodeChatRequest(request);
+    for (const encoded of [responses, otherSourceChat]) {
+      for (const key of ["thinking", "enable_thinking", "reasoning_split", "reasoning"]) {
+        expect(encoded).not.toHaveProperty(key);
+      }
+      expect(encoded).not.toHaveProperty("reasoning_effort");
+    }
+  });
+
   it.each([true, false])("保留客户端 usage 意图 %s，但上游始终请求 usage", (include_usage) => {
     const request = decodeChatRequest({ ...base, stream: true, stream_options: { include_usage } });
     expect(request.extensions?.request?.stream_options).toEqual({ include_usage });
@@ -195,6 +249,26 @@ describe("Chat 请求适配", () => {
     { stream: "true" },
     { stream_options: { include_usage: "true" } },
     { stream_options: { other: true } },
+    { thinking: null },
+    { thinking: true },
+    { thinking: [] },
+    { thinking: {} },
+    { thinking: { type: "不要回显" } },
+    { thinking: { type: "enabled", extra: "不要回显" } },
+    { enable_thinking: null },
+    { enable_thinking: "false" },
+    { enable_thinking: 1 },
+    { reasoning_split: null },
+    { reasoning_split: "true" },
+    { reasoning_split: 0 },
+    { reasoning: null },
+    { reasoning: [] },
+    { reasoning: "high" },
+    { reasoning: {} },
+    { reasoning: { effort: null } },
+    { reasoning: { effort: 1 } },
+    { reasoning: { effort: "不要回显" } },
+    { reasoning: { effort: "high", extra: "不要回显" } },
     { messages: [] },
     { messages: [{ role: "user", content: [{ type: "input_audio", input_audio: {} }] }] },
     {

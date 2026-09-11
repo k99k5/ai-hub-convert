@@ -224,6 +224,10 @@ export function encodeChatRequest(request: CanonicalRequest): ChatRequest {
   if (extensions.response_format !== undefined) body.response_format = extensions.response_format;
   if (extensions.reasoning_effort !== undefined)
     body.reasoning_effort = extensions.reasoning_effort;
+  if (extensions.thinking !== undefined) body.thinking = extensions.thinking;
+  if (extensions.enable_thinking !== undefined) body.enable_thinking = extensions.enable_thinking;
+  if (extensions.reasoning_split !== undefined) body.reasoning_split = extensions.reasoning_split;
+  if (extensions.reasoning !== undefined) body.reasoning = extensions.reasoning;
   if (extensions.frequency_penalty !== undefined)
     body.frequency_penalty = extensions.frequency_penalty;
   if (extensions.presence_penalty !== undefined)

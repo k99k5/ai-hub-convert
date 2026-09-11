@@ -48,6 +48,10 @@ export interface ChatRequest {
   max_completion_tokens?: number;
   max_tokens?: number;
   reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+  thinking?: { type: "enabled" | "disabled" };
+  enable_thinking?: boolean;
+  reasoning_split?: boolean;
+  reasoning?: { effort: NonNullable<ChatRequest["reasoning_effort"]> };
   response_format?: ChatResponseFormat;
   frequency_penalty?: number;
   presence_penalty?: number;
@@ -91,6 +95,10 @@ export interface ChatRequestExtensions {
   response_format?: ChatResponseFormat;
   stream_options?: { include_usage: boolean };
   reasoning_effort?: ChatRequest["reasoning_effort"];
+  thinking?: ChatRequest["thinking"];
+  enable_thinking?: boolean;
+  reasoning_split?: boolean;
+  reasoning?: ChatRequest["reasoning"];
   frequency_penalty?: number;
   presence_penalty?: number;
   seed?: number;

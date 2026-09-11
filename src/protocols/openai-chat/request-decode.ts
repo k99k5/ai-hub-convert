@@ -22,6 +22,10 @@ const supportedFields = [
   "max_tokens",
   "max_completion_tokens",
   "reasoning_effort",
+  "thinking",
+  "enable_thinking",
+  "reasoning_split",
+  "reasoning",
   "response_format",
   "stream",
   "stream_options",
@@ -250,6 +254,23 @@ function decodeResponseFormat(value: unknown): ChatResponseFormat | undefined {
   };
 }
 
+function decodeReasoningEffort(
+  value: unknown,
+  label: string,
+): NonNullable<ChatRequestExtensions["reasoning_effort"]> {
+  if (
+    value !== "none" &&
+    value !== "minimal" &&
+    value !== "low" &&
+    value !== "medium" &&
+    value !== "high" &&
+    value !== "xhigh" &&
+    value !== "max"
+  )
+    invalid(`不支持的 ${label}`);
+  return value;
+}
+
 function decodeExtensions(input: Record<string, unknown>): ChatRequestExtensions {
   const extensions: ChatRequestExtensions = {};
   if (input.prompt_cache_key !== undefined) {
@@ -304,18 +325,27 @@ function decodeExtensions(input: Record<string, unknown>): ChatRequestExtensions
   }
   const effort = input.reasoning_effort;
   if (effort !== undefined) {
-    if (
-      effort !== null &&
-      effort !== "none" &&
-      effort !== "minimal" &&
-      effort !== "low" &&
-      effort !== "medium" &&
-      effort !== "high" &&
-      effort !== "xhigh" &&
-      effort !== "max"
-    )
-      invalid("不支持的 reasoning_effort");
-    extensions.reasoning_effort = effort;
+    extensions.reasoning_effort =
+      effort === null ? null : decodeReasoningEffort(effort, "reasoning_effort");
+  }
+  // CCS 使用供应商思考参数表达开关；仅保存原始语义，不推断或映射模型能力。
+  if (input.thinking !== undefined) {
+    const thinking = record(input.thinking, "thinking");
+    fields(thinking, ["type"]);
+    if (thinking.type !== "enabled" && thinking.type !== "disabled")
+      invalid("thinking.type 仅支持 enabled 或 disabled");
+    extensions.thinking = { type: thinking.type };
+  }
+  for (const key of ["enable_thinking", "reasoning_split"] as const) {
+    const value = input[key];
+    if (value === undefined) continue;
+    if (typeof value !== "boolean") invalid(`${key} 必须是布尔值`);
+    extensions[key] = value;
+  }
+  if (input.reasoning !== undefined) {
+    const reasoning = record(input.reasoning, "reasoning");
+    fields(reasoning, ["effort"]);
+    extensions.reasoning = { effort: decodeReasoningEffort(reasoning.effort, "reasoning.effort") };
   }
   const responseFormat = decodeResponseFormat(input.response_format);
   if (responseFormat !== undefined) extensions.response_format = responseFormat;

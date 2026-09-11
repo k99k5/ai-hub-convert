@@ -159,6 +159,29 @@ Chat 请求也经过独立 decoder → canonical IR → encoder，直接发送�
 
 Chat 入口不执行内置 Web Search；名为 `web_search` 的普通函数工具交由客户端执行。
 
+### CCS 思考参数兼容
+
+CC Switch 的本地路由可将 Codex Responses 请求转换为 Chat，并按供应商配置添加思考参数。Chat 入口接受以下扩展，通过既有同协议扩展保存和编码机制原样发送给 Chat 上游：
+
+| 字段 | 接受的结构及取值 |
+| --- | --- |
+| `thinking` | 仅包含 `type` 的对象，值为 `enabled` 或 `disabled` |
+| `enable_thinking` | 布尔值 |
+| `reasoning_split` | 布尔值 |
+| `reasoning` | 仅包含 `effort` 的对象，值为 `none`、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max` |
+
+这些扩展的缺省状态及显式关闭值原样保留；不自动添加另一种思考参数，不转换为 canonical `reasoningEffort`，也不回放到 Responses 或其他来源的请求中。原有 `reasoning_effort` 的取值和跨协议行为不变。新增字段中的 `null`、非法类型、未知取值或额外对象字段在调用上游前返回 HTTP 400，错误不包含请求值；其他未知请求字段继续拒绝。
+
+网关只保证字段传递，不保证目标模型支持对应参数或关闭思考。具体模型能力由上游判断；不根据模型名称自动改写。这项兼容不改变路由：`/v1/responses` 仍只访问 Responses 上游，只有上游链路已支持 Responses 时才可关闭 CCS 的 Chat 转换。
+
+参数依据：[CC Switch 转换实现](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/proxy/providers/transform_codex_chat.rs)、[智谱思考参数](https://docs.bigmodel.cn/cn/guide/capabilities/thinking)、[OpenRouter reasoning 参数](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)。本节仅覆盖 CCS 所用的上述结构，不声明支持供应商的完整扩展 API。
+
+本地回归覆盖 JSON/SSE 上游请求、工具结果续轮、思考开启与关闭、非法参数拒绝和跨协议隔离：
+
+```powershell
+pnpm exec vitest run test/unit/chat-request.test.ts test/integration/chat-sdk.test.ts
+```
+
 ## Prompt cache
 
 Anthropic `cache_control` 只进入 request-local positional sidecar，不进入 canonical IR extension bag。只有恰好落在 canonical tool/system/message 节点末端的 marker 才能保存；非终端、同节点重复、malformed、unsupported block marker 返回固定安全错误。
