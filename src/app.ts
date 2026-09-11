@@ -136,7 +136,9 @@ function outputLimits(config: AppConfig): StreamOutputLimits {
 
 function routeProtocol(url: string): RouteProtocol {
   if (url === "/v1/chat/completions") return "openai-chat";
-  return url === "/v1/responses" ? "openai-responses" : "anthropic";
+  return url === "/v1/responses" || url === "/v1/usage" || url === "/v1/models"
+    ? "openai-responses"
+    : "anthropic";
 }
 
 function isBoundaryError(error: unknown): error is FastifyBoundaryError {
@@ -216,6 +218,48 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       }
       throw error;
     });
+
+    for (const path of ["usage", "models"] as const) {
+      api.get(`/v1/${path}`, { exposeHeadRoute: false }, async (request, reply) => {
+        let apiKey: string;
+        try {
+          apiKey = extractAnthropicApiKey(request.headers);
+        } catch (error) {
+          if (error instanceof AuthenticationError) {
+            return reply.code(401).send({
+              error: {
+                type: "authentication_error",
+                code: "invalid_api_key",
+                message: "需要有效且一致的 Bearer 或 x-api-key 凭据",
+              },
+              request_id: request.id,
+            });
+          }
+          throw error;
+        }
+
+        const abortScope = createRequestAbortScope(
+          request.raw,
+          reply.raw,
+          config.upstream.timeoutMs,
+        );
+        try {
+          const queryIndex = request.url.indexOf("?");
+          const search = queryIndex === -1 ? "" : request.url.slice(queryIndex);
+          const response = await upstream.get(path, search, apiKey, abortScope.signal);
+          for (const header of ["content-type", "retry-after", "x-request-id"]) {
+            const value = response.headers.get(header);
+            if (value !== null) reply.header(header, value);
+          }
+          return reply.code(response.status).send(response.body);
+        } catch (error) {
+          const mapped = mapUpstreamError("openai-responses", error, request.id);
+          return reply.code(mapped.status).send(mapped.body);
+        } finally {
+          abortScope.dispose();
+        }
+      });
+    }
 
     api.post<{ Body: AnthropicMessageBody }>(
       "/v1/messages",

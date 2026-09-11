@@ -10,6 +10,8 @@
 | `POST /v1/messages/count_tokens` | `/v1/responses/input_tokens` | 精确委托；不本地估算，不回退 Chat |
 | `POST /v1/responses` | `/v1/responses` | 完整 decode → canonical IR → encode；永不回退 Chat |
 | `POST /v1/chat/completions` | `/v1/chat/completions` | 完整 decode → canonical IR → encode；直接请求 Chat，不回退或重试 |
+| `GET /v1/usage` | `/v1/usage` | 透传用量查询；字段含义由上游定义 |
+| `GET /v1/models` | `/v1/models` | 透传模型列表查询 |
 | `GET /health/live` | 无 | 进程存活检查 |
 | `GET /health/ready` | 无 | 就绪检查 |
 
@@ -70,6 +72,15 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 ```
 
 三个生成入口都支持 `stream:true`。Chat 使用标准 `data:` chunk 和 `[DONE]`；只有请求 `stream_options:{"include_usage":true}` 时才输出最终 usage chunk。四条 POST route 先做不改写 body 的浅层 wire schema 校验，再由 adapter 做精确语义校验；错误分别使用入口协议的固定 HTTP 400 外壳。超过 `BODY_LIMIT_BYTES` 时返回固定 HTTP 413，且不会回传 validation path 或请求内容。
+
+## 用量与模型查询
+
+`GET /v1/usage` 和 `GET /v1/models` 接受 Bearer 或 `x-api-key`，统一转成上游 Bearer。查询参数、上游状态码和响应正文原样返回；额度单位、重置时间及模型列表以当前上游为准。完整行为见[读取接口透传契约](docs/compatibility.md#读取接口透传)。
+
+```bash
+curl 'http://127.0.0.1:3000/v1/usage' -H 'authorization: Bearer YOUR_UPSTREAM_KEY'
+curl 'http://127.0.0.1:3000/v1/models' -H 'authorization: Bearer YOUR_UPSTREAM_KEY'
+```
 
 ## 默认提示词缓存
 
@@ -220,7 +231,7 @@ Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖
 - 上游URL只能来自启动配置。
 - 默认仅允许HTTPS，本地HTTP必须显式开启。
 - API key、authorization、prompt、工具参数、图片、reasoning、signature不得写日志。
-- 不向客户端暴露上游原始错误body。
+- 协议转换接口不向客户端暴露上游原始错误 body；两个 GET 透传接口保留上游错误状态与正文。
 - 上游路径必须是固定枚举。
 - 禁止SDK自动重试，避免重复计费或重复工具执行。
 - body、工具参数、流缓冲和超时必须有上限。

@@ -78,6 +78,29 @@ export class UpstreamClient {
     this.#webSearchProviders = createDefaultWebSearchRegistry(webSearchProvider);
   }
 
+  async get(
+    path: "usage" | "models",
+    search: string,
+    apiKey: string,
+    signal: AbortSignal,
+  ): Promise<{ status: number; headers: Headers; body: Uint8Array }> {
+    signal = AbortSignal.any([signal, AbortSignal.timeout(this.#timeoutMs)]);
+    signal.throwIfAborted();
+    const url = new URL(path, this.#baseUrl);
+    url.search = search;
+    const response = await this.#fetch(url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
+      signal,
+      redirect: "error",
+    });
+    const body = await readBodyBytes(
+      response,
+      response.ok ? this.#jsonBodyLimitBytes : this.#errorBodyLimitBytes,
+    );
+    return { status: response.status, headers: response.headers, body };
+  }
+
   async postJson(
     path: UpstreamPath,
     body: unknown,
@@ -225,9 +248,9 @@ async function readErrorEnvelope(
   }
 }
 
-async function readJsonBody(response: Response, limitBytes: number): Promise<unknown> {
+async function readBodyBytes(response: Response, limitBytes: number): Promise<Uint8Array> {
   if (!response.body) {
-    throw new UpstreamProtocolError("Upstream JSON response has no body");
+    return new Uint8Array();
   }
   const contentLength = response.headers.get("content-length");
   if (contentLength !== null) {
@@ -271,6 +294,14 @@ async function readJsonBody(response: Response, limitBytes: number): Promise<unk
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  return bytes;
+}
+
+async function readJsonBody(response: Response, limitBytes: number): Promise<unknown> {
+  if (!response.body) {
+    throw new UpstreamProtocolError("Upstream JSON response has no body");
+  }
+  const bytes = await readBodyBytes(response, limitBytes);
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);

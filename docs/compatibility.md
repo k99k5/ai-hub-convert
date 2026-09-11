@@ -6,6 +6,8 @@
 - `POST /v1/messages/count_tokens`
 - `POST /v1/responses`
 - `POST /v1/chat/completions`
+- `GET /v1/usage`
+- `GET /v1/models`
 - `GET /health/live`
 - `GET /health/ready`
 
@@ -21,6 +23,15 @@
 | OpenAI Chat Completions JSON/SSE | Chat Completions | 直接请求，不回退或重试 |
 
 明确 endpoint 不存在仅包括 HTTP 405、501，或携带 `route_not_found`、`endpoint_not_found`、`unsupported_endpoint`、`not_implemented` 的 HTTP 404。认证、限流、服务端错误、timeout/disconnect、model missing、模糊 404、HTTP 200 后 malformed SSE 都不会触发回退。
+
+## 读取接口透传
+
+- 仅开放 `GET /v1/usage` 和 `GET /v1/models`，对应启动配置 `UPSTREAM_BASE_URL` 下的 `usage` 和 `models`；保留配置中的路径前缀，不自动追加第二个 `/v1`。其他路径、子路径和请求方法不转发。
+- 接受 `Authorization: Bearer ...` 或 `x-api-key`；同时提供时必须一致。上游只接收转换后的 Bearer 和 `Accept: application/json`，不转发客户端 Cookie 或其他请求头。
+- 保留查询中的重复参数、参数顺序和已有百分号编码；特殊字符遵循标准 URL 编码。网关不解释额度字段、不映射模型、不汇总或缓存结果。
+- 上游状态码和正文按原始字节返回，包括错误正文、非 JSON 和空响应；不进入协议转换或错误清洗。保留 `Content-Type`、`Retry-After` 和 `X-Request-Id` 响应头，其他上游响应头不转发。
+- 成功正文受 `UPSTREAM_JSON_BODY_LIMIT_BYTES` 限制，其余正文受 `UPSTREAM_ERROR_BODY_LIMIT_BYTES` 限制。读取超限、连接失败或超时返回现有 OpenAI 格式的网关错误，不返回部分正文。
+- 复用请求总超时与客户端断连取消；不跟随上游重定向，不重试或回退。上游没有用量接口时原样返回其错误，网关不推算额度或重置时间。
 
 ## 内容矩阵
 
