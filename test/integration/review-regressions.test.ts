@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
-import { loadConfig } from "../../src/config.js";
+import { loadResponsesConfig as loadConfig } from "../helpers/config.js";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME as name } from "../../src/providers/web-search/internal.js";
 import { responsesStream } from "../helpers/upstream.js";
 

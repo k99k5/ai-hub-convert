@@ -53,6 +53,7 @@ export interface ChatRequest {
   reasoning_split?: boolean;
   reasoning?: { effort: NonNullable<ChatRequest["reasoning_effort"]> };
   response_format?: ChatResponseFormat;
+  verbosity?: "low" | "medium" | "high" | null;
   frequency_penalty?: number;
   presence_penalty?: number;
   seed?: number;
@@ -60,8 +61,8 @@ export interface ChatRequest {
   user?: string;
   safety_identifier?: string;
   service_tier?: "auto" | "default" | "flex" | "priority";
-  metadata?: Record<string, string>;
-  store?: boolean;
+  metadata?: Record<string, unknown>;
+  store?: boolean | null;
   prompt_cache_key?: string | null;
   stream: boolean;
   stream_options?: { include_usage: boolean };

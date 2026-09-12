@@ -1,5 +1,6 @@
 import type { CanonicalError, CanonicalEvent } from "../../core/events.js";
 import type { FinishReason, Usage } from "../../core/ir.js";
+import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../providers/web-search/internal.js";
 import {
   DEFAULT_STREAM_OUTPUT_LIMITS,
   type StreamOutputLimits,
@@ -48,6 +49,7 @@ export class ChatStreamDecoder {
     private readonly options: {
       preserveWireMetadata?: boolean;
       validateToolArguments?: boolean;
+      allowIncompleteToolArguments?: boolean;
     } = {},
   ) {
     this.#argumentLimiter = new ToolArgumentStreamLimiter(limits);
@@ -107,7 +109,13 @@ export class ChatStreamDecoder {
       this.#wireFinishReason = requireString(choice.finish_reason, "finish_reason");
       this.#validateToolArguments();
       for (const index of [...this.#openIndices].sort((left, right) => left - right)) {
-        events.push({ type: "content_stop", index });
+        events.push({
+          type: "content_stop",
+          index,
+          ...(this.#finishReason === "max_tokens" || this.#finishReason === "incomplete"
+            ? { status: "incomplete" as const }
+            : {}),
+        });
       }
       this.#openIndices.clear();
     }
@@ -294,7 +302,11 @@ export class ChatStreamDecoder {
 
   #validateToolArguments(): void {
     for (const [sourceIndex, tool] of this.#tools) {
-      if (this.options.validateToolArguments !== false) {
+      const incomplete =
+        this.options.allowIncompleteToolArguments === true &&
+        this.#finishReason === "max_tokens" &&
+        tool.name !== INTERNAL_WEB_SEARCH_TOOL_NAME;
+      if (this.options.validateToolArguments !== false && !incomplete) {
         let parsed: unknown;
         try {
           parsed = JSON.parse(tool.arguments);

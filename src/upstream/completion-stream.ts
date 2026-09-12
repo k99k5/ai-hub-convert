@@ -64,6 +64,7 @@ async function* decodeRound(
         : new ChatStreamDecoder(options.argumentLimits, options.outputLimits, {
             preserveWireMetadata: options.preserveChatWireMetadata ?? false,
             validateToolArguments: options.validateChatToolArguments ?? true,
+            allowIncompleteToolArguments: options.allowIncompleteToolArguments ?? false,
           });
     for await (const frame of parseSseStream(
       response.body,

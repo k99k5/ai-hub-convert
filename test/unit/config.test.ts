@@ -21,6 +21,7 @@ describe("loadConfig", () => {
       versionRange: {},
     });
     expect(config.upstream).toMatchObject({
+      protocol: "chat",
       toolArgumentLimitBytes: 1024 * 1024,
       streamToolArgumentLimitBytes: 8 * 1024 * 1024,
       sseFrameLimitBytes: 8 * 1024 * 1024,
@@ -53,6 +54,18 @@ describe("loadConfig", () => {
       jsonBodyLimitBytes: 131072,
       errorBodyLimitBytes: 4096,
     });
+  });
+
+  it("allows explicit Responses mode and rejects unknown upstream protocols", () => {
+    expect(
+      loadConfig({ ...baseEnvironment, UPSTREAM_PROTOCOL: "responses" }).upstream.protocol,
+    ).toBe("responses");
+    expect(loadConfig({ ...baseEnvironment, UPSTREAM_PROTOCOL: "chat" }).upstream.protocol).toBe(
+      "chat",
+    );
+    expect(() => loadConfig({ ...baseEnvironment, UPSTREAM_PROTOCOL: "auto" })).toThrow(
+      /UPSTREAM_PROTOCOL/,
+    );
   });
 
   it("rejects invalid stream limits", () => {

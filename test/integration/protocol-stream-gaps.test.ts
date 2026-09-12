@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
-import { loadConfig } from "../../src/config.js";
+import { loadResponsesConfig as loadConfig } from "../helpers/config.js";
 import { responsesStream } from "../helpers/upstream.js";
 
 type Wire = Record<string, unknown>;

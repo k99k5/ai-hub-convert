@@ -33,7 +33,13 @@ function encodeContent(
     if (part.type === "text") {
       encoded.push({ type: "text", text: part.text });
     } else if (part.type === "image") {
-      const detail = options?.imageDetails?.[index];
+      const detail = options?.imageDetails?.[index] ?? part.detail;
+      if (detail === "original") {
+        throw new OpenAIAdapterError(
+          "INVALID_OPENAI_CHAT_REQUEST",
+          "Chat 不支持图片 detail:original",
+        );
+      }
       encoded.push({
         type: "image_url",
         image_url: {
@@ -132,7 +138,9 @@ function encodeToolChoice(
       type: "function",
       function: {
         name:
-          choice.name === "web_search" && hasBuiltInWebSearch(request)
+          request.source !== "openai-responses" &&
+          choice.name === "web_search" &&
+          hasBuiltInWebSearch(request)
             ? INTERNAL_WEB_SEARCH_TOOL_NAME
             : choice.name,
       },
@@ -163,6 +171,9 @@ export function encodeChatRequest(request: CanonicalRequest): ChatRequest {
                   name: INTERNAL_WEB_SEARCH_TOOL_NAME,
                   description:
                     INTERNAL_WEB_SEARCH_TOOL_DESCRIPTION +
+                    (request.source === "openai-responses"
+                      ? " 请在答案中以 Markdown 链接引用实际使用的搜索结果，链接必须来自工具返回的 URL。"
+                      : "") +
                     (tool.userLocation === undefined
                       ? ""
                       : ` 用户近似位置和时区：${JSON.stringify(tool.userLocation)}。`),

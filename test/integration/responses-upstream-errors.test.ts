@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
-import { loadConfig } from "../../src/config.js";
+import { loadResponsesConfig as loadConfig } from "../helpers/config.js";
 
 const apps: Array<ReturnType<typeof buildApp>> = [];
 afterEach(async () => {

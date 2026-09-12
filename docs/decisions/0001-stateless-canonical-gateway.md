@@ -22,7 +22,7 @@
 2. decoder 先生成有序、provider-neutral canonical IR/events；
 3. provider-private continuation 与 prompt-cache marker 放在受限 sidecar/opaque 类型中，不使用任意 extension bag 跨 provider 回放；
 4. Claude Code 断点规划、Read 和 signature 作为 request-local compatibility policy；默认提示词缓存键独立于 Claude Code 策略，适用于三个生成入口；
-5. Anthropic Messages 以 Responses 为主路径，只通过严格 classifier 进行一次 Chat fallback；Chat 对外入口直接请求上游 Chat，不回退或重试；
+5. 2026-09-12 起默认强制所有生成入口使用 Chat 上游，网关负责转换回调用方协议，以避免中间层 Responses → Chat 漏传缓存键。显式 `UPSTREAM_PROTOCOL=responses` 保留原 Messages 的 Responses 主路径及严格 Chat fallback；Chat 对外入口始终直接请求 Chat。默认模式不探测 Responses、不回退或重试；count_tokens 返回 501，不通过生成调用或本地算法估算；
 6. Web Search 通过独立 provider registry 扩展，unsupported provider 在路由预检阶段返回 501；
 7. 所有上游路径为代码中的固定枚举，URL 只来自启动配置；
 8. 不使用数据库、持久化 session 或本地 token estimate；提示词缓存交由上游处理。为兼容 Chatbox 1.21.1，允许在进程内短期缓存成功 Responses 输出项，用于展开后续 `item_reference`，不缓存请求 prompt、整段历史或 API key 原文。

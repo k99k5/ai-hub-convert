@@ -12,6 +12,7 @@ export interface AppConfig {
   };
   upstream: {
     baseUrl: URL;
+    protocol: "chat" | "responses";
     timeoutMs: number;
     firstByteTimeoutMs: number;
     streamIdleTimeoutMs: number;
@@ -74,6 +75,7 @@ export function loadConfig(environment: Environment = process.env): AppConfig {
     },
     upstream: {
       baseUrl,
+      protocol: parseUpstreamProtocol(environment.UPSTREAM_PROTOCOL),
       timeoutMs: parseInteger(environment.UPSTREAM_TIMEOUT_MS, "UPSTREAM_TIMEOUT_MS", 10 * 60_000, {
         min: 1,
       }),
@@ -158,6 +160,12 @@ export function loadConfig(environment: Environment = process.env): AppConfig {
       ),
     },
   };
+}
+
+function parseUpstreamProtocol(value: string | undefined): "chat" | "responses" {
+  if (value === undefined || value === "" || value === "chat") return "chat";
+  if (value === "responses") return "responses";
+  throw new Error("UPSTREAM_PROTOCOL must be either chat or responses");
 }
 
 function parseUpstreamUrl(value: string | undefined, allowInsecure: boolean): URL {

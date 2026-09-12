@@ -15,14 +15,33 @@
 
 ## 路由与回退
 
-| 入口 | 默认上游 | Chat 回退 |
+| 入口 | 默认 Chat 模式 | 显式 Responses 模式 |
 | --- | --- | --- |
-| Anthropic Messages JSON/SSE | Responses | 仅在明确 endpoint 不存在且零语义事件、零客户端写入时允许 |
-| Anthropic count_tokens | Responses input_tokens | 永不回退 |
-| OpenAI Responses JSON/SSE | Responses | 永不回退 |
-| OpenAI Chat Completions JSON/SSE | Chat Completions | 直接请求，不回退或重试 |
+| Anthropic Messages JSON/SSE | 直接 Chat，不回退或重试 | Responses；仅明确 endpoint 不存在且零语义事件、零客户端写入时回退 Chat |
+| Anthropic count_tokens | HTTP 501，不调用上游 | Responses input_tokens；永不回退 |
+| OpenAI Responses JSON/SSE | 直接 Chat，不回退或重试 | Responses；永不回退 |
+| OpenAI Chat Completions JSON/SSE | 直接 Chat，不回退或重试 | 直接 Chat，不回退或重试 |
 
-明确 endpoint 不存在仅包括 HTTP 405、501，或携带 `route_not_found`、`endpoint_not_found`、`unsupported_endpoint`、`not_implemented` 的 HTTP 404。认证、限流、服务端错误、timeout/disconnect、model missing、模糊 404、HTTP 200 后 malformed SSE 都不会触发回退。
+`UPSTREAM_PROTOCOL` 只接受 `chat`（默认）或 `responses`。Chat 模式不探测 Responses，所有失败直接结束该请求；内置搜索所需的模型续轮仍全部使用 Chat。Responses 模式中的明确 endpoint 不存在仅包括 HTTP 405、501，或携带 `route_not_found`、`endpoint_not_found`、`unsupported_endpoint`、`not_implemented` 的 HTTP 404。认证、限流、服务端错误、timeout/disconnect、model missing、模糊 404、HTTP 200 后 malformed SSE 都不会触发回退。
+
+### 强制 Chat 模式（默认）
+
+三个生成入口均在网关完成协议转换，上游仅接收 `/chat/completions`，Bearer 凭据和请求模型保持既有规则。自动或显式 `prompt_cache_key` 直接写进 Chat 请求，显式 null 仍抑制自动生成；不依赖中间层完成 Responses → Chat 字段映射。
+
+| Responses 入口能力 | Chat 上游行为 |
+| --- | --- |
+| instructions、文本、图片、函数工具 | 转为 Chat 消息和工具定义；图片精度保留 auto/low/high，original 在出站前返回 400 |
+| 并行调用和工具结果 | 同一 assistant 轮次的 reasoning/text/function_call 合并为一个 Chat assistant 消息，随后附上对应 tool 消息 |
+| `reasoning.effort` | 映射到 `reasoning_effort`；保留 none/minimal/low/medium/high/xhigh/max/null，模型支持范围由上游判断 |
+| `text.format` / `text.verbosity` | 映射到 `response_format` / `verbosity`；JSON Schema 名称、描述、strict 和 schema 保留 |
+| 推理内容 | Chat `reasoning_content` 转为 Responses 明文 summary；不生成加密内容，不承诺 summary 等显示控制。`include` 中的加密推理选项不发给 Chat；只有 encrypted_content、无明文 summary 的历史返回 400 |
+| `store` / `metadata` | 映射到 Chat 同名字段，store 缺省 false；不提供 Responses 存储检索或会话恢复 |
+| `previous_response_id` | 非 null 时返回 400，必须发送完整历史或使用本地 `item_reference` |
+| JSON/SSE 输出 | 网关生成独立响应及输出项 ID；文本、推理、工具、拒绝、截断状态转换回 Responses，流式终态完整校验后才发送 |
+| 缓存和推理用量 | Chat prompt_tokens_details.cached_tokens/cache_write_tokens 转为 Responses input_tokens_details；reasoning_tokens 保留，缺失字段不补零 |
+| 网页搜索 | 保留网关 provider 执行、搜索进度、来源、引用及累计用量，模型轮次全部走 Chat |
+
+`count_tokens` 在此模式下返回 Anthropic HTTP 501；不访问 Responses input_tokens，也不通过一次生成调用或本地算法估算。`/usage`、`/models` 继续透传。切换上游协议会改变自动缓存键的目标接口部分；显式键保持原值。部署无需数据迁移，显式设置 `UPSTREAM_PROTOCOL=responses` 可恢复原协议路由；重启会清空本地引用缓存。
 
 ## 读取接口透传
 
@@ -35,7 +54,9 @@
 
 ## 内容矩阵
 
-| 能力 | Anthropic → Responses | Anthropic → Chat fallback | Responses → Responses |
+以下矩阵描述各转换器；Responses → Chat 以先前的默认模式表为准。
+
+| 能力 | Anthropic → Responses | Anthropic → Chat（默认及回退） | Responses → Responses |
 | --- | --- | --- | --- |
 | text / system | 支持 | 支持 | 支持 |
 | URL image | 支持 | 支持 | 支持 |
@@ -68,7 +89,7 @@ Anthropic `tool_result.is_error:true` 在 Responses 和 Chat 上游的结果正�
 
 ### Responses 引用缓存
 
-为兼容 Chatbox 1.21.1，Responses → Responses 接受显式 `{type:"item_reference", id:"非空字符串"}`，仅允许这两个字段。网关按输入顺序从本地缓存展开完整输出项，再由既有 decoder → canonical IR → encoder 处理；不把 `item_reference` 透传给上游，不要求上游能够解析引用。引用不跨协议转换，也不进入计数路径。
+为兼容 Chatbox 1.21.1，Responses 入口在两种上游模式都接受显式 `{type:"item_reference", id:"非空字符串"}`，仅允许这两个字段。网关按输入顺序从本地缓存展开完整输出项，再由 decoder → canonical IR → 所选上游 encoder 处理；不把 `item_reference` 透传给上游，不要求上游能够解析引用。Messages 和 Chat 入口不接受引用，计数路径也不展开引用。
 
 只缓存成功 Responses 响应的输出项。JSON 响应和 SSE 流均须完整校验成功后才写入；失败、截断或未完成的响应不写入。不缓存请求 prompt、整段历史或 token-count 结果，不提供 `previous_response_id` 会话重建。网关默认 `store:false`；调用方显式 `store:true | false | null` 保持原值，引用缓存不依赖该参数，也不自动开启上游存储。
 
@@ -172,7 +193,7 @@ CC Switch 的本地路由可将 Codex Responses 请求转换为 Chat，并按供
 
 这些扩展的缺省状态及显式关闭值原样保留；不自动添加另一种思考参数，不转换为 canonical `reasoningEffort`，也不回放到 Responses 或其他来源的请求中。原有 `reasoning_effort` 的取值和跨协议行为不变。新增字段中的 `null`、非法类型、未知取值或额外对象字段在调用上游前返回 HTTP 400，错误不包含请求值；其他未知请求字段继续拒绝。
 
-网关只保证字段传递，不保证目标模型支持对应参数或关闭思考。具体模型能力由上游判断；不根据模型名称自动改写。这项兼容不改变路由：`/v1/responses` 仍只访问 Responses 上游，只有上游链路已支持 Responses 时才可关闭 CCS 的 Chat 转换。
+网关只保证字段传递，不保证目标模型支持对应参数或关闭思考。具体模型能力由上游判断；不根据模型名称自动改写。默认 Chat 模式下 `/v1/responses` 可直接转换到 Chat 上游；上述 CCS 特有开关仍仅接受于 Chat 入口，Responses 使用 `reasoning.effort`，不会自动补充供应商特有开关。
 
 参数依据：[CC Switch 转换实现](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/proxy/providers/transform_codex_chat.rs)、[智谱思考参数](https://docs.bigmodel.cn/cn/guide/capabilities/thinking)、[OpenRouter reasoning 参数](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)。本节仅覆盖 CCS 所用的上述结构，不声明支持供应商的完整扩展 API。
 

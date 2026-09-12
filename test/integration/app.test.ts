@@ -2,7 +2,7 @@ import { responsesStream } from "../helpers/upstream.js";
 import { request as httpRequest, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
-import { loadConfig } from "../../src/config.js";
+import { loadResponsesConfig as loadConfig } from "../helpers/config.js";
 import {
   createWebSearchToolUseId,
   INTERNAL_WEB_SEARCH_TOOL_NAME,

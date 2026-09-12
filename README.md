@@ -6,16 +6,18 @@
 
 | 对外接口 | 上游接口 | 行为 |
 | --- | --- | --- |
-| `POST /v1/messages` | `/v1/responses` | 默认路径；仅在明确不存在 Responses endpoint 时受限回退 `/v1/chat/completions` |
-| `POST /v1/messages/count_tokens` | `/v1/responses/input_tokens` | 精确委托；不本地估算，不回退 Chat |
-| `POST /v1/responses` | `/v1/responses` | 完整 decode → canonical IR → encode；永不回退 Chat |
+| `POST /v1/messages` | `/v1/chat/completions` | 默认强制 Chat，转换回 Anthropic JSON/SSE，不探测 Responses、不回退 |
+| `POST /v1/messages/count_tokens` | 无 | 默认 Chat 模式返回 501；不通过生成请求或本地估算计数 |
+| `POST /v1/responses` | `/v1/chat/completions` | 默认强制 Chat，转换回 Responses JSON/SSE；保留工具、引用续轮和缓存统计 |
 | `POST /v1/chat/completions` | `/v1/chat/completions` | 完整 decode → canonical IR → encode；直接请求 Chat，不回退或重试 |
 | `GET /v1/usage` | `/v1/usage` | 透传用量查询；字段含义由上游定义 |
 | `GET /v1/models` | `/v1/models` | 透传模型列表查询 |
 | `GET /health/live` | 无 | 进程存活检查 |
 | `GET /health/ready` | 无 | 就绪检查 |
 
-`/v1/messages` 只在尚无上游语义事件、尚未向客户端写入 SSE 字节，并且 Responses 返回以下明确 endpoint 缺失信号时回退：
+默认 `UPSTREAM_PROTOCOL=chat`，所有生成入口只请求上游 Chat，不需要上游提供 Responses。`prompt_cache_key` 随 Chat 请求发送，可避免 sub2api 等中间层在 Responses → Chat 转换时漏传缓存键。网关内置搜索会继续调用 Chat 完成工具续轮。
+
+显式设置 `UPSTREAM_PROTOCOL=responses` 可恢复原路由：Messages 优先 Responses，Responses 入口只请求 Responses，计数委托 `/responses/input_tokens`；Chat 入口仍走 Chat。在此模式下，`/v1/messages` 只在尚无上游语义事件、尚未向客户端写入 SSE 字节，并且 Responses 返回以下明确 endpoint 缺失信号时回退：
 
 - HTTP 405 或 501；
 - HTTP 404 且错误码为 `route_not_found`、`endpoint_not_found`、`unsupported_endpoint` 或 `not_implemented`。
@@ -28,7 +30,7 @@
 
 - Node.js 24；
 - pnpm 10.6.3；
-- 一个支持目标接口的 OpenAI-compatible 上游：Responses/Anthropic 主路径使用 Responses，Chat 入口及 Anthropic 回退使用 Chat Completions；生成接口需接受 `prompt_cache_key`。
+- 一个支持 Chat Completions 的 OpenAI-compatible 上游；生成接口需接受 `prompt_cache_key`。只有显式选择 Responses 模式才需要上游支持 Responses。
 
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
@@ -92,7 +94,9 @@ curl 'http://127.0.0.1:3000/v1/models' -H 'authorization: Bearer YOUR_UPSTREAM_K
 
 ## Responses 引用续轮
 
-Chatbox 1.21.1 回传的 `item_reference` 在网关内展开为完整输出项，再交给既有 Responses 转换流程，不要求上游支持引用。网关只缓存经过完整校验的成功 Responses 输出项，固定保留 5 分钟，读取不续期；缓存有容量上限且不写磁盘。具体预算、凭据隔离和淘汰规则见[引用兼容契约](docs/compatibility.md#responses-引用缓存)。
+Chatbox 1.21.1 回传的 `item_reference` 在网关内展开为完整输出项，再转换到所选上游协议，不要求上游支持引用。Chat 模式由网关生成 Responses 响应和输出项 ID，并把同一 assistant 轮次的推理、文本、并行工具调用合并后发送给 Chat。网关只缓存经过完整校验的成功输出项，固定保留 5 分钟，读取不续期；缓存有容量上限且不写磁盘。具体预算、凭据隔离和淘汰规则见[引用兼容契约](docs/compatibility.md#responses-引用缓存)。
+
+Chat 模式不支持 `previous_response_id` 会话恢复、只有加密内容的推理历史或图片 `detail:original`，这些请求在调用上游前返回 400；可使用完整历史、本地 `item_reference` 和图片 auto/low/high。`reasoning.effort` 转为 `reasoning_effort`，`text.format` 和 `text.verbosity` 转为 Chat 对应字段；加密推理输出及推理摘要的显示控制不作等价保证。完整边界见[强制 Chat 模式](docs/compatibility.md#强制-chat-模式默认)。
 
 引用缺失、过期、被淘汰、凭据或模型变化时，返回 OpenAI 格式 HTTP 400，错误码为 `reference_cache_miss`，不会静默丢弃历史。重启会清空缓存，旧引用失效后需要新建会话，或让客户端以 `store:false` 回传完整历史。依赖引用续轮时使用单实例部署，或在多实例部署中配置粘性路由；缓存不在实例间共享。该能力不新增配置、依赖或持久化设施，也不因出现引用自动启用上游存储。
 
@@ -105,6 +109,7 @@ Chatbox 1.21.1 回传的 `item_reference` 在网关内展开为完整输出项�
 | `HOST` | `127.0.0.1` | 监听地址；容器内默认覆盖为 `0.0.0.0` |
 | `PORT` | `3000` | 监听端口 |
 | `UPSTREAM_BASE_URL` | 必填 | 上游基础 URL，只允许启动配置提供 |
+| `UPSTREAM_PROTOCOL` | `chat` | `chat` 强制所有生成入口走 Chat；`responses` 恢复原 Responses 主路径与 Messages 受限回退 |
 | `ALLOW_INSECURE_UPSTREAM` | `false` | 仅在显式为 `true` 时允许 HTTP，供本地开发使用 |
 | `BODY_LIMIT_BYTES` | `33554432` | 请求 body 上限 |
 | `CONNECTION_TIMEOUT_MS` | `0` | Socket 空闲超时；默认禁用，由上游总超时和 SSE 首字节/idle 超时约束请求 |

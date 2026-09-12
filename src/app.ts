@@ -60,6 +60,11 @@ import { ChatStreamEncoder } from "./protocols/openai-chat/stream-encode.js";
 import { decodeResponsesRequest } from "./protocols/openai-responses/request-decode.js";
 import { encodeResponsesResponse } from "./protocols/openai-responses/response-encode.js";
 import {
+  chatEventForResponses,
+  encodeChatAsResponses,
+  encodeResponsesChatRequest,
+} from "./protocols/openai-responses/chat-bridge.js";
+import {
   addResponsesWebSearch,
   includeWebSearchSources,
 } from "./protocols/openai-responses/web-search.js";
@@ -350,6 +355,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
               },
               config.server.anthropicPingIntervalMs,
               clientStream.send,
+              config.upstream.protocol,
             );
             return;
           } catch (error) {
@@ -394,6 +400,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             promptCacheSidecar,
             isClaudeCode && config.claudeCode.promptCacheBreakpointsEnabled,
             GENERIC_PROMPT_CACHE_CAPABILITIES,
+            config.upstream.protocol,
           );
           const normalizedResponse = normalizeResponseToolArguments(
             completion.response,
@@ -462,6 +469,15 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             return sendAnthropicError(reply, 400, "invalid_request_error", error.message);
           }
           throw error;
+        }
+
+        if (config.upstream.protocol === "chat") {
+          return sendAnthropicError(
+            reply,
+            501,
+            "api_error",
+            "精确 token 计数在 Chat 上游模式下不可用",
+          );
         }
 
         try {
@@ -637,6 +653,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       async (request, reply) => {
         let apiKey: string;
         let canonicalRequest: CanonicalRequest;
+        let upstreamBody: unknown;
         try {
           apiKey = extractResponsesApiKey(request.headers);
           canonicalRequest = decodeResponsesRequest(request.body);
@@ -665,6 +682,14 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
                 .messages;
             });
           }
+          upstreamBody =
+            config.upstream.protocol === "chat"
+              ? encodeResponsesChatRequest(canonicalRequest)
+              : encodeResponsesRequest(canonicalRequest, {
+                  store: false,
+                  replaySourceExtensions: true,
+                  promptCache: GENERIC_PROMPT_CACHE_CAPABILITIES.responses,
+                });
         } catch (error) {
           if (error instanceof AuthenticationError) {
             return reply.code(401).send({
@@ -676,7 +701,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
               request_id: request.id,
             });
           }
-          if (error instanceof OpenAIAdapterError) {
+          if (error instanceof OpenAIAdapterError || error instanceof ChatAdapterError) {
             return reply.code(400).send({
               error: {
                 message: error.message,
@@ -733,6 +758,8 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
               },
               clientStream.send,
               (output) => referenceCache.remember(apiKey, canonicalRequest.model, output),
+              config.upstream.protocol,
+              upstreamBody,
             );
             return;
           } catch (error) {
@@ -767,20 +794,23 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         );
         try {
           const upstreamResponse = await upstream.postJson(
-            "responses",
-            encodeResponsesRequest(canonicalRequest, {
-              store: false,
-              replaySourceExtensions: true,
-              promptCache: GENERIC_PROMPT_CACHE_CAPABILITIES.responses,
-            }),
+            config.upstream.protocol === "chat" ? "chat/completions" : "responses",
+            upstreamBody,
             apiKey,
             abortScope.signal,
             webSearchOptions(canonicalRequest).webSearch,
           );
           const response = addResponsesWebSearch(
-            encodeResponsesResponse(
-              decodeResponsesResponse(upstreamResponse, { preserveWireMetadata: true }),
-            ),
+            config.upstream.protocol === "chat"
+              ? encodeChatAsResponses(
+                  decodeChatResponse(upstreamResponse, {
+                    preserveWireMetadata: true,
+                    allowIncompleteToolArguments: true,
+                  }),
+                )
+              : encodeResponsesResponse(
+                  decodeResponsesResponse(upstreamResponse, { preserveWireMetadata: true }),
+                ),
             getWebSearchExecutions(upstreamResponse),
             includeWebSearchSources(canonicalRequest),
             outputLimits(config),
@@ -812,18 +842,16 @@ async function streamResponsesResponse(
   timeoutOptions: StreamTimeoutOptions,
   send: (frame: ResponsesSseFrame | string) => Promise<void>,
   remember: (output: readonly unknown[]) => void,
+  protocol: AppConfig["upstream"]["protocol"],
+  body: unknown,
 ): Promise<void> {
   const encoder = new ResponsesStreamEncoder(argumentLimits, streamOutputLimits, {
     includeWebSearchSources: includeWebSearchSources(request),
   });
   let terminal: ResponsesSseFrame | undefined;
   for await (const event of upstream.streamCompletion(
-    "responses",
-    encodeResponsesRequest(request, {
-      store: false,
-      replaySourceExtensions: true,
-      promptCache: GENERIC_PROMPT_CACHE_CAPABILITIES.responses,
-    }),
+    protocol === "chat" ? "chat/completions" : "responses",
+    body,
     apiKey,
     signal,
     {
@@ -835,7 +863,9 @@ async function streamResponsesResponse(
       ...webSearchOptions(request),
     },
   )) {
-    for (const frame of encoder.encode(event)) {
+    for (const frame of encoder.encode(
+      protocol === "chat" ? chatEventForResponses(event) : event,
+    )) {
       if (frame.event === "response.completed" || frame.event === "response.incomplete") {
         terminal = frame;
       } else await send(frame);
@@ -868,6 +898,7 @@ async function streamAnthropicResponse(
   timeoutOptions: StreamTimeoutOptions,
   pingIntervalMs: number,
   send: (frame: AnthropicSseFrame) => Promise<void>,
+  protocol: AppConfig["upstream"]["protocol"],
 ): Promise<void> {
   const options = {
     ...(encoderOptions.toolArgumentLimits === undefined
@@ -881,6 +912,16 @@ async function streamAnthropicResponse(
     ...webSearchOptions(request),
   };
   const events = (async function* () {
+    if (protocol === "chat") {
+      yield* upstream.streamCompletion(
+        "chat/completions",
+        encodeChatRequest(request),
+        apiKey,
+        signal,
+        options,
+      );
+      return;
+    }
     preparePromptCacheAttempt({
       request,
       sidecar: promptCacheSidecar,
@@ -958,7 +999,21 @@ async function requestAnthropicCompletion(
   promptCacheSidecar: PromptCacheSidecar,
   promptCacheEnabled: boolean,
   promptCacheCapabilities: PromptCacheCapabilities,
+  protocol: AppConfig["upstream"]["protocol"],
 ): Promise<AnthropicCompletionResult> {
+  if (protocol === "chat") {
+    const response = await upstream.postJson(
+      "chat/completions",
+      encodeChatRequest(request),
+      apiKey,
+      signal,
+      webSearchOptions(request).webSearch,
+    );
+    return {
+      response: addWebSearchUsage(decodeChatResponse(response), response),
+      webSearchExecutions: getWebSearchExecutions(response),
+    };
+  }
   try {
     preparePromptCacheAttempt({
       request,

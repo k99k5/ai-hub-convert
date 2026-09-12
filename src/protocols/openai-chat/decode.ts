@@ -141,7 +141,11 @@ function decodeFinish(value: unknown, content: readonly Content[]): FinishReason
 
 export function decodeChatResponse(
   input: unknown,
-  options: { preserveWireMetadata?: boolean; validateToolArguments?: boolean } = {},
+  options: {
+    preserveWireMetadata?: boolean;
+    validateToolArguments?: boolean;
+    allowIncompleteToolArguments?: boolean;
+  } = {},
 ): CanonicalResponse {
   const body = record(input, "body");
   if (!Array.isArray(body.choices) || body.choices.length !== 1) {
@@ -167,7 +171,13 @@ export function decodeChatResponse(
   if (message.refusal !== undefined && message.refusal !== null) {
     content.push({ type: "refusal", refusal: string(message.refusal, "refusal") });
   }
-  content.push(...decodeToolCalls(message.tool_calls, options.validateToolArguments !== false));
+  content.push(
+    ...decodeToolCalls(
+      message.tool_calls,
+      options.validateToolArguments !== false &&
+        !(options.allowIncompleteToolArguments === true && choice.finish_reason === "length"),
+    ),
+  );
   return {
     id: string(body.id, "id"),
     model: string(body.model, "model"),

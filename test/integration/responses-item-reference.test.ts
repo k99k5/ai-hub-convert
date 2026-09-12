@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
-import { loadConfig } from "../../src/config.js";
+import { loadResponsesConfig as loadConfig } from "../helpers/config.js";
 import { decodeResponsesRequest } from "../../src/protocols/openai-responses/request-decode.js";
 import { encodeResponsesRequest } from "../../src/protocols/openai-responses/encode.js";
 import { encodeChatRequest } from "../../src/protocols/openai-chat/encode.js";
