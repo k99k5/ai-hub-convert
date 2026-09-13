@@ -137,6 +137,67 @@ describe("ChatStreamDecoder", () => {
     });
   });
 
+  it.each([
+    { id: null, function: { arguments: "1}" } },
+    { type: null, function: { arguments: "1}" } },
+    { function: { name: null, arguments: "1}" } },
+    { id: null, type: null, function: { name: null, arguments: "1}" } },
+    { function: null },
+    {},
+  ])("preserves tool identity across nullable continuation metadata: %j", (continuation) => {
+    const decoder = new ChatStreamDecoder();
+    const base = { id: "chat_tools", model: "m" };
+    const toolChunk = (call: Record<string, unknown>) =>
+      chunk(decoder, {
+        ...base,
+        choices: [{ index: 0, delta: { tool_calls: [{ index: 0, ...call }] } }],
+      });
+    const events = toolChunk({
+      id: "call_0",
+      type: "function",
+      function: { name: "lookup", arguments: '{"n":' },
+    });
+    events.push(...toolChunk(continuation));
+    if (!continuation.function) events.push(...toolChunk({ function: { arguments: "1}" } }));
+    events.push(
+      ...chunk(decoder, {
+        ...base,
+        choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+      }),
+      ...decoder.decode({ event: "message", data: "[DONE]" }),
+    );
+
+    expect(events.filter((event) => event.type === "content_start")).toEqual([
+      {
+        type: "content_start",
+        index: 0,
+        content: { type: "function_call", id: "call_0", name: "lookup", arguments: "" },
+      },
+    ]);
+    expect(
+      events
+        .filter((event) => event.type === "function_arguments_delta")
+        .map((event) => event.delta)
+        .join(""),
+    ).toBe('{"n":1}');
+    expect(events.at(-1)).toMatchObject({ type: "response_complete", finishReason: "tool_use" });
+    expect(() => decoder.finish()).not.toThrow();
+  });
+
+  it.each([
+    { id: null, function: { name: "lookup", arguments: "{}" } },
+    { id: "call_0", function: { name: null, arguments: "{}" } },
+    { id: "call_0", function: null },
+  ])("still requires identity on the first tool chunk: %j", (call) => {
+    expect(() =>
+      chunk(new ChatStreamDecoder(), {
+        id: "chat_tools",
+        model: "m",
+        choices: [{ index: 0, delta: { tool_calls: [{ index: 0, ...call }] } }],
+      }),
+    ).toThrow(/tool (call id|function)/);
+  });
+
   it("rejects tool arguments that exceed per-call or stream byte limits", () => {
     const base = { id: "chatcmpl_1", model: "model-a" };
     const perCall = new ChatStreamDecoder({ perCallBytes: 3, perStreamBytes: 10 });

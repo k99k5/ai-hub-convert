@@ -244,9 +244,11 @@ export class ChatStreamDecoder {
       const call = requireObject(rawCall, "tool call");
       const sourceIndex = requireNonNegativeInteger(call.index, "tool index");
       let state = this.#tools.get(sourceIndex);
-      const fn = requireObject(call.function, "tool function");
+      // Chat-compatible providers may serialize absent continuation metadata as null.
+      // Only an established call can omit its function; its identity remains unchanged.
+      const fn = requireObject(call.function ?? (state ? {} : undefined), "tool function");
       if (!state) {
-        if (call.type !== undefined && call.type !== "function") {
+        if (call.type !== undefined && call.type !== null && call.type !== "function") {
           throw new Error("Chat stream tool call type must be function");
         }
         const id = requireString(call.id, "tool call id");
@@ -263,13 +265,13 @@ export class ChatStreamDecoder {
           content: { type: "function_call", id, name, arguments: "" },
         });
       } else {
-        if (call.type !== undefined && call.type !== "function") {
+        if (call.type !== undefined && call.type !== null && call.type !== "function") {
           throw new Error("Chat stream tool call type changed");
         }
-        if (call.id !== undefined && call.id !== state.id) {
+        if (call.id !== undefined && call.id !== null && call.id !== state.id) {
           throw new Error("Chat stream tool call id changed");
         }
-        if (fn.name !== undefined && fn.name !== state.name) {
+        if (fn.name !== undefined && fn.name !== null && fn.name !== state.name) {
           throw new Error("Chat stream tool function name changed");
         }
       }

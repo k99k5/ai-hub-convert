@@ -9,6 +9,7 @@ export interface AppConfig {
     requestTimeoutMs: number;
     shutdownGraceMs: number;
     anthropicPingIntervalMs: number;
+    sseHeartbeatIntervalMs: number;
   };
   upstream: {
     baseUrl: URL;
@@ -71,6 +72,12 @@ export function loadConfig(environment: Environment = process.env): AppConfig {
         "ANTHROPIC_PING_INTERVAL_MS",
         15_000,
         { min: 1 },
+      ),
+      sseHeartbeatIntervalMs: parseInteger(
+        environment.SSE_HEARTBEAT_INTERVAL_MS,
+        "SSE_HEARTBEAT_INTERVAL_MS",
+        15_000,
+        { min: 0 },
       ),
     },
     upstream: {

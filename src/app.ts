@@ -329,7 +329,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             config.upstream.timeoutMs,
           );
           const removeActiveStream = activeStreams.add(abortScope);
-          const clientStream = new ClientSseSender(reply);
+          const clientStream = new ClientSseSender(reply, { signal: abortScope.signal });
           reply.sse.onClose(() => abortScope.abort(new Error("Client disconnected")));
           try {
             await streamAnthropicResponse(
@@ -381,6 +381,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             });
             return;
           } finally {
+            clientStream.dispose();
             removeActiveStream();
             abortScope.dispose();
           }
@@ -525,7 +526,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       "/v1/chat/completions",
       {
         schema: { body: OpenAIChatBodySchema },
-        sse: { kind: "manual", heartbeat: false },
+        sse: { kind: "manual" },
       },
       async (request, reply) => {
         let apiKey: string;
@@ -580,7 +581,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         }
 
         const removeActiveStream = activeStreams.add(abortScope);
-        const clientStream = new ClientSseSender(reply);
+        const clientStream = new ClientSseSender(reply, {
+          signal: abortScope.signal,
+          heartbeatIntervalMs: config.server.sseHeartbeatIntervalMs,
+        });
         reply.sse.onClose(() => abortScope.abort(new Error("客户端已断开连接")));
         const streamOptions = canonicalRequest.extensions?.request?.stream_options;
         const includeUsage =
@@ -638,6 +642,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           });
           return;
         } finally {
+          clientStream.dispose();
           removeActiveStream();
           abortScope.dispose();
         }
@@ -648,7 +653,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       "/v1/responses",
       {
         schema: { body: OpenAIResponsesBodySchema },
-        sse: { kind: "manual", heartbeat: false },
+        sse: { kind: "manual" },
       },
       async (request, reply) => {
         let apiKey: string;
@@ -740,7 +745,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             config.upstream.timeoutMs,
           );
           const removeActiveStream = activeStreams.add(abortScope);
-          const clientStream = new ClientSseSender(reply);
+          const clientStream = new ClientSseSender(reply, {
+            signal: abortScope.signal,
+            heartbeatIntervalMs: config.server.sseHeartbeatIntervalMs,
+          });
           reply.sse.onClose(() => abortScope.abort(new Error("Client disconnected")));
           try {
             await streamResponsesResponse(
@@ -782,6 +790,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             });
             return;
           } finally {
+            clientStream.dispose();
             removeActiveStream();
             abortScope.dispose();
           }

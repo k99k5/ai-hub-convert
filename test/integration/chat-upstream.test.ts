@@ -382,6 +382,106 @@ describe("默认强制 Chat 上游", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it.each([
+    "/v1/responses",
+    "/v1/chat/completions",
+    "/v1/messages",
+  ])("%s 接受工具续片中的 null 元数据并保留完整参数", async (url) => {
+    const deltas = [
+      {
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_nullable",
+            type: "function",
+            function: { name: "lookup", arguments: '{"q":' },
+          },
+        ],
+      },
+      {
+        tool_calls: [
+          { index: 0, id: null, type: null, function: { name: null, arguments: '"天气"}' } },
+        ],
+      },
+      { tool_calls: [{ index: 0, id: null, type: null, function: null }] },
+      {},
+    ];
+    const wire = deltas
+      .map(
+        (delta, index) =>
+          `data: ${JSON.stringify({
+            id: "chat_nullable",
+            model: "m",
+            choices: [{ index: 0, delta, finish_reason: index === 3 ? "tool_calls" : null }],
+          })}\n\n`,
+      )
+      .join("");
+    const { app, sent } = setup(
+      () =>
+        new Response(`${wire}data: [DONE]\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const result = await app.inject({
+      method: "POST",
+      url,
+      headers,
+      payload: {
+        model: "m",
+        stream: true,
+        ...(url === "/v1/responses"
+          ? { input: "问题" }
+          : { max_tokens: 64, messages: [{ role: "user", content: "问题" }] }),
+      },
+    });
+
+    expect(result.statusCode, result.body).toBe(200);
+    expect(result.body).not.toContain("event: error");
+    expect(result.body).not.toContain('"error":{');
+    expect(sent).toHaveLength(1);
+    if (url === "/v1/responses") {
+      const response = terminal(result.body, true);
+      expect(response).toMatchObject({
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            call_id: "call_nullable",
+            name: "lookup",
+            arguments: '{"q":"天气"}',
+          },
+        ],
+      });
+      const output = response.output as Wire[];
+      const followup = await app.inject({
+        method: "POST",
+        url,
+        headers,
+        payload: {
+          model: "m",
+          stream: true,
+          input: [{ type: "item_reference", id: output[0]?.id }],
+        },
+      });
+      expect(followup.statusCode).toBe(200);
+      expect(sent).toHaveLength(2);
+      expect(sent[1]?.body.messages).toMatchObject([
+        {
+          role: "assistant",
+          tool_calls: [
+            { id: "call_nullable", function: { name: "lookup", arguments: '{"q":"天气"}' } },
+          ],
+        },
+      ]);
+    } else if (url === "/v1/messages") {
+      expect(result.body).toContain('"stop_reason":"tool_use"');
+      expect(result.body).toContain("event: message_stop");
+    } else {
+      expect(result.body).toContain('"finish_reason":"tool_calls"');
+      expect(result.body).toContain("data: [DONE]");
+    }
+  });
+
   it("Chat 流在 DONE 后仍有错误时不发送成功终态，也不缓存已输出的项", async () => {
     const valid = await chatStream(answer()).text();
     const { app, sent } = setup(

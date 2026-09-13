@@ -13,6 +13,7 @@ describe("loadConfig", () => {
       host: "127.0.0.1",
       port: 3000,
       anthropicPingIntervalMs: 15_000,
+      sseHeartbeatIntervalMs: 15_000,
     });
     expect(config.claudeCode).toMatchObject({
       promptCacheBreakpointsEnabled: true,
@@ -96,6 +97,22 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...baseEnvironment, ANTHROPIC_PING_INTERVAL_MS: "0" })).toThrow(
       /ANTHROPIC_PING_INTERVAL_MS/,
     );
+  });
+
+  it("loads or disables OpenAI SSE heartbeats and rejects invalid intervals", () => {
+    expect(
+      loadConfig({ ...baseEnvironment, SSE_HEARTBEAT_INTERVAL_MS: "250" }).server
+        .sseHeartbeatIntervalMs,
+    ).toBe(250);
+    expect(
+      loadConfig({ ...baseEnvironment, SSE_HEARTBEAT_INTERVAL_MS: "0" }).server
+        .sseHeartbeatIntervalMs,
+    ).toBe(0);
+    for (const interval of ["-1", "1.5", "invalid"]) {
+      expect(() => loadConfig({ ...baseEnvironment, SSE_HEARTBEAT_INTERVAL_MS: interval })).toThrow(
+        /SSE_HEARTBEAT_INTERVAL_MS/,
+      );
+    }
   });
 
   it("rejects malformed booleans instead of using truthiness", () => {

@@ -75,6 +75,10 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 
 三个生成入口都支持 `stream:true`。Chat 使用标准 `data:` chunk 和 `[DONE]`；只有请求 `stream_options:{"include_usage":true}` 时才输出最终 usage chunk。四条 POST route 先做不改写 body 的浅层 wire schema 校验，再由 adapter 做精确语义校验；错误分别使用入口协议的固定 HTTP 400 外壳。超过 `BODY_LIMIT_BYTES` 时返回固定 HTTP 413，且不会回传 validation path 或请求内容。
 
+Responses 与 Chat 在首个下游事件发出后，默认每 15 秒发送 SSE 注释心跳 `: heartbeat`，用于维持思考、工具等待或上游仅发送心跳期间的连接；客户端应忽略注释。心跳间隔可用 `SSE_HEARTBEAT_INTERVAL_MS` 调整，应小于反向代理的空闲超时。心跳不延长上游首字节、空闲或请求总超时。
+
+下游写入阻塞时暂停心跳，恢复可写后继续；请求取消、响应结束或连接关闭时停止心跳。总超时或服务关闭会解除阻塞的写入并关闭连接；连接仍可写时，按入口协议发送流内错误。
+
 ## 用量与模型查询
 
 `GET /v1/usage` 和 `GET /v1/models` 接受 Bearer 或 `x-api-key`，统一转成上游 Bearer。查询参数、上游状态码和响应正文原样返回；额度单位、重置时间及模型列表以当前上游为准。完整行为见[读取接口透传契约](docs/compatibility.md#读取接口透传)。
@@ -125,6 +129,7 @@ Chat 模式不支持 `previous_response_id` 会话恢复、只有加密内容的
 | `UPSTREAM_TOOL_ARGUMENT_LIMIT_BYTES` | `1048576` | 单次工具参数流上限 |
 | `UPSTREAM_STREAM_TOOL_ARGUMENT_LIMIT_BYTES` | `8388608` | 单条响应中全部工具参数流上限 |
 | `ANTHROPIC_PING_INTERVAL_MS` | `15000` | Anthropic 命名 `event: ping` 间隔 |
+| `SSE_HEARTBEAT_INTERVAL_MS` | `15000` | Responses / Chat 的 SSE 注释心跳间隔；首个事件后启动，`0` 禁用 |
 | `SHUTDOWN_GRACE_MS` | `10000` | 优雅关闭期限 |
 | `CLAUDE_CODE_MIN_VERSION` | 空 | 接受范围的闭区间下界，例如 `2.1.63` |
 | `CLAUDE_CODE_MAX_VERSION` | 空 | 接受范围的闭区间上界，例如 `2.5.0` |
