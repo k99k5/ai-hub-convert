@@ -15,6 +15,17 @@ describe("loadConfig", () => {
       anthropicPingIntervalMs: 15_000,
       sseHeartbeatIntervalMs: 15_000,
     });
+    expect(config.websocket).toEqual({
+      pingIntervalMs: 30_000,
+      maxConnectionMs: 3_600_000,
+      maxPendingRequests: 64,
+      historyLimitBytes: 32 * 1024 * 1024,
+    });
+    expect(config.responsesHistory).toEqual({
+      ttlMs: 300_000,
+      maxCredentialBytes: 32 * 1024 * 1024,
+      maxBytes: 128 * 1024 * 1024,
+    });
     expect(config.claudeCode).toMatchObject({
       promptCacheBreakpointsEnabled: true,
       readToolCompatEnabled: true,
@@ -32,6 +43,21 @@ describe("loadConfig", () => {
       errorBodyLimitBytes: 64 * 1024,
     });
     expect(config.upstream.baseUrl.href).toBe("https://gateway.example.test/v1/");
+  });
+
+  it("validates WebSocket resource limits and optional heartbeats", () => {
+    expect(
+      loadConfig({ ...baseEnvironment, WEBSOCKET_PING_INTERVAL_MS: "0" }).websocket.pingIntervalMs,
+    ).toBe(0);
+    for (const [name, value] of [
+      ["WEBSOCKET_PING_INTERVAL_MS", "-1"],
+      ["WEBSOCKET_MAX_CONNECTION_MS", "0"],
+      ["WEBSOCKET_MAX_CONNECTION_MS", "3600001"],
+      ["WEBSOCKET_MAX_PENDING_REQUESTS", "1.5"],
+      ["WEBSOCKET_HISTORY_LIMIT_BYTES", "0"],
+    ] as const) {
+      expect(() => loadConfig({ ...baseEnvironment, [name]: value })).toThrow(name);
+    }
   });
 
   it("loads explicit stream limits", () => {
@@ -55,6 +81,26 @@ describe("loadConfig", () => {
       jsonBodyLimitBytes: 131072,
       errorBodyLimitBytes: 4096,
     });
+  });
+
+  it("configures HTTP Responses history retention and rejects invalid budgets", () => {
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        RESPONSES_HISTORY_TTL_MS: "60000",
+        RESPONSES_HISTORY_MAX_CREDENTIAL_BYTES: "4096",
+        RESPONSES_HISTORY_MAX_BYTES: "16384",
+      }).responsesHistory,
+    ).toEqual({ ttlMs: 60_000, maxCredentialBytes: 4096, maxBytes: 16384 });
+    for (const name of [
+      "RESPONSES_HISTORY_TTL_MS",
+      "RESPONSES_HISTORY_MAX_CREDENTIAL_BYTES",
+      "RESPONSES_HISTORY_MAX_BYTES",
+    ]) {
+      for (const value of ["0", "-1", "1.5", "invalid"]) {
+        expect(() => loadConfig({ ...baseEnvironment, [name]: value })).toThrow(name);
+      }
+    }
   });
 
   it("allows explicit Responses mode and rejects unknown upstream protocols", () => {

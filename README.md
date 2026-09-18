@@ -1,6 +1,6 @@
 # LLM Protocol Gateway
 
-一个不持久化数据的 OpenAI / Anthropic 协议转换网关。服务使用 TypeScript ESM、Fastify 5 和 Node.js 24，对外提供 Anthropic Messages、Anthropic token counting、OpenAI Responses 与 Chat Completions 接口；不使用数据库。为兼容 Chatbox 1.21.1 的 Responses 引用续轮，仅在进程内短期缓存成功的输出项，按调用凭据和请求模型隔离；不缓存请求 prompt 或整段历史，不保存 API key 原文。
+一个不持久化数据的 OpenAI / Anthropic 协议转换网关。服务使用 TypeScript ESM、Fastify 5 和 Node.js 24，对外提供 Anthropic Messages、Anthropic token counting、OpenAI Responses 与 Chat Completions 接口；不使用数据库。Responses 支持 HTTP JSON/SSE 和 WebSocket。HTTP 的 `previous_response_id` 续轮使用有容量上限的短期输入/输出历史缓存，`item_reference` 使用独立的输出项缓存，均按调用凭据和请求模型隔离；WebSocket 历史仅在连接内保留，断线即清理。凭据、prompt 和会话均不写磁盘。
 
 ## 路由
 
@@ -8,7 +8,8 @@
 | --- | --- | --- |
 | `POST /v1/messages` | `/v1/chat/completions` | 默认强制 Chat，转换回 Anthropic JSON/SSE，不探测 Responses、不回退 |
 | `POST /v1/messages/count_tokens` | 无 | 默认 Chat 模式返回 501；不通过生成请求或本地估算计数 |
-| `POST /v1/responses` | `/v1/chat/completions` | 默认强制 Chat，转换回 Responses JSON/SSE；保留工具、引用续轮和缓存统计 |
+| `POST /v1/responses` | `/v1/chat/completions` | 默认强制 Chat，转换回 Responses JSON/SSE；支持工具、`previous_response_id`、引用续轮和缓存统计 |
+| `GET /v1/responses`（WebSocket Upgrade） | `/v1/chat/completions` | 默认走 Chat HTTP/SSE，输出 Responses WS 事件；支持连接内增量续轮和并行流 |
 | `POST /v1/chat/completions` | `/v1/chat/completions` | 完整 decode → canonical IR → encode；直接请求 Chat，不回退或重试 |
 | `GET /v1/usage` | `/v1/usage` | 透传用量查询；字段含义由上游定义 |
 | `GET /v1/models` | `/v1/models` | 透传模型列表查询 |
@@ -100,9 +101,77 @@ curl 'http://127.0.0.1:3000/v1/models' -H 'authorization: Bearer YOUR_UPSTREAM_K
 
 Chatbox 1.21.1 回传的 `item_reference` 在网关内展开为完整输出项，再转换到所选上游协议，不要求上游支持引用。Chat 模式由网关生成 Responses 响应和输出项 ID，并把同一 assistant 轮次的推理、文本、并行工具调用合并后发送给 Chat。网关只缓存经过完整校验的成功输出项，固定保留 5 分钟，读取不续期；缓存有容量上限且不写磁盘。具体预算、凭据隔离和淘汰规则见[引用兼容契约](docs/compatibility.md#responses-引用缓存)。
 
-Chat 模式不支持 `previous_response_id` 会话恢复、只有加密内容的推理历史或图片 `detail:original`，这些请求在调用上游前返回 400；可使用完整历史、本地 `item_reference` 和图片 auto/low/high。`reasoning.effort` 转为 `reasoning_effort`，`text.format` 和 `text.verbosity` 转为 Chat 对应字段；加密推理输出及推理摘要的显示控制不作等价保证。完整边界见[强制 Chat 模式](docs/compatibility.md#强制-chat-模式默认)。
+Chat 模式中，只有加密内容的推理历史或图片 `detail:original` 在调用上游前返回 400；可使用明文历史、本地 `item_reference` 和图片 auto/low/high。`reasoning.effort` 转为 `reasoning_effort`，`text.format` 和 `text.verbosity` 转为 Chat 对应字段；加密推理输出及推理摘要的显示控制不作等价保证。完整边界见[强制 Chat 模式](docs/compatibility.md#强制-chat-模式默认)。
 
 引用缺失、过期、被淘汰、凭据或模型变化时，返回 OpenAI 格式 HTTP 400，错误码为 `reference_cache_miss`，不会静默丢弃历史。重启会清空缓存，旧引用失效后需要新建会话，或让客户端以 `store:false` 回传完整历史。依赖引用续轮时使用单实例部署，或在多实例部署中配置粘性路由；缓存不在实例间共享。该能力不新增配置、依赖或持久化设施，也不因出现引用自动启用上游存储。
+
+## Responses HTTP 增量续轮
+
+普通 `POST /v1/responses` 支持 `previous_response_id`，JSON 和 SSE 可以跨轮混用，两种上游模式均可使用。传入上一轮成功响应的 `id`，本轮 `input` 只发送新增内容；网关按相同凭据和模型查找完整历史，再转换到上游协议。`store:false` 也支持本地续轮。
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:3000/v1",
+  apiKey: process.env.OPENAI_API_KEY,
+});
+const first = await client.responses.create({
+  model: "vendor/model", input: "记住：我的名字是小明。", store: false,
+});
+const next = await client.responses.create({
+  model: "vendor/model", previous_response_id: first.id,
+  input: "我叫什么名字？", store: false,
+});
+console.log(next.output_text);
+```
+
+工具调用后，同样通过 `previous_response_id` 加本轮 `function_call_output` 续轮。每轮重新提供 `instructions`、工具定义和生成参数；这些顶层参数不从上一轮继承。省略 ID 或设为 `null` 开始新会话，也可从仍在缓存中的任意成功响应分叉。
+
+历史默认固定保留 5 分钟，读取不续期；每凭据最多 32 MiB / 128 条，全进程最多 128 MiB / 1024 条，超限 FIFO 淘汰。只有完整成功的响应写入历史，失败、取消和 incomplete 不写入；失败续轮不会删除仍有效的父响应。历史不写磁盘、不跨实例共享，重启会清空；多实例需要粘性路由。HTTP 历史和 WS 连接内历史独立，不能跨传输方式引用 ID。
+
+默认 Chat 模式中，ID 过期、未命中或凭据/模型不匹配时返回 HTTP 400 `previous_response_not_found`；省略 ID 并回传完整历史即可继续。显式 Responses 上游模式在本地未命中时保留原有 ID 透传能力，由上游判断是否可用；这类响应不会作为完整历史缓存在本地。展开后超过 `BODY_LIMIT_BYTES` 返回 HTTP 413。容量、清理和存储语义见[HTTP 续轮契约](docs/compatibility.md#responses-http-历史缓存)。
+
+## Responses WebSocket
+
+连接 `ws://127.0.0.1:3000/v1/responses`，握手时携带 `Authorization: Bearer YOUR_UPSTREAM_KEY`。部署在 TLS 反向代理后使用 `wss://`，并让代理转发 WebSocket Upgrade。上游仍使用现有 HTTP/SSE，无需支持 WebSocket；`UPSTREAM_PROTOCOL=responses` 时改走上游 Responses HTTP/SSE。
+
+Node.js 示例（使用项目的 `ws` 依赖）：
+
+```js
+import WebSocket from "ws";
+
+const ws = new WebSocket("ws://127.0.0.1:3000/v1/responses", {
+  headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+});
+let continued = false;
+ws.on("open", () => ws.send(JSON.stringify({
+  type: "response.create", model: "vendor/model", input: "你好", store: false,
+})));
+ws.on("message", (data) => {
+  const event = JSON.parse(data.toString());
+  if (event.type === "response.output_text.delta") process.stdout.write(event.delta);
+  if (event.type === "error") { console.error(event.error); ws.close(); }
+  if (event.type === "response.incomplete") ws.close();
+  if (event.type === "response.completed") {
+    if (continued) return ws.close();
+    continued = true;
+    ws.send(JSON.stringify({
+      type: "response.create", model: "vendor/model",
+      previous_response_id: event.response.id, input: "继续", store: false,
+    }));
+  }
+});
+ws.on("error", console.error);
+```
+
+每条客户端消息是一个 `response.create` JSON 对象；不传 HTTP 的 `stream`、`background` 字段。服务器按消息发送 `response.*` JSON 事件，没有 SSE 的 `event:` / `data:` 包装或 `[DONE]`。工具结果通过下一条请求的 `input` 中的 `function_call_output` 回传；`instructions`、工具定义和其他生成参数每轮重新提供。
+
+省略 `stream_id` 使用默认流；指定后，同名流按顺序执行，不同流可以并发，返回事件附带对应 `stream_id`。每个连接最多 32 个命名流。`previous_response_id` 可引用本连接同一模型的最近成功响应，也可从另一个流分叉；省略或设为 `null` 开始新会话。`generate:false` 只在本地准备输入上下文并返回空输出的响应 ID，不调用或预热上游模型。
+
+每个流只保留最新成功响应的完整输入/输出历史；连接内总容量默认 32 MiB，超限按写入顺序淘汰，单条超限则不缓存，但仍完整返回生成结果。缺失、淘汰、模型不匹配或重连后的旧 ID 返回 `previous_response_not_found`，需要省略 ID 并发送完整历史。失败与 incomplete 响应不缓存；失败的同流续轮使其父 ID 失效，跨流失败不移除来源流的父 ID。
+
+WS 始终向上游发送 `store:false`，不提供跨连接或持久化恢复。默认每 30 秒发送 ping，未收到下一周期的 pong 则断开；连接最长 60 分钟。断线、到期或服务关闭会取消该连接所有上游请求并清理历史。具体限制及错误见[WebSocket 兼容契约](docs/compatibility.md#responses-websocket)。
 
 ## 配置
 
@@ -130,6 +199,13 @@ Chat 模式不支持 `previous_response_id` 会话恢复、只有加密内容的
 | `UPSTREAM_STREAM_TOOL_ARGUMENT_LIMIT_BYTES` | `8388608` | 单条响应中全部工具参数流上限 |
 | `ANTHROPIC_PING_INTERVAL_MS` | `15000` | Anthropic 命名 `event: ping` 间隔 |
 | `SSE_HEARTBEAT_INTERVAL_MS` | `15000` | Responses / Chat 的 SSE 注释心跳间隔；首个事件后启动，`0` 禁用 |
+| `WEBSOCKET_PING_INTERVAL_MS` | `30000` | WS ping/pong 心跳间隔，`0` 禁用 |
+| `WEBSOCKET_MAX_CONNECTION_MS` | `3600000` | WS 连接寿命，范围 1–3600000 ms |
+| `WEBSOCKET_MAX_PENDING_REQUESTS` | `64` | 每个连接执行中与排队请求的总数上限；这些请求的原始消息总字节数还受 `BODY_LIMIT_BYTES` 限制 |
+| `WEBSOCKET_HISTORY_LIMIT_BYTES` | `33554432` | 每个 WS 连接保留的全部流历史的 JSON 字节预算 |
+| `RESPONSES_HISTORY_TTL_MS` | `300000` | HTTP Responses 历史固定有效期，单位 ms，必须大于 0 |
+| `RESPONSES_HISTORY_MAX_CREDENTIAL_BYTES` | `33554432` | HTTP 历史每凭据字节预算，各模型共用；最多 128 条 |
+| `RESPONSES_HISTORY_MAX_BYTES` | `134217728` | HTTP 历史全进程字节预算；最多 1024 条，单条另受 `BODY_LIMIT_BYTES` 限制 |
 | `SHUTDOWN_GRACE_MS` | `10000` | 优雅关闭期限 |
 | `CLAUDE_CODE_MIN_VERSION` | 空 | 接受范围的闭区间下界，例如 `2.1.63` |
 | `CLAUDE_CODE_MAX_VERSION` | 空 | 接受范围的闭区间上界，例如 `2.5.0` |
@@ -220,7 +296,7 @@ HTTP 上游必须显式启用 `ALLOW_INSECURE_UPSTREAM`；使用 HTTPS 时应填
 docker compose down
 ```
 
-Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖；重建或重启会清空 Responses 引用缓存。它会复用镜像内置的 `/health/ready` healthcheck；该检查确认网关进程可接受请求，不代表上游服务连通。
+Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖；重建或重启会清空 Responses 引用和历史缓存。它会复用镜像内置的 `/health/ready` healthcheck；该检查确认网关进程可接受请求，不代表上游服务连通。
 
 镜像使用 Node 24 多阶段构建、固定 pnpm 10.6.3，只携带 production dependencies，并以非 root `node` 用户运行。镜像内置 `/health/ready` healthcheck。
 
@@ -248,7 +324,7 @@ Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖
 - 禁止SDK自动重试，避免重复计费或重复工具执行。
 - body、工具参数、流缓冲和超时必须有上限。
 - client disconnect应传播AbortSignal。
-- 不持久化凭据、prompt、会话或响应；Responses 成功输出项仅在有容量上限的进程内缓存中短期保留，不缓存请求 prompt、整段历史或 API key 原文。
+- 不持久化凭据、prompt、会话或响应；Responses 引用与 HTTP 历史使用有容量上限的短期缓存，WS 另在连接内暂存历史，断线清理。调用凭据仅在处理请求或维持 WS 连接时使用，缓存键只保存凭据的 HMAC 散列。
 
 ## 设计依据
 

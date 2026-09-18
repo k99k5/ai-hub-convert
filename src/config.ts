@@ -11,6 +11,17 @@ export interface AppConfig {
     anthropicPingIntervalMs: number;
     sseHeartbeatIntervalMs: number;
   };
+  websocket: {
+    pingIntervalMs: number;
+    maxConnectionMs: number;
+    maxPendingRequests: number;
+    historyLimitBytes: number;
+  };
+  responsesHistory: {
+    ttlMs: number;
+    maxCredentialBytes: number;
+    maxBytes: number;
+  };
   upstream: {
     baseUrl: URL;
     protocol: "chat" | "responses";
@@ -78,6 +89,52 @@ export function loadConfig(environment: Environment = process.env): AppConfig {
         "SSE_HEARTBEAT_INTERVAL_MS",
         15_000,
         { min: 0 },
+      ),
+    },
+    websocket: {
+      pingIntervalMs: parseInteger(
+        environment.WEBSOCKET_PING_INTERVAL_MS,
+        "WEBSOCKET_PING_INTERVAL_MS",
+        30_000,
+        { min: 0 },
+      ),
+      maxConnectionMs: parseInteger(
+        environment.WEBSOCKET_MAX_CONNECTION_MS,
+        "WEBSOCKET_MAX_CONNECTION_MS",
+        60 * 60_000,
+        { min: 1, max: 60 * 60_000 },
+      ),
+      maxPendingRequests: parseInteger(
+        environment.WEBSOCKET_MAX_PENDING_REQUESTS,
+        "WEBSOCKET_MAX_PENDING_REQUESTS",
+        64,
+        { min: 1 },
+      ),
+      historyLimitBytes: parseInteger(
+        environment.WEBSOCKET_HISTORY_LIMIT_BYTES,
+        "WEBSOCKET_HISTORY_LIMIT_BYTES",
+        32 * 1024 * 1024,
+        { min: 1 },
+      ),
+    },
+    responsesHistory: {
+      ttlMs: parseInteger(
+        environment.RESPONSES_HISTORY_TTL_MS,
+        "RESPONSES_HISTORY_TTL_MS",
+        300_000,
+        { min: 1 },
+      ),
+      maxCredentialBytes: parseInteger(
+        environment.RESPONSES_HISTORY_MAX_CREDENTIAL_BYTES,
+        "RESPONSES_HISTORY_MAX_CREDENTIAL_BYTES",
+        32 * 1024 * 1024,
+        { min: 1 },
+      ),
+      maxBytes: parseInteger(
+        environment.RESPONSES_HISTORY_MAX_BYTES,
+        "RESPONSES_HISTORY_MAX_BYTES",
+        128 * 1024 * 1024,
+        { min: 1 },
       ),
     },
     upstream: {

@@ -26,9 +26,11 @@ import {
   OpenAIResponsesBodySchema,
 } from "./http/schemas.js";
 import { ClientSseSender } from "./http/sse.js";
+import { registerResponsesWebSocket } from "./http/responses-websocket.js";
 import { mapUpstreamError } from "./http/upstream-errors.js";
 import { normalizeReadToolArguments } from "./policies/read-tool.js";
 import { ResponsesReferenceCache } from "./policies/responses-reference-cache.js";
+import { ResponsesHistoryCache } from "./policies/responses-history-cache.js";
 import { finalizeThinkingBlock } from "./policies/thinking-signature.js";
 import {
   assertWebSearchSupported,
@@ -57,12 +59,15 @@ import { encodeChatRequest } from "./protocols/openai-chat/encode.js";
 import { decodeChatRequest } from "./protocols/openai-chat/request-decode.js";
 import { encodeChatResponse } from "./protocols/openai-chat/response-encode.js";
 import { ChatStreamEncoder } from "./protocols/openai-chat/stream-encode.js";
-import { decodeResponsesRequest } from "./protocols/openai-responses/request-decode.js";
+import {
+  prepareResponsesRequest,
+  ResponsesContinuationError,
+  type PreparedResponsesRequest,
+} from "./protocols/openai-responses/prepare.js";
 import { encodeResponsesResponse } from "./protocols/openai-responses/response-encode.js";
 import {
   chatEventForResponses,
   encodeChatAsResponses,
-  encodeResponsesChatRequest,
 } from "./protocols/openai-responses/chat-bridge.js";
 import {
   addResponsesWebSearch,
@@ -178,8 +183,15 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   });
   const activeStreams = new ActiveStreamRegistry();
   const referenceCache = new ResponsesReferenceCache();
-  const referenceCleanup = setInterval(() => referenceCache.prune(), 30_000);
-  referenceCleanup.unref();
+  const historyCache = new ResponsesHistoryCache({
+    ...config.responsesHistory,
+    maxEntryBytes: config.server.bodyLimitBytes,
+  });
+  const cacheCleanup = setInterval(() => {
+    referenceCache.prune();
+    historyCache.prune();
+  }, 30_000);
+  cacheCleanup.unref();
   const webSearchProviders = createDefaultWebSearchRegistry(options.webSearchProvider);
   const app = Fastify({
     ajv: { customOptions: { coerceTypes: false, removeAdditional: false } },
@@ -199,12 +211,42 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     activeStreams.abortAll();
   });
   app.addHook("onClose", async () => {
-    clearInterval(referenceCleanup);
+    clearInterval(cacheCleanup);
     referenceCache.clear();
+    historyCache.clear();
   });
-  app.register(registerHealthRoutes);
   app.register(async (api) => {
     await api.register(fastifySSE, { heartbeatInterval: 0 });
+    await registerResponsesWebSocket(api, {
+      config,
+      activeStreams,
+      prepare: (value, apiKey) => {
+        const prepared = prepareResponsesRequest(value, apiKey, config, referenceCache);
+        assertWebSearchSupported(prepared.request, webSearchProviders);
+        return prepared;
+      },
+      run: (prepared, apiKey, scope, send) =>
+        streamResponsesResponse(
+          upstream,
+          prepared.request,
+          apiKey,
+          scope.signal,
+          toolArgumentLimits(config),
+          outputLimits(config),
+          {
+            firstByteTimeoutMs: config.upstream.firstByteTimeoutMs,
+            idleTimeoutMs: config.upstream.streamIdleTimeoutMs,
+            maxFrameBytes: config.upstream.sseFrameLimitBytes,
+            onTimeout: (error) => scope.abort(error),
+          },
+          send,
+          (response) =>
+            referenceCache.remember(apiKey, prepared.request.model, response.output as unknown[]),
+          config.upstream.protocol,
+          prepared.body,
+        ),
+    });
+    api.register(registerHealthRoutes);
     api.setErrorHandler((error, request, reply) => {
       const protocol = routeProtocol(request.url.split("?", 1)[0] ?? request.url);
       const boundaryError = isBoundaryError(error) ? error : undefined;
@@ -659,42 +701,18 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         let apiKey: string;
         let canonicalRequest: CanonicalRequest;
         let upstreamBody: unknown;
+        let prepared: PreparedResponsesRequest;
         try {
           apiKey = extractResponsesApiKey(request.headers);
-          canonicalRequest = decodeResponsesRequest(request.body);
-          if (canonicalRequest.messages.some((message) => message.itemReference !== undefined)) {
-            let expandedBytes = Buffer.byteLength(JSON.stringify(request.body));
-            canonicalRequest.messages = canonicalRequest.messages.flatMap((message) => {
-              const reference = message.itemReference;
-              if (reference === undefined) return [message];
-              const item = referenceCache.resolve(apiKey, canonicalRequest.model, reference.id);
-              if (item === undefined) {
-                throw new OpenAIAdapterError(
-                  "REFERENCE_CACHE_MISS",
-                  "引用缓存已过期或不可用，请新建会话或发送完整历史内容",
-                );
-              }
-              expandedBytes +=
-                Buffer.byteLength(JSON.stringify(item)) -
-                Buffer.byteLength(JSON.stringify({ type: "item_reference", id: reference.id }));
-              if (expandedBytes > config.server.bodyLimitBytes) {
-                throw new OpenAIAdapterError(
-                  "INVALID_OPENAI_RESPONSES_REQUEST",
-                  "展开引用后的请求超过请求体大小限制",
-                );
-              }
-              return decodeResponsesRequest({ model: canonicalRequest.model, input: [item] })
-                .messages;
-            });
-          }
-          upstreamBody =
-            config.upstream.protocol === "chat"
-              ? encodeResponsesChatRequest(canonicalRequest)
-              : encodeResponsesRequest(canonicalRequest, {
-                  store: false,
-                  replaySourceExtensions: true,
-                  promptCache: GENERIC_PROMPT_CACHE_CAPABILITIES.responses,
-                });
+          prepared = prepareResponsesRequest(
+            request.body,
+            apiKey,
+            config,
+            referenceCache,
+            historyCache,
+          );
+          canonicalRequest = prepared.request;
+          upstreamBody = prepared.body;
         } catch (error) {
           if (error instanceof AuthenticationError) {
             return reply.code(401).send({
@@ -702,6 +720,17 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
                 message: error.message,
                 type: "authentication_error",
                 code: "invalid_api_key",
+              },
+              request_id: request.id,
+            });
+          }
+          if (error instanceof ResponsesContinuationError) {
+            return reply.code(error.status).send({
+              error: {
+                type: "invalid_request_error",
+                code: error.code,
+                message: error.message,
+                param: error.param,
               },
               request_id: request.id,
             });
@@ -738,6 +767,17 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           throw error;
         }
 
+        const rememberResponse = (response: Record<string, unknown>) => {
+          const output = response.output as unknown[];
+          referenceCache.remember(apiKey, canonicalRequest.model, output);
+          if (prepared.historyComplete) {
+            historyCache.remember(apiKey, canonicalRequest.model, response.id as string, [
+              ...prepared.input,
+              ...output,
+            ]);
+          }
+        };
+
         if (canonicalRequest.stream) {
           const abortScope = createRequestAbortScope(
             request.raw,
@@ -765,7 +805,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
                 onTimeout: (error) => abortScope.abort(error),
               },
               clientStream.send,
-              (output) => referenceCache.remember(apiKey, canonicalRequest.model, output),
+              rememberResponse,
               config.upstream.protocol,
               upstreamBody,
             );
@@ -824,8 +864,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             includeWebSearchSources(canonicalRequest),
             outputLimits(config),
           );
+          abortScope.signal.throwIfAborted();
           if (response.status === "completed" && Array.isArray(response.output)) {
-            referenceCache.remember(apiKey, canonicalRequest.model, response.output);
+            rememberResponse(response);
           }
           return reply.send(response);
         } catch (error) {
@@ -850,7 +891,7 @@ async function streamResponsesResponse(
   streamOutputLimits: StreamOutputLimits,
   timeoutOptions: StreamTimeoutOptions,
   send: (frame: ResponsesSseFrame | string) => Promise<void>,
-  remember: (output: readonly unknown[]) => void,
+  remember: (response: Record<string, unknown>) => void,
   protocol: AppConfig["upstream"]["protocol"],
   body: unknown,
 ): Promise<void> {
@@ -884,8 +925,7 @@ async function streamResponsesResponse(
   if (terminal === undefined) throw new Error("Responses 流缺少有效终态");
   signal.throwIfAborted();
   const response = terminal.data.response as Record<string, unknown>;
-  if (terminal.event === "response.completed" && Array.isArray(response.output))
-    remember(response.output);
+  if (terminal.event === "response.completed" && Array.isArray(response.output)) remember(response);
   await send(terminal);
   await send("[DONE]");
 }

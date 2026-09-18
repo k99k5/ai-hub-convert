@@ -5,13 +5,14 @@
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`
 - `POST /v1/responses`
+- `GET /v1/responses`（WebSocket Upgrade）
 - `POST /v1/chat/completions`
 - `GET /v1/usage`
 - `GET /v1/models`
 - `GET /health/live`
 - `GET /health/ready`
 
-网关不持久化凭据、prompt、会话、conversation、response 或 token-count 结果。唯一的跨请求内存状态是用于 Responses 引用续轮的短期输出项缓存；不缓存请求 prompt、整段历史或 API key 原文。
+网关不持久化凭据、prompt、会话、conversation、response 或 token-count 结果。Responses 引用续轮使用短期输出项缓存，HTTP `previous_response_id` 使用独立的有界短期历史缓存；WS 历史另在连接内保留，断线即清理。缓存键只保存凭据的 HMAC 散列，WS 仅在存活连接处理上游请求时保留握手凭据。
 
 ## 路由与回退
 
@@ -20,6 +21,7 @@
 | Anthropic Messages JSON/SSE | 直接 Chat，不回退或重试 | Responses；仅明确 endpoint 不存在且零语义事件、零客户端写入时回退 Chat |
 | Anthropic count_tokens | HTTP 501，不调用上游 | Responses input_tokens；永不回退 |
 | OpenAI Responses JSON/SSE | 直接 Chat，不回退或重试 | Responses；永不回退 |
+| OpenAI Responses WebSocket | 连接内续轮展开后走 Chat HTTP/SSE | 连接内续轮展开后走 Responses HTTP/SSE |
 | OpenAI Chat Completions JSON/SSE | 直接 Chat，不回退或重试 | 直接 Chat，不回退或重试 |
 
 `UPSTREAM_PROTOCOL` 只接受 `chat`（默认）或 `responses`。Chat 模式不探测 Responses，所有失败直接结束该请求；内置搜索所需的模型续轮仍全部使用 Chat。Responses 模式中的明确 endpoint 不存在仅包括 HTTP 405、501，或携带 `route_not_found`、`endpoint_not_found`、`unsupported_endpoint`、`not_implemented` 的 HTTP 404。认证、限流、服务端错误、timeout/disconnect、model missing、模糊 404、HTTP 200 后 malformed SSE 都不会触发回退。
@@ -35,8 +37,8 @@
 | `reasoning.effort` | 映射到 `reasoning_effort`；保留 none/minimal/low/medium/high/xhigh/max/null，模型支持范围由上游判断 |
 | `text.format` / `text.verbosity` | 映射到 `response_format` / `verbosity`；JSON Schema 名称、描述、strict 和 schema 保留 |
 | 推理内容 | Chat `reasoning_content` 转为 Responses 明文 summary；不生成加密内容，不承诺 summary 等显示控制。`include` 中的加密推理选项不发给 Chat；只有 encrypted_content、无明文 summary 的历史返回 400 |
-| `store` / `metadata` | 映射到 Chat 同名字段，store 缺省 false；不提供 Responses 存储检索或会话恢复 |
-| `previous_response_id` | 非 null 时返回 400，必须发送完整历史或使用本地 `item_reference` |
+| `store` / `metadata` | HTTP 映射到 Chat 同名字段，store 缺省 false；本地续轮不依赖 store，不提供 Responses 存储检索 API；WS 强制 store:false |
+| `previous_response_id` | HTTP 展开同凭据、同模型的缓存历史；WS 展开本连接同模型的最近成功响应。未命中返回 `previous_response_not_found`，客户端可发送完整历史 |
 | JSON/SSE 输出 | 网关生成独立响应及输出项 ID；文本、推理、工具、拒绝、截断状态转换回 Responses，流式终态完整校验后才发送 |
 | 缓存和推理用量 | Chat prompt_tokens_details.cached_tokens/cache_write_tokens 转为 Responses input_tokens_details；reasoning_tokens 保留，缺失字段不补零 |
 | 网页搜索 | 保留网关 provider 执行、搜索进度、来源、引用及累计用量，模型轮次全部走 Chat |
@@ -91,7 +93,7 @@ Anthropic `tool_result.is_error:true` 在 Responses 和 Chat 上游的结果正�
 
 为兼容 Chatbox 1.21.1，Responses 入口在两种上游模式都接受显式 `{type:"item_reference", id:"非空字符串"}`，仅允许这两个字段。网关按输入顺序从本地缓存展开完整输出项，再由 decoder → canonical IR → 所选上游 encoder 处理；不把 `item_reference` 透传给上游，不要求上游能够解析引用。Messages 和 Chat 入口不接受引用，计数路径也不展开引用。
 
-只缓存成功 Responses 响应的输出项。JSON 响应和 SSE 流均须完整校验成功后才写入；失败、截断或未完成的响应不写入。不缓存请求 prompt、整段历史或 token-count 结果，不提供 `previous_response_id` 会话重建。网关默认 `store:false`；调用方显式 `store:true | false | null` 保持原值，引用缓存不依赖该参数，也不自动开启上游存储。
+此引用缓存只保存成功 Responses 响应的输出项。JSON 响应和流式响应均须完整校验成功后才写入；失败、截断或未完成的响应不写入。它不缓存请求 prompt、整段历史或 token-count 结果；HTTP `previous_response_id` 和 WS 历史由后两节的独立机制维护。引用缓存不依赖 `store` 参数，也不自动开启上游存储；WS 始终向上游发送 `store:false`。
 
 | 约束 | 行为 |
 | --- | --- |
@@ -109,6 +111,59 @@ Anthropic `tool_result.is_error:true` 在 Responses 和 Chat 上游的结果正�
 引用未命中、过期、淘汰、重启后失效、跨凭据或跨模型读取，以及同 ID 冲突，均在调用上游前返回 OpenAI 格式 HTTP 400，错误码为 `reference_cache_miss`。不丢弃该历史项，不把未命中引用发给上游，也不回退或重试。
 
 依赖引用的客户端应连接单实例，或在多实例部署中保持粘性路由；不同进程不共享缓存。重启后需要新建会话，或由客户端使用 `store:false` 回传完整历史。完整历史路径不依赖引用缓存。回滚无需数据迁移，但恢复旧版本或重启后不能继续使用旧的内存引用。
+
+### Responses HTTP 历史缓存
+
+`POST /v1/responses` 在两种上游模式中均支持本地 `previous_response_id` 续轮。JSON 和 SSE 共用历史缓存。命中时，按「上一轮完整输入 + 成功输出 + 本轮新增输入」重建请求，展开 `item_reference` 后走原有 decoder/encoder；不向上游传递已经本地解析的 ID。每条历史都是独立的完整快照，祖先过期或被淘汰不会截断仍存活的后代历史。
+
+| 约束 | 行为 |
+| --- | --- |
+| 隔离 | 每个应用固定一个上游，按凭据 HMAC 散列、请求模型和响应 ID 隔离；不保存 API key 原文 |
+| 写入 | 仅完整校验成功且状态为 completed 的响应；失败、取消、截断和 incomplete 不写入 |
+| 有效期 | `RESPONSES_HISTORY_TTL_MS`，默认固定 5 分钟；读取或相同内容重复写入不续期 |
+| 单条预算 | 序列化完整输入/输出加固定元数据开销，不超过 `BODY_LIMIT_BYTES` |
+| 每凭据预算 | `RESPONSES_HISTORY_MAX_CREDENTIAL_BYTES`，默认 32 MiB、最多 128 条，各模型共用 |
+| 全进程预算 | `RESPONSES_HISTORY_MAX_BYTES`，默认 128 MiB、最多 1024 条 |
+| 淘汰 | FIFO；单条超限跳过缓存，但仍完整返回生成结果；计费和 usage 不变 |
+| 冲突 | 同范围同 ID 的不同历史使该 ID 本地不可解析；冲突标记受原有效期及容量限制 |
+| 续轮参数 | 仅继承输入/输出；顶层 instructions、工具定义、采样和其他参数每轮提供；input 中的 system/developer 消息属于历史 |
+| 分叉/失败 | 可从任意仍有效的父响应分叉；成功或失败续轮不主动淘汰父响应，容量/TTL 淘汰仍生效 |
+| store | 保留 HTTP 既有语义，缺省 false，显式 true/false/null 继续转发；本地缓存独立于上游存储，store:false 也缓存 |
+| 清理 | 每 30 秒主动清理，读取/写入同样检查过期；计时器不阻止退出，应用关闭清空 |
+| 传输边界 | HTTP 和 WS 历史不互通；item_reference 的输出项缓存仍共用 |
+
+Chat 模式本地未命中时，在上游调用前返回 HTTP 400，`error.code=previous_response_not_found`、`error.param=previous_response_id`；不静默丢弃上下文。Responses 模式保留原生续轮兼容：本地未命中时，原样向上游发送 ID 和本轮输入，由上游验证凭据和历史；这类请求的祖先内容未知，因此其响应不会写入本地完整历史缓存。无额外探测或重试。
+
+展开历史后的请求仍受 `BODY_LIMIT_BYTES` 限制，超限返回 HTTP 413 `request_too_large`；引用展开继续使用原有大小限制。省略或设置 `previous_response_id:null` 表示不引用历史。历史缓存不写磁盘、不跨实例共享；重启后本地 ID 失效，多实例需要粘性路由，或由客户端回传完整历史。字节预算是序列化内容和元数据的记账上限，不是进程 RSS 上限。此功能不提供 GET response、删除 response、conversation 或后台任务 API。
+
+本地验证：`pnpm exec vitest run test/unit/responses-history-cache.test.ts test/integration/responses-previous-response.test.ts`，覆盖 JSON/SSE 交叉续轮、SDK、工具、凭据/模型隔离、容量和过期、分叉、失败及原生上游 ID 透传。
+
+### Responses WebSocket
+
+`GET /v1/responses` 接受 WebSocket Upgrade，握手前验证 Bearer 格式；缺失或格式错误返回 HTTP 401。普通 GET 返回 426。API key 是否被上游接受仍由上游决定。客户端使用 JSON 文本帧发送 `response.create`，服务器每帧返回一个 Responses JSON 事件；不发送 SSE 包装或 `[DONE]`。复用 HTTP 的严格参数解码、引用展开、工具/搜索处理、流校验和输出预算。
+
+| 能力/约束 | 行为 |
+| --- | --- |
+| 上游传输 | 依据 `UPSTREAM_PROTOCOL` 使用 Chat 或 Responses HTTP/SSE，始终 `store:false`；不连接上游 WS |
+| 增量续轮 | `previous_response_id` 在当前连接内、按模型查找成功响应；展开为完整历史后调用上游，不透传 ID |
+| 续轮参数 | 只继承输入/输出上下文；`instructions`、工具定义、采样等生成参数每轮重传 |
+| 本地预备 | `generate:false` 返回空输出的成功响应和 ID，供续轮引用，不调用上游，不宣称模型预热 |
+| 多路并发 | `stream_id` 为 1–256 个 ASCII 字母、数字、`_`、`-`、`.`；最多 32 个命名流，另有默认流。同名 FIFO，不同名可并发 |
+| 事件归属 | 命名流所有事件及请求错误带 `stream_id`，默认流省略；各响应的 `sequence_number` 独立递增 |
+| 分叉 | 可从另一流仍缓存的同模型成功响应分叉；分叉开始前来源流若已推进并淘汰父响应，返回 `previous_response_not_found` |
+| 历史容量 | 每流仅最新成功响应，全部流合计由 `WEBSOCKET_HISTORY_LIMIT_BYTES` 限制，默认 32 MiB；FIFO 淘汰，单条超限跳过缓存，不截断输出 |
+| 失败 | 请求错误不关闭连接；失败/未完成输出不写历史。失败的同流续轮淘汰其父 ID，跨流失败保留来源流父 ID |
+| 请求预算 | 单条 wire 消息和展开后的请求受 `BODY_LIMIT_BYTES` 限制；待处理请求的原始消息总大小也受此预算限制，数量受 `WEBSOCKET_MAX_PENDING_REQUESTS` 限制（默认 64，含执行中） |
+| 流控 | 等待 WS 写入回调后读取下一上游事件；所有流的待发送字节数上限为 `UPSTREAM_STREAM_OUTPUT_LIMIT_BYTES + UPSTREAM_SSE_FRAME_LIMIT_BYTES`，超限断开并取消上游 |
+| 心跳/寿命 | `WEBSOCKET_PING_INTERVAL_MS` 默认 30 秒，下周期未收到 pong 则终止；`WEBSOCKET_MAX_CONNECTION_MS` 默认且最多 60 分钟 |
+| 取消/清理 | 断线、到期、心跳失败、服务关闭取消全部上游请求，清空连接历史。单次生成仍遵守上游总超时、首字节与空闲超时 |
+| 恢复 | 不提供跨连接存储回退；重连或缓存 miss 后省略 ID/设 `null` 并发送完整输入上下文 |
+
+错误使用 `{type:"error", status, error:{type, code, message, param?}, stream_id?}`。非法 JSON 为 `invalid_json`；未知事件、`stream` / `background` 等无效请求为 `invalid_request`；历史不可用为 `previous_response_not_found`；队列超限为 429 `websocket_queue_full`；流数量超限为 `websocket_stream_limit_reached`；连接到期为 `websocket_connection_limit_reached`。wire 消息过大以 WS 1009 关闭，展开后过大返回 413 `request_too_large`。上游错误继续清洗，不回传私有上游消息、密钥或 prompt。
+
+支持范围是本项目已有 Responses 内容/工具子集的 WebSocket 传输，以及上述续轮和并发功能。仅接受 `response.create`，不实现 Realtime、`response.cancel`、mid-turn steering、inject、服务器 compaction 或后台任务。`generate:false` 只预备输入历史，下一轮仍须提供模型与生成参数。
+
+本地验证：`pnpm exec vitest run test/integration/responses-websocket.test.ts`，测试使用真实本地 WS 握手和消息、可控的上游 HTTP/SSE，不需要真实 API key。
 
 ## Web Search discriminator
 
@@ -146,7 +201,7 @@ Anthropic `user_location` 的 city、country、region、timezone 字符串进入
 
 来源与引用分别处理：来源列出实际搜索结果，`url_citation` 仅添加到答案里实际出现的匹配 URL 或 Markdown 链接；未引用的来源不生成注解，已有上游引用保留且不重复添加。流式链接可以跨 delta，到文本结束时生成完整引用。新增搜索项、来源及引用复用输出限额；各模型轮次的 usage 继续累计。
 
-完整历史多轮支持把 JSON 或 SSE 终态的 `output` 回传到 `input`；本地引用命中后也进入同一历史解码路径。合法 `web_search_call` 的搜索、打开页面和页内查找记录会转为历史文本，保留动作、状态、查询及可用 URL；不重新搜索，不把网关生成的调用 ID 发给上游。仅支持历史动作回传，不新增实时打开页面或页内查找能力。此路径不会重建未回传且未命中缓存的摘要，也不把 `previous_response_id` 变成网关搜索会话存储；需要不受缓存有效期限制的搜索上下文时应回传完整历史输出。
+完整历史多轮支持把 JSON 或 SSE 终态的 `output` 回传到 `input`；本地引用或 previous_response_id 命中后也进入同一历史解码路径。合法 `web_search_call` 的搜索、打开页面和页内查找记录会转为历史文本，保留动作、状态、查询及可用 URL；不重新搜索，不把网关生成的调用 ID 发给上游。仅支持历史动作回传，不新增实时打开页面或页内查找能力。此路径不会重建未回传且未命中缓存的摘要，不提供持久化搜索会话；需要不受缓存有效期限制的搜索上下文时应回传完整历史输出。
 
 既有 DuckDuckGo 降级行为保持不变：请求失败、限流或无结果均作为空结果回填，`completed` 表示搜索尝试结束，不保证结果非空；调用方取消则终止请求。上游在同一轮混合内部搜索和需要客户端执行的函数仍会拒绝，防止缺少函数结果时继续调用模型。
 
