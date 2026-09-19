@@ -36,6 +36,29 @@ function setup() {
 
 describe("Responses 请求错误处理", () => {
   it.each([
+    "private-client",
+    ["private-client"],
+    true,
+    123,
+  ])("拒绝非法 client_metadata 且不访问上游或泄露内容：%j", async (client_metadata) => {
+    const { app, logs, upstreamFetch } = setup();
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: { authorization: "Bearer private-key" },
+      payload: { model: "model-test", input: "private-prompt", client_metadata },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toMatchObject({
+      type: "invalid_request_error",
+      code: "invalid_request",
+    });
+    expect(response.body).not.toContain("private-");
+    expect(logs.join("")).not.toContain("private-");
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
     { item: { type: "item_reference", id: null }, tag: "item_reference" },
     {
       item: {

@@ -163,6 +163,58 @@ function responseId(event: Wire): string {
 }
 
 describe("Responses WebSocket transport", () => {
+  it.each<Protocol>([
+    "chat",
+    "responses",
+  ])("accepts Codex stream:true and client_metadata during prewarm and continuation on %s", async (protocol) => {
+    const { url, calls } = await setup(protocol);
+    const peer = await connect(url);
+    const request = {
+      stream: true,
+      store: false,
+      instructions: "Answer briefly",
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+      tool_choice: "auto",
+      parallel_tool_calls: true,
+      reasoning: { effort: "low", summary: "auto" },
+      include: ["reasoning.encrypted_content"],
+      prompt_cache_key: "codex-cache",
+      client_metadata: {
+        turn_id: "private-turn",
+        context: { model: "private-model", stream: false },
+      },
+    };
+    const prewarm = await peer.turn({ ...request, input: [], generate: false });
+    expect(prewarm.type).toBe("response.completed");
+    expect(calls).toHaveLength(0);
+    const first = await peer.turn({
+      ...request,
+      previous_response_id: responseId(prewarm),
+      input: "Codex first",
+    });
+    expect(first.type).toBe("response.completed");
+    expect(
+      (
+        await peer.turn({
+          ...request,
+          previous_response_id: responseId(first),
+          input: "Codex next",
+        })
+      ).type,
+    ).toBe("response.completed");
+    expect(calls).toHaveLength(2);
+    for (const { body } of calls) {
+      expect(body).toMatchObject({ stream: true, store: false, prompt_cache_key: "codex-cache" });
+      expect(body.client_metadata).toBeUndefined();
+      expect(body.metadata).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain("private-");
+    }
+    expect(JSON.stringify(calls[1]?.body)).toContain("Codex first");
+    expect(JSON.stringify(calls[1]?.body)).toContain("answer 1");
+    expect(JSON.stringify(peer.events)).not.toContain("private-");
+    expect(peer.events.some((event) => event.type === "response.output_text.delta")).toBe(true);
+  });
+
   it("works with the official OpenAI ResponsesWS client, including continuation", async () => {
     const { url, calls } = await setup();
     const client = new OpenAI({
@@ -418,7 +470,12 @@ describe("Responses WebSocket transport", () => {
     [{ stream_id: "bad stream" }, "invalid_stream_id"],
     [{ stream_id: "x".repeat(257) }, "invalid_stream_id"],
     [{ generate: "false" }, "invalid_request"],
-    [{ stream: true }, "invalid_request"],
+    [{ stream: false }, "invalid_request"],
+    [{ stream: null }, "invalid_request"],
+    [{ stream: "true" }, "invalid_request"],
+    [{ stream: 1 }, "invalid_request"],
+    [{ client_metadata: [] }, "invalid_request"],
+    [{ client_metadata: "private-client" }, "invalid_request"],
     [{ background: false }, "invalid_request"],
     [{ previous_response_id: 5 }, "invalid_request"],
     [{ previous_response_id: "" }, "invalid_request"],

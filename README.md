@@ -165,7 +165,9 @@ ws.on("message", (data) => {
 ws.on("error", console.error);
 ```
 
-每条客户端消息是一个 `response.create` JSON 对象；不传 HTTP 的 `stream`、`background` 字段。服务器按消息发送 `response.*` JSON 事件，没有 SSE 的 `event:` / `data:` 包装或 `[DONE]`。工具结果通过下一条请求的 `input` 中的 `function_call_output` 回传；`instructions`、工具定义和其他生成参数每轮重新提供。
+每条客户端消息是一个 `response.create` JSON 对象。`stream` 可省略或设为 `true`，兼容 Codex CLI 的生成和 `generate:false` 预热请求；其他 `stream` 值及 `background` 字段返回 400。服务器按消息发送 `response.*` JSON 事件，没有 SSE 的 `event:` / `data:` 包装或 `[DONE]`。工具结果通过下一条请求的 `input` 中的 `function_call_output` 回传；`instructions`、工具定义和其他生成参数每轮重新提供。
+
+HTTP 和 WS 均接受 Codex 的 `client_metadata`（JSON 对象或 `null`）。它只作为客户端诊断字段被校验后丢弃，不转发给上游、不混入 `metadata`、模型输入或续轮历史；原有 `metadata` 语义保持不变。
 
 省略 `stream_id` 使用默认流；指定后，同名流按顺序执行，不同流可以并发，返回事件附带对应 `stream_id`。每个连接最多 32 个命名流。`previous_response_id` 可引用本连接同一模型的最近成功响应，也可从另一个流分叉；省略或设为 `null` 开始新会话。`generate:false` 只在本地准备输入上下文并返回空输出的响应 ID，不调用或预热上游模型。
 

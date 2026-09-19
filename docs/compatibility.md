@@ -38,6 +38,7 @@
 | `text.format` / `text.verbosity` | 映射到 `response_format` / `verbosity`；JSON Schema 名称、描述、strict 和 schema 保留 |
 | 推理内容 | Chat `reasoning_content` 转为 Responses 明文 summary；不生成加密内容，不承诺 summary 等显示控制。`include` 中的加密推理选项不发给 Chat；只有 encrypted_content、无明文 summary 的历史返回 400 |
 | `store` / `metadata` | HTTP 映射到 Chat 同名字段，store 缺省 false；本地续轮不依赖 store，不提供 Responses 存储检索 API；WS 强制 store:false |
+| `client_metadata` | HTTP/WS 接受 JSON 对象或 `null`，校验后丢弃；不转发、不并入 `metadata` 或会话历史，两种上游模式相同 |
 | `previous_response_id` | HTTP 展开同凭据、同模型的缓存历史；WS 展开本连接同模型的最近成功响应。未命中返回 `previous_response_not_found`，客户端可发送完整历史 |
 | JSON/SSE 输出 | 网关生成独立响应及输出项 ID；文本、推理、工具、拒绝、截断状态转换回 Responses，流式终态完整校验后才发送 |
 | 缓存和推理用量 | Chat prompt_tokens_details.cached_tokens/cache_write_tokens 转为 Responses input_tokens_details；reasoning_tokens 保留，缺失字段不补零 |
@@ -145,6 +146,7 @@ Chat 模式本地未命中时，在上游调用前返回 HTTP 400，`error.code=
 | 能力/约束 | 行为 |
 | --- | --- |
 | 上游传输 | 依据 `UPSTREAM_PROTOCOL` 使用 Chat 或 Responses HTTP/SSE，始终 `store:false`；不连接上游 WS |
+| Codex 请求 | `stream` 可省略或为 `true`，兼容生成与 `generate:false` 预热；`client_metadata` 使用上述诊断字段规则 |
 | 增量续轮 | `previous_response_id` 在当前连接内、按模型查找成功响应；展开为完整历史后调用上游，不透传 ID |
 | 续轮参数 | 只继承输入/输出上下文；`instructions`、工具定义、采样等生成参数每轮重传 |
 | 本地预备 | `generate:false` 返回空输出的成功响应和 ID，供续轮引用，不调用上游，不宣称模型预热 |
@@ -159,7 +161,7 @@ Chat 模式本地未命中时，在上游调用前返回 HTTP 400，`error.code=
 | 取消/清理 | 断线、到期、心跳失败、服务关闭取消全部上游请求，清空连接历史。单次生成仍遵守上游总超时、首字节与空闲超时 |
 | 恢复 | 不提供跨连接存储回退；重连或缓存 miss 后省略 ID/设 `null` 并发送完整输入上下文 |
 
-错误使用 `{type:"error", status, error:{type, code, message, param?}, stream_id?}`。非法 JSON 为 `invalid_json`；未知事件、`stream` / `background` 等无效请求为 `invalid_request`；历史不可用为 `previous_response_not_found`；队列超限为 429 `websocket_queue_full`；流数量超限为 `websocket_stream_limit_reached`；连接到期为 `websocket_connection_limit_reached`。wire 消息过大以 WS 1009 关闭，展开后过大返回 413 `request_too_large`。上游错误继续清洗，不回传私有上游消息、密钥或 prompt。
+错误使用 `{type:"error", status, error:{type, code, message, param?}, stream_id?}`。非法 JSON 为 `invalid_json`；未知事件、非 true 的 `stream`、`background` 字段、非法 `client_metadata` 等无效请求为 `invalid_request`；历史不可用为 `previous_response_not_found`；队列超限为 429 `websocket_queue_full`；流数量超限为 `websocket_stream_limit_reached`；连接到期为 `websocket_connection_limit_reached`。wire 消息过大以 WS 1009 关闭，展开后过大返回 413 `request_too_large`。上游错误继续清洗，不回传私有上游消息、密钥或 prompt。
 
 支持范围是本项目已有 Responses 内容/工具子集的 WebSocket 传输，以及上述续轮和并发功能。仅接受 `response.create`，不实现 Realtime、`response.cancel`、mid-turn steering、inject、服务器 compaction 或后台任务。`generate:false` 只预备输入历史，下一轮仍须提供模型与生成参数。
 

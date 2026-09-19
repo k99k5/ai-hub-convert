@@ -12,6 +12,7 @@ import { decodeWebSearchHistory } from "./web-search.js";
 const errorCode = "INVALID_OPENAI_RESPONSES_REQUEST" as const;
 const supportedTopLevelFields = new Set([
   "background",
+  "client_metadata",
   "input",
   "include",
   "instructions",
@@ -591,6 +592,11 @@ export function decodeResponsesRequest(value: unknown): CanonicalRequest {
     if (!supportedTopLevelFields.has(key)) {
       return invalid("Unsupported OpenAI Responses request field");
     }
+  }
+  // Codex sends transport/client diagnostics here. Validate them without adding
+  // them to model input, upstream metadata, or continuation history.
+  if (input.client_metadata !== undefined && input.client_metadata !== null) {
+    jsonRecord(input.client_metadata, "client_metadata");
   }
   if (input.background === true) {
     return invalid("Background Responses are not supported");

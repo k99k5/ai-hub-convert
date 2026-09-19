@@ -248,7 +248,7 @@ class ResponsesWebSocketSession {
     const lane = streamId ?? "";
     let completedId: string | undefined;
     try {
-      const { type, stream_id, generate, previous_response_id, ...body } = event;
+      const { type, stream_id, stream, generate, previous_response_id, ...body } = event;
       if (generate !== undefined && typeof generate !== "boolean") {
         throw new WebSocketRequestError(
           "invalid_request",
@@ -256,14 +256,21 @@ class ResponsesWebSocketSession {
           "generate",
         );
       }
-      for (const field of ["stream", "background"]) {
-        if (field in body) {
-          throw new WebSocketRequestError(
-            "invalid_request",
-            `${field} is not used in WebSocket mode`,
-            field,
-          );
-        }
+      // Codex reuses its streaming Responses request for WS, including prewarm.
+      // The transport always streams; an explicit true is a compatible no-op.
+      if (stream !== undefined && stream !== true) {
+        throw new WebSocketRequestError(
+          "invalid_request",
+          "stream must be true or omitted in WebSocket mode",
+          "stream",
+        );
+      }
+      if ("background" in body) {
+        throw new WebSocketRequestError(
+          "invalid_request",
+          "background is not used in WebSocket mode",
+          "background",
+        );
       }
       if (previous_response_id !== undefined && previous_response_id !== null) {
         if (typeof previous_response_id !== "string" || previous_response_id.length === 0) {

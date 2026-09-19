@@ -149,6 +149,44 @@ function conversation(body: Wire | undefined, protocol: Protocol) {
 
 describe("HTTP Responses previous_response_id", () => {
   it.each(
+    protocols.flatMap((protocol) => [false, true].map((stream) => ({ protocol, stream }))),
+  )("accepts Codex client_metadata without forwarding or retaining it: %j", async ({
+    protocol,
+    stream,
+  }) => {
+    const { post, calls } = setup(protocol);
+    const first = terminal(
+      await post({
+        stream,
+        client_metadata: {
+          turn_id: "private-turn",
+          context: { model: "private-model", stream: false },
+        },
+        metadata: { user_label: "preserved" },
+      }),
+    );
+    expect(calls[0]?.body.metadata).toEqual({ user_label: "preserved" });
+    terminal(
+      await post({
+        stream: !stream,
+        previous_response_id: first.id,
+        client_metadata: null,
+        input: "next",
+      }),
+    );
+    for (const { body } of calls) {
+      expect(body.client_metadata).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain("private-");
+    }
+    expect(JSON.stringify(first)).not.toContain("private-");
+    expect(conversation(calls[1]?.body, protocol)).toEqual([
+      { role: "user", text: "hello" },
+      { role: "assistant", text: "answer 1" },
+      { role: "user", text: "next" },
+    ]);
+  });
+
+  it.each(
     protocols.flatMap((protocol) =>
       [false, true].flatMap((firstStream) =>
         [false, true].map((nextStream) => ({ protocol, firstStream, nextStream })),
