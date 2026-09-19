@@ -255,6 +255,8 @@ Responses 支持显式搜索 `tool_choice`、`allowed_tools`、`max_tool_calls`�
 
 Chat 入口支持单候选答案、文本、图片输入（保留 detail）、developer 角色、函数工具及调用回传、reasoning/refusal、采样控制，以及 text/json_object/json_schema 输出格式（保留名称和 strict）。`max_tokens` 与 `max_completion_tokens` 均支持，但不能同时提供。`n>1`、音频、logprobs、旧式 functions/function_call 和内置搜索参数返回 400；普通搜索函数由客户端执行。
 
+兼容 WorkBuddy 在 `messages[]` 中附加的 `agent` 客户端标记（字符串或 `null`）：校验后丢弃，不作为模型角色、消息 `name` 或上游参数。其他未知消息字段继续返回 400。
+
 CC Switch 将 Codex 请求转换为 Chat 时使用的思考扩展可在 Chat 入口校验并原样转发，具体结构与边界见 [CCS 思考参数兼容](docs/compatibility.md#ccs-思考参数兼容)。
 
 支持 JSON 与 SSE：text、system、URL/Base64 image、function tool、tool call/result、并行与交错工具调用、reasoning/thinking、usage、已有 search result、URL citation/annotation。Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 会转为 Responses `reasoning.effort`，token counting 同样保留，Chat fallback 转为 `reasoning_effort`。Anthropic `output_config.format` 支持 `null` 或 `{ type: "json_schema", schema: {...} }`：Responses 映射到 `text.format`，token counting 同样保留，Chat fallback 映射到 `response_format.json_schema`。

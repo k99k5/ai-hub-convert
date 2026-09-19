@@ -17,6 +17,44 @@ describe("Chat 请求适配", () => {
     });
   });
 
+  it.each([
+    "cli",
+    "private-agent",
+    "",
+    null,
+  ])("忽略 WorkBuddy 消息 agent 标记 %s，保留消息和工具语义", (agent) => {
+    const messages = [
+      { role: "system", content: "系统" },
+      { role: "developer", name: "instructions", content: "开发者" },
+      { role: "user", content: [{ type: "text", text: "问题" }] },
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "分析",
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "结果" },
+    ];
+    const expected = decodeChatRequest({ ...base, messages });
+    const decoded = decodeChatRequest({
+      ...base,
+      messages: messages.map((message) => ({ ...message, agent })),
+    });
+    expect(decoded).toEqual(expected);
+    expect(encodeChatRequest(decoded)).toEqual(encodeChatRequest(expected));
+    expect(
+      encodeResponsesRequest(decoded, { store: false, promptCache: { kind: "none" } }),
+    ).toEqual(encodeResponsesRequest(expected, { store: false, promptCache: { kind: "none" } }));
+  });
+
+  it.each([{}, [], 123, false])("拒绝非字符串 WorkBuddy agent 标记 %j", (agent) => {
+    expect(() =>
+      decodeChatRequest({ ...base, messages: [{ ...base.messages[0], agent }] }),
+    ).toThrow("消息 agent 必须是字符串");
+  });
+
   it("保留开发者角色、图片精度、工具调用和结果、推理及拒绝", () => {
     const request = decodeChatRequest({
       ...base,

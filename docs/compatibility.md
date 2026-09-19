@@ -222,6 +222,8 @@ node node_modules/typescript/bin/tsc --noEmit
 
 Chat 请求也经过独立 decoder → canonical IR → encoder，直接发送到固定的上游 `/chat/completions` 路径。Bearer 凭据、模型和已支持的语义保持一致，不透传任意请求体。
 
+WorkBuddy 会给消息附加 `agent`（例如 `"cli"`）。Chat 入口接受 `messages[].agent` 为字符串或 `null`，校验后丢弃，不写入 canonical 内容、上游请求、消息 `name` 或缓存键。该兼容规则适用于普通消息、助手工具调用历史和工具结果；其他未知字段及非法 `agent` 类型仍返回 HTTP 400。
+
 | 能力 | 行为 |
 | --- | --- |
 | 消息 | 支持 system/developer/user/assistant/tool；保留 developer、消息 name、文本、URL/data URL 图片及 detail |

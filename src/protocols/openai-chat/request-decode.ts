@@ -123,7 +123,10 @@ function decodeContent(
 }
 
 function decodeMessage(value: unknown, options: ChatMessageOptions): Message {
-  const input = record(value, "消息");
+  // WorkBuddy annotates history with the client agent name. It is not a model
+  // role or participant name, so validate and discard it before normalization.
+  const { agent, ...input } = record(value, "消息");
+  if (agent !== undefined && agent !== null) string(agent, "消息 agent", true);
   const role = input.role;
   if (role === "tool") {
     fields(input, ["role", "content", "tool_call_id"]);

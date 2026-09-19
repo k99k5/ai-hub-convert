@@ -74,6 +74,85 @@ afterEach(async () => {
 });
 
 describe("Chat 对外入口和官方 SDK", () => {
+  it.each([
+    false,
+    true,
+  ])("WorkBuddy 消息标记不影响生成和工具结果续轮，stream=%s", async (stream) => {
+    const sent: Array<Record<string, unknown>> = [];
+    const app = createApp(async (input, init) => {
+      sent.push((await new Request(input, init).json()) as Record<string, unknown>);
+      return stream
+        ? sse([chunk({ role: "assistant", content: "回答" }), chunk({}, "stop"), "[DONE]"])
+        : Response.json(completion());
+    });
+    const messages = [
+      { role: "system", content: "固定提示", agent: "private-client-agent" },
+      { role: "user", content: [{ type: "text", text: "问题" }], agent: "cli" },
+      {
+        role: "assistant",
+        content: null,
+        agent: "cli",
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "结果", agent: "cli" },
+    ];
+    for (const history of [messages.slice(0, 2), messages]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: "Bearer key" },
+        payload: {
+          model: "deepseek-v4.1-flash",
+          messages: history,
+          stream,
+          stream_options: { include_usage: true },
+          reasoning_effort: "high",
+          tools: [
+            { type: "function", function: { name: "lookup", parameters: { type: "object" } } },
+          ],
+        },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.body).toContain("回答");
+      expect(response.body).not.toContain("private-client-agent");
+      if (stream) expect(response.body).toContain("data: [DONE]");
+    }
+    expect(sent).toHaveLength(2);
+    for (const body of sent) {
+      expect(JSON.stringify(body)).not.toContain('"agent"');
+      expect(JSON.stringify(body)).not.toContain("private-client-agent");
+      expect(body).toMatchObject({ model: "deepseek-v4.1-flash", reasoning_effort: "high" });
+    }
+    expect(sent[1]?.messages).toEqual(
+      messages.map(({ agent, ...message }) => ({
+        ...message,
+        ...(message.role === "system"
+          ? { content: [{ type: "text", text: message.content }] }
+          : {}),
+      })),
+    );
+  });
+
+  it.each([{}, [], 123, false])("非法 WorkBuddy agent 标记在上游调用前拒绝 %j", async (agent) => {
+    let calls = 0;
+    const app = createApp(async () => {
+      calls++;
+      return Response.json(completion());
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: { authorization: "Bearer key" },
+      payload: { ...requestBody, messages: [{ role: "user", content: "private-prompt", agent }] },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.type).toBe("invalid_request_error");
+    expect(response.body).not.toContain("private-prompt");
+    expect(calls).toBe(0);
+  });
+
   it("SDK JSON 调用直接访问 Chat 并默认发送缓存键", async () => {
     let sent: Record<string, unknown> | undefined;
     const urls: string[] = [];
