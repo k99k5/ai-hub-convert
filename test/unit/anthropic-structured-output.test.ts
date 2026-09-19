@@ -66,7 +66,6 @@ describe("Anthropic structured output conversion", () => {
       { type: "json_schema" },
       { type: "json_object", schema },
       { type: "json_schema", schema: [] },
-      { type: "json_schema", schema, unknown: true },
     ]) {
       expect(() =>
         decodeAnthropicRequest({

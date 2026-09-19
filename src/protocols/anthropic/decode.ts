@@ -394,9 +394,6 @@ function parsePromptCacheMarker(value: unknown): PromptCacheMarker | undefined {
     return undefined;
   }
   const marker = isRecord(value) ? value : invalidRequest();
-  if (Object.keys(marker).some((key) => key !== "type" && key !== "ttl")) {
-    return invalidRequest();
-  }
   if (marker.type !== "ephemeral") {
     return invalidRequest();
   }
@@ -622,11 +619,6 @@ function parseOutputConfig(value: unknown): {
   if (!isRecord(value)) {
     return invalidRequest();
   }
-  for (const key of Object.keys(value)) {
-    if (key !== "effort" && key !== "format") {
-      return invalidRequest();
-    }
-  }
 
   const effort = value.effort;
   if (
@@ -648,8 +640,7 @@ function parseOutputConfig(value: unknown): {
       !isRecord(format) ||
       format.type !== "json_schema" ||
       !isRecord(format.schema) ||
-      !isJsonValue(format.schema) ||
-      Object.keys(format).some((key) => key !== "type" && key !== "schema")
+      !isJsonValue(format.schema)
     ) {
       return invalidRequest();
     }
@@ -670,7 +661,7 @@ function parseThinking(value: unknown): Record<string, unknown> | undefined {
     return invalidRequest();
   }
   if (value.type === "disabled") {
-    return value;
+    return { type: value.type };
   }
   if (value.type === "adaptive") {
     if (
@@ -681,7 +672,7 @@ function parseThinking(value: unknown): Record<string, unknown> | undefined {
     ) {
       return invalidRequest();
     }
-    return value;
+    return { type: value.type, ...(value.display === undefined ? {} : { display: value.display }) };
   }
   if (
     value.type === "enabled" &&
@@ -697,7 +688,11 @@ function parseThinking(value: unknown): Record<string, unknown> | undefined {
     ) {
       return invalidRequest();
     }
-    return value;
+    return {
+      type: value.type,
+      budget_tokens: value.budget_tokens,
+      ...(value.display === undefined ? {} : { display: value.display }),
+    };
   }
   return invalidRequest();
 }

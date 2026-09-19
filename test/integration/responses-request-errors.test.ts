@@ -9,7 +9,7 @@ afterEach(async () => {
 
 function setup() {
   const logs: string[] = [];
-  const upstreamFetch = vi.fn(async () =>
+  const upstreamFetch = vi.fn(async (_input: unknown, _init?: RequestInit) =>
     Response.json({
       id: "resp_test",
       model: "model-test",
@@ -146,7 +146,7 @@ describe("Responses 请求错误处理", () => {
     expect(upstreamFetch).not.toHaveBeenCalled();
   });
 
-  it("拒绝未知顶层字段且不泄露字段名称和内容", async () => {
+  it("忽略未知顶层字段，不转发或记录字段名称和内容", async () => {
     const { app, logs, upstreamFetch } = setup();
     const response = await app.inject({
       method: "POST",
@@ -154,15 +154,14 @@ describe("Responses 请求错误处理", () => {
       headers: { authorization: "Bearer private-key" },
       payload: { model: "model-test", input: "private-prompt", "private-field": "private-value" },
     });
-    expect(response.statusCode).toBe(400);
-    expect(response.json().error).toMatchObject({
-      type: "invalid_request_error",
-      code: "invalid_request",
-    });
+    expect(response.statusCode).toBe(200);
     expect(logs.join("")).not.toContain("DEBUG-responses");
     expect(logs.join("")).not.toContain("private-");
     expect(response.body).not.toContain("private-");
-    expect(upstreamFetch).not.toHaveBeenCalled();
+    expect(upstreamFetch).toHaveBeenCalledTimes(1);
+    const body = String(upstreamFetch.mock.calls[0]?.[1]?.body);
+    expect(body).not.toContain("private-field");
+    expect(body).not.toContain("private-value");
   });
 
   it.each([

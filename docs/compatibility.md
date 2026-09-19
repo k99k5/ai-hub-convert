@@ -68,7 +68,7 @@
 | tool calls/results | 支持；`tool_result` 中的 image/search_result 内容返回 HTTP 400 | 同上；不触发 Chat 回退 | 支持；`function_call_output.output` 接受字符串或纯 `input_text` 数组，图片和文件结果返回 HTTP 400 |
 | parallel/interleaved calls | 支持 | 支持 | 支持 |
 | reasoning/thinking | Anthropic thinking 可返回客户端；历史 thinking 不伪造成 Responses reasoning continuation | 支持常见 Chat reasoning 扩展 | 支持；真实 item `id` 与 `encrypted_content` 只作同协议 continuation |
-| `output_config.effort` | `reasoning.effort` | `reasoning_effort` | 不适用；完整 `reasoning` 对象同协议回放 |
+| `output_config.effort` | `reasoning.effort` | `reasoning_effort` | 不适用；`reasoning` 中的 `context`、`effort`、`generate_summary`、`mode`、`summary` 同协议回放 |
 | `output_config.format` | `{type:"json_schema", schema}` → `text.format`；`responses/input_tokens` 同样保留；`null` 不发送格式约束 | → `response_format.json_schema` | 不适用 |
 | `text.format` / `text.verbosity` | 不适用 | 不适用 | 支持 text/json_object/json_schema；保留名称、schema、description、strict 的缺省/null/false/true 以及 verbosity |
 | 图片 `detail` | 默认 auto | 未指定精度 | 保留 auto/low/high/original；非法值在上游调用前返回 400 |
@@ -135,7 +135,7 @@ Anthropic `tool_result.is_error:true` 在 Responses 和 Chat 上游的结果正�
 
 Chat 模式本地未命中时，在上游调用前返回 HTTP 400，`error.code=previous_response_not_found`、`error.param=previous_response_id`；不静默丢弃上下文。Responses 模式保留原生续轮兼容：本地未命中时，原样向上游发送 ID 和本轮输入，由上游验证凭据和历史；这类请求的祖先内容未知，因此其响应不会写入本地完整历史缓存。无额外探测或重试。
 
-展开历史后的请求仍受 `BODY_LIMIT_BYTES` 限制，超限返回 HTTP 413 `request_too_large`；引用展开继续使用原有大小限制。省略或设置 `previous_response_id:null` 表示不引用历史。历史缓存不写磁盘、不跨实例共享；重启后本地 ID 失效，多实例需要粘性路由，或由客户端回传完整历史。字节预算是序列化内容和元数据的记账上限，不是进程 RSS 上限。此功能不提供 GET response、删除 response、conversation 或后台任务 API。
+展开历史后的请求仍受 `BODY_LIMIT_BYTES` 限制，超限返回 HTTP 413 `request_too_large`；引用展开继续使用原有大小限制。省略或设置 `previous_response_id:null` 表示不引用历史。历史缓存不写磁盘、不跨实例共享；重启后本地 ID 失效，多实例需要粘性路由，或由客户端回传完整历史。字节预算是序列化内容和元数据的记账上限，不是进程 RSS 上限。此功能不提供 GET response、删除 response、conversation 或后台任务 API；请求中的 `conversation` 仍返回 400，避免丢失会话上下文。
 
 本地验证：`pnpm exec vitest run test/unit/responses-history-cache.test.ts test/integration/responses-previous-response.test.ts`，覆盖 JSON/SSE 交叉续轮、SDK、工具、凭据/模型隔离、容量和过期、分叉、失败及原生上游 ID 透传。
 
@@ -222,7 +222,7 @@ node node_modules/typescript/bin/tsc --noEmit
 
 Chat 请求也经过独立 decoder → canonical IR → encoder，直接发送到固定的上游 `/chat/completions` 路径。Bearer 凭据、模型和已支持的语义保持一致，不透传任意请求体。
 
-WorkBuddy 会给消息附加 `agent`（例如 `"cli"`）。Chat 入口接受 `messages[].agent` 为字符串或 `null`，校验后丢弃，不写入 canonical 内容、上游请求、消息 `name` 或缓存键。该兼容规则适用于普通消息、助手工具调用历史和工具结果；其他未知字段及非法 `agent` 类型仍返回 HTTP 400。
+WorkBuddy 会给消息附加 `agent`（例如 `"cli"`）。Chat 入口接受 `messages[].agent` 为字符串或 `null`，校验后丢弃，不写入 canonical 内容、上游请求、消息 `name` 或缓存键。该兼容规则适用于普通消息、助手工具调用历史和工具结果；其他未知字段直接忽略，非法 `agent` 类型仍返回 HTTP 400。
 
 | 能力 | 行为 |
 | --- | --- |
@@ -232,7 +232,7 @@ WorkBuddy 会给消息附加 `agent`（例如 `"cli"`）。Chat 入口接受 `me
 | 输出格式 | 支持 text、json_object、json_schema；保留 schema 名称、description 和 strict |
 | 输出长度 | 支持 max_tokens 或 max_completion_tokens，两者同时提供返回 400 |
 | 采样及同协议选项 | 支持 temperature、top_p、stop、frequency_penalty、presence_penalty、seed、logit_bias、reasoning_effort、user、safety_identifier、service_tier、metadata、store；白名单字段按类型校验 |
-| 候选数及不支持字段 | 仅支持 n=1；n>1、音频、logprobs、旧式 functions/function_call、内置搜索及其他未知字段返回 400 |
+| 候选数及不支持字段 | 仅支持 n=1；n>1、音频、logprobs、旧式 functions/function_call、内置搜索返回 400；未知附加字段直接忽略 |
 | 工具参数字符串 | Chat 直连保留上游字符串，包含被 length 截断的非完整 JSON；客户端负责解析和执行。Messages 回退维持既有严格参数校验 |
 | 流式输出 | 实时 data chunk，正常结束输出原始 `[DONE]`；仅客户端指定 include_usage=true 时发送最终 usage chunk，缓存统计只保留上游已报告字段 |
 | 错误和生命周期 | 首次输出前返回 OpenAI HTTP 错误，输出后发送清洗后的 error 并关闭，不发送成功终止标记；超时、断连、输出限额和优雅关闭复用现有机制 |
@@ -250,7 +250,7 @@ CC Switch 的本地路由可将 Codex Responses 请求转换为 Chat，并按供
 | `reasoning_split` | 布尔值 |
 | `reasoning` | 仅包含 `effort` 的对象，值为 `none`、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max` |
 
-这些扩展的缺省状态及显式关闭值原样保留；不自动添加另一种思考参数，不转换为 canonical `reasoningEffort`，也不回放到 Responses 或其他来源的请求中。原有 `reasoning_effort` 的取值和跨协议行为不变。新增字段中的 `null`、非法类型、未知取值或额外对象字段在调用上游前返回 HTTP 400，错误不包含请求值；其他未知请求字段继续拒绝。
+这些扩展的缺省状态及显式关闭值原样保留；不自动添加另一种思考参数，不转换为 canonical `reasoningEffort`，也不回放到 Responses 或其他来源的请求中。原有 `reasoning_effort` 的取值和跨协议行为不变。已知扩展参数中的 `null`、非法类型或未知取值在调用上游前返回 HTTP 400，错误不包含请求值；未知附加字段直接忽略，包括 `thinking` 和 `reasoning` 的额外字段。
 
 网关只保证字段传递，不保证目标模型支持对应参数或关闭思考。具体模型能力由上游判断；不根据模型名称自动改写。默认 Chat 模式下 `/v1/responses` 可直接转换到 Chat 上游；上述 CCS 特有开关仍仅接受于 Chat 入口，Responses 使用 `reasoning.effort`，不会自动补充供应商特有开关。
 
@@ -278,7 +278,7 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 
 - Anthropic `output_config.effort` 的 `low | medium | high | xhigh | max | null` 进入 canonical 请求：Responses 与 `responses/input_tokens` 编码为 `reasoning.effort`，Chat fallback 编码为 `reasoning_effort`；字段缺失时不发送。网关不预判目标模型支持的等级，也不从旧 `thinking.budget_tokens` 推断 effort。
 - Anthropic `thinking` 的 enabled/disabled/adaptive、budget_tokens 和 display 当前只校验并保留为来源扩展，不映射到上游开关或显示控制；需要控制上游推理强度时使用 `output_config.effort`。`redacted_thinking` 历史块暂不支持，返回 400。
-- Anthropic `output_config.format` 接受 `null` 或 `{ type: "json_schema", schema: {...} }`。非 null 时 schema 进入 canonical structured-output 配置：Responses 与 `responses/input_tokens` 编码到 `text.format`，Chat fallback 编码到 `response_format.json_schema`。未知的 `output_config` 子字段、未知 format 类型、额外 format 字段或非 JSON object schema 都 fail-closed，返回 Anthropic HTTP 400。
+- Anthropic `output_config.format` 接受 `null` 或 `{ type: "json_schema", schema: {...} }`。非 null 时 schema 进入 canonical structured-output 配置：Responses 与 `responses/input_tokens` 编码到 `text.format`，Chat fallback 编码到 `response_format.json_schema`。未知的 `output_config` 子字段和额外 format 字段直接忽略；未知 format 类型或非 JSON object schema 返回 Anthropic HTTP 400。
 - Anthropic 历史真实 signature 原样作为 opaque compatibility data 处理；缺失或空 signature 可由普通 Anthropic 客户端回传，不会导致请求被拒绝。
 - Claude Code synthetic signature 是 UUID v4 文本的标准 Base64，不是 provider continuation。
 - synthetic signature 不会写入 OpenAI `encrypted_content`。
@@ -302,7 +302,8 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 - 模型轮次、搜索执行和受限回退共享请求总超时；最终 token/cache usage 累计所有轮次，后续轮次的 HTTP 错误不能触发 Chat 回退。
 - `CONNECTION_TIMEOUT_MS=0` 默认禁用 socket 空闲超时，避免在上游总超时或 SSE 首字节/idle 超时之前截断有效请求。
 - 首帧前错误返回入口协议的 HTTP JSON；首帧后错误返回入口协议的流内 error。
-- 四条 POST route 使用保留未知字段、禁止类型强转的浅层 wire schema；adapter 继续负责精确语义校验。schema 与 malformed JSON 返回入口协议的固定 HTTP 400，body 超限返回固定 HTTP 413。
+- 四条 POST route 使用保留未知字段、禁止类型强转的浅层 wire schema；adapter 提取已支持的字段，默认忽略顶层及嵌套协议对象中的未知附加字段，不向上游转发。Responses WebSocket 采用相同规则，HTTP/WS 续轮历史也不保留这些未知字段。工具参数、JSON Schema、metadata 和文本中的业务数据不按协议字段过滤。无需配置开关。
+- 已知字段继续做类型、取值和语义校验；不支持的消息角色、内容类型、工具类型及明确不支持的功能仍拒绝。schema 与 malformed JSON 返回入口协议的固定 HTTP 400，body 超限返回固定 HTTP 413。
 - 单帧 SSE、成功 JSON body、错误外壳 body、单输出项/保留状态、整条流输出/状态、工具参数、请求 body、首字节等待、流 idle 与请求总时长都有上限；malformed upstream SSE UTF-8 fail-closed。
 - 请求关闭、响应连接关闭、SSE reply 关闭和 graceful shutdown 均传播 AbortSignal 并取消上游 body。
 

@@ -166,6 +166,49 @@ describe("Responses WebSocket transport", () => {
   it.each<Protocol>([
     "chat",
     "responses",
+  ])("ignores unknown frame and input fields across prewarm and continuation on %s", async (protocol) => {
+    const { url, calls } = await setup(protocol, { WEBSOCKET_HISTORY_LIMIT_BYTES: "2048" });
+    const peer = await connect(url);
+    const prewarm = await peer.turn({
+      generate: false,
+      client_extra: "private-frame",
+      input: [
+        {
+          role: "user",
+          client_extra: "private-history".repeat(400),
+          content: [
+            { type: "input_text", text: "prewarm context", client_extra: "private-content" },
+          ],
+        },
+      ],
+    });
+    expect(prewarm.type).toBe("response.completed");
+    expect(calls).toHaveLength(0);
+    const first = await peer.turn({
+      previous_response_id: responseId(prewarm),
+      input: "first",
+      client_extra: true,
+    });
+    expect(first.type).toBe("response.completed");
+    const second = await peer.turn({
+      previous_response_id: responseId(first),
+      input: "next",
+      client_extra: null,
+    });
+    expect(second.type).toBe("response.completed");
+    expect(calls).toHaveLength(2);
+    const history = JSON.stringify(calls[1]?.body);
+    expect(history).toContain("prewarm context");
+    expect(history).toContain("first");
+    expect(history).toContain("answer 1");
+    expect(history).toContain("next");
+    expect(JSON.stringify(calls.map(({ body }) => body))).not.toContain("private-");
+    expect(JSON.stringify(peer.events)).not.toContain("private-");
+  });
+
+  it.each<Protocol>([
+    "chat",
+    "responses",
   ])("accepts Codex stream:true and client_metadata during prewarm and continuation on %s", async (protocol) => {
     const { url, calls } = await setup(protocol);
     const peer = await connect(url);
@@ -480,7 +523,6 @@ describe("Responses WebSocket transport", () => {
     [{ previous_response_id: 5 }, "invalid_request"],
     [{ previous_response_id: "" }, "invalid_request"],
     [{ model: null }, "invalid_request"],
-    [{ unknown: true }, "invalid_request"],
     [{ input: [{ type: "item_reference", id: "missing" }] }, "reference_cache_miss"],
   ])("rejects invalid frames and keeps the connection usable: %j", async (body, code) => {
     const { url, calls } = await setup();

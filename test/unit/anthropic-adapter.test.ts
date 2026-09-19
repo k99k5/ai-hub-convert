@@ -66,7 +66,6 @@ describe("decodeAnthropicRequest", () => {
     { effort: "minimal" },
     { effort: 1 },
     { effort: "high", format: { type: "json_schema" } },
-    { effort: "high", unknown_control: true },
   ])("rejects malformed output_config %#", (outputConfig) => {
     expect(() =>
       decodeAnthropicRequest({
@@ -349,7 +348,7 @@ describe("decodeAnthropicRequest", () => {
               {
                 type: "text",
                 text: "history",
-                cache_control: { type: "ephemeral", private_hint: secret },
+                cache_control: { type: "ephemeral", ttl: secret },
               },
             ],
           },

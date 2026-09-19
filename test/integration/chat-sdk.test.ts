@@ -74,6 +74,42 @@ afterEach(async () => {
 });
 
 describe("Chat 对外入口和官方 SDK", () => {
+  it.each([false, true])("忽略客户端未知参数且不发送到上游，stream=%s", async (stream) => {
+    const sent: Array<Record<string, unknown>> = [];
+    const app = createApp(async (input, init) => {
+      sent.push((await new Request(input, init).json()) as Record<string, unknown>);
+      return stream
+        ? sse([chunk({ role: "assistant", content: "回答" }), chunk({}, "stop"), "[DONE]"])
+        : Response.json(completion());
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: { authorization: "Bearer caller-key" },
+      payload: {
+        ...requestBody,
+        stream,
+        client_extra: { session: "private-session" },
+        messages: [
+          {
+            role: "user",
+            client_extra: "private-message",
+            content: [{ type: "text", text: "问题", client_extra: "private-content" }],
+          },
+        ],
+        stream_options: { include_usage: true, client_extra: "private-options" },
+        thinking: { type: "enabled", client_extra: "private-thinking" },
+        reasoning: { effort: "high", client_extra: "private-reasoning" },
+      },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.body).toContain("回答");
+    if (stream) expect(response.body).toContain("data: [DONE]");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ thinking: { type: "enabled" }, reasoning: { effort: "high" } });
+    expect(JSON.stringify(sent)).not.toContain("private-");
+  });
+
   it.each([
     false,
     true,
@@ -425,11 +461,9 @@ describe("Chat 对外入口和官方 SDK", () => {
   });
 
   it.each([
-    { thinking: { type: "enabled", extra: "不要回显" } },
     { enable_thinking: "不要回显" },
     { reasoning_split: null },
     { reasoning: { effort: "不要回显" } },
-    { thinking: { type: "enabled" }, unknown: "不要回显" },
   ])("非法 CCS 思考扩展在调用上游前拒绝 %#", async (extension) => {
     let calls = 0;
     const app = createApp(async () => {

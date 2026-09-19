@@ -120,7 +120,6 @@ describe("Responses 网关搜索请求", () => {
         { type: "web_search", filters: { allowed_domains: Array(101).fill("example.test") } },
       ],
     },
-    { tools: [{ type: "web_search", filters: { unsupported: true } }] },
     { include: ["unknown"] },
     { include: "web_search_call.action.sources" },
     { max_tool_calls: 0 },

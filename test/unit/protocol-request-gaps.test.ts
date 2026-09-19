@@ -35,7 +35,6 @@ describe("请求协议遗漏回归", () => {
 
   it.each([
     null,
-    { unsupported: true },
     { format: null },
     { format: { type: "text", schema: {} } },
     { format: { type: "xml" } },

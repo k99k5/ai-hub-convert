@@ -48,6 +48,9 @@ function setup(options: { fallback?: boolean; webSearchProvider?: WebSearchProvi
     const path = new URL(String(input)).pathname;
     const body = JSON.parse(init?.body as string) as Wire;
     requests.push({ path, body });
+    if (path === "/v1/responses/input_tokens") {
+      return Response.json({ object: "response.input_tokens", input_tokens: 3 });
+    }
     if (options.fallback && path === "/v1/responses") {
       return Response.json({ error: { code: "endpoint_not_found" } }, { status: 404 });
     }
@@ -114,6 +117,72 @@ const textOptions = [
 ];
 
 describe("协议转换缺口 HTTP 回归", () => {
+  it.each([false, true])("Responses 忽略 text 及 format 附加字段，stream=%s", async (stream) => {
+    const { app, requests } = setup();
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers,
+      payload: {
+        model: "model-test",
+        input: "回答",
+        stream,
+        text: {
+          client_extra: "private-text",
+          format: { type: "json_schema", name: "answer", schema, client_extra: "private-format" },
+        },
+      },
+    });
+    expectCompleted(response, stream);
+    expect(requests[0]?.body.text).toEqual({
+      format: { type: "json_schema", name: "answer", schema },
+    });
+    expect(JSON.stringify(requests)).not.toContain("private-");
+  });
+
+  it.each([
+    { url: "/v1/messages", stream: false },
+    { url: "/v1/messages", stream: true },
+    { url: "/v1/messages/count_tokens", stream: false },
+  ])("Anthropic 生成和计数入口忽略未知字段：%j", async ({ url, stream }) => {
+    const { app, requests } = setup();
+    const response = await app.inject({
+      method: "POST",
+      url,
+      headers: { "x-api-key": "test-key" },
+      payload: {
+        model: "model-test",
+        max_tokens: 64,
+        stream,
+        client_extra: "private-top",
+        output_config: {
+          client_extra: "private-config",
+          format: { type: "json_schema", schema, client_extra: "private-format" },
+        },
+        messages: [
+          {
+            role: "user",
+            client_extra: "private-message",
+            content: [
+              {
+                type: "text",
+                text: "回答",
+                cache_control: { type: "ephemeral", client_extra: "private-cache" },
+              },
+            ],
+          },
+        ],
+      },
+    });
+    if (url.endsWith("count_tokens")) {
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json()).toEqual({ input_tokens: 3 });
+    } else expectCompleted(response, stream);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.body.text).toMatchObject({ format: { type: "json_schema", schema } });
+    expect(JSON.stringify(requests)).not.toContain("private-");
+  });
+
   it.each(
     [false, true].flatMap((stream) => textOptions.map((text) => ({ stream, text }))),
   )("Responses 保留文本格式、严格模式及详细程度 %j", async ({ stream, text }) => {
@@ -136,9 +205,7 @@ describe("协议转换缺口 HTTP 回归", () => {
     { format: { type: "json_schema", name: "answer" } },
     { format: { type: "json_schema", name: "answer", schema, strict: "true" } },
     { format: { type: "json_schema", name: "answer", schema, description: 1 } },
-    { format: { type: "json_schema", name: "answer", schema, unsupported: true } },
     { format: { type: "text" }, verbosity: "unknown" },
-    { format: { type: "text" }, unsupported: true },
   ])("非法 text 嵌套字段在访问上游前返回 400：%j", async (text) => {
     const { app, upstreamFetch } = setup();
     const response = await app.inject({

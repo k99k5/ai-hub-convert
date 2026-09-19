@@ -5,6 +5,7 @@ import type { ResponsesReferenceCache } from "../../policies/responses-reference
 import type { ResponsesHistoryCache } from "../../policies/responses-history-cache.js";
 import { encodeResponsesChatRequest } from "./chat-bridge.js";
 import { encodeResponsesRequest } from "./encode.js";
+import { normalizeResponsesInput } from "./input-normalize.js";
 import { decodeResponsesRequest } from "./request-decode.js";
 import { OpenAIAdapterError } from "./types.js";
 
@@ -43,6 +44,8 @@ export function prepareResponsesRequest(
       : Array.isArray(wire.input)
         ? wire.input
         : [];
+  input = normalizeResponsesInput(input);
+  if (Array.isArray(wire.input)) wire = { ...wire, input };
   let historyComplete = wire.previous_response_id == null;
   if (historyCache && typeof wire.previous_response_id === "string") {
     const history = historyCache.resolve(apiKey, request.model, wire.previous_response_id);

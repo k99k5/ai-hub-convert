@@ -84,16 +84,6 @@ describe("request validation", () => {
       payload: { messages: [] },
       outputConfig: { format: { type: "json_schema" } },
     },
-    {
-      url: "/v1/messages",
-      payload: { max_tokens: 64, messages: [] },
-      outputConfig: { unknown_control: true },
-    },
-    {
-      url: "/v1/messages/count_tokens",
-      payload: { messages: [] },
-      outputConfig: { unknown_control: true },
-    },
   ])("rejects unsupported Anthropic output_config before upstream access at $url", async (testCase) => {
     let upstreamCalls = 0;
     const app = createApp({}, async () => {
@@ -228,7 +218,8 @@ describe("request validation", () => {
   });
 
   it("preserves extension fields for semantic decoder validation", async () => {
-    const app = createApp();
+    const upstreamFetch = vi.fn<typeof globalThis.fetch>();
+    const app = createApp({}, upstreamFetch);
     const response = await app.inject({
       method: "POST",
       url: "/v1/responses",
@@ -236,13 +227,14 @@ describe("request validation", () => {
         "content-type": "application/json",
         authorization: "Bearer caller-key",
       },
-      payload: { model: "vendor/model-1", future_extension: "must-not-strip" },
+      payload: { model: "vendor/model-1", background: true, future_extension: "ignored" },
     });
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({
       error: { type: "invalid_request_error", code: "invalid_request" },
     });
+    expect(upstreamFetch).not.toHaveBeenCalled();
   });
 });
 

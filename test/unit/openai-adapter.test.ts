@@ -54,11 +54,17 @@ describe("OpenAI Responses adapter", () => {
     expect(encodeResponsesInputTokensRequest(request)).not.toHaveProperty("reasoning");
   });
 
-  it("preserves the complete same-protocol reasoning object", () => {
+  it("preserves supported same-protocol reasoning fields and ignores unknown additions", () => {
     const request = decodeResponsesRequest({
       model: "gpt-test",
       input: "hello",
-      reasoning: { effort: "medium", summary: "auto", context: "all_turns" },
+      reasoning: {
+        effort: "medium",
+        summary: "auto",
+        context: "all_turns",
+        mode: "standard",
+        client_extra: "ignored",
+      },
     });
 
     expect(
@@ -71,6 +77,7 @@ describe("OpenAI Responses adapter", () => {
       effort: "medium",
       summary: "auto",
       context: "all_turns",
+      mode: "standard",
     });
   });
 
@@ -299,7 +306,7 @@ describe("OpenAI Responses adapter", () => {
         input: "hello",
         conversation: "conv_1",
       }),
-    ).toThrow(/Unsupported OpenAI Responses request field/);
+    ).toThrow(/Conversations are not supported/);
   });
 
   it("rejects non-JSON reasoning controls and sanitizes incomplete details", () => {

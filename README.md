@@ -76,6 +76,8 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 
 三个生成入口都支持 `stream:true`。Chat 使用标准 `data:` chunk 和 `[DONE]`；只有请求 `stream_options:{"include_usage":true}` 时才输出最终 usage chunk。四条 POST route 先做不改写 body 的浅层 wire schema 校验，再由 adapter 做精确语义校验；错误分别使用入口协议的固定 HTTP 400 外壳。超过 `BODY_LIMIT_BYTES` 时返回固定 HTTP 413，且不会回传 validation path 或请求内容。
 
+Chat、Responses（含 WebSocket）和 Anthropic 入口默认忽略顶层及嵌套协议对象中的未知附加字段，不向上游转发，也不写入 Responses 续轮历史，无需配置开关。已知参数的类型、取值及不支持的消息/内容/工具类型仍然校验；工具参数、JSON Schema 和 metadata 中的业务字段完整保留。
+
 Responses 与 Chat 在首个下游事件发出后，默认每 15 秒发送 SSE 注释心跳 `: heartbeat`，用于维持思考、工具等待或上游仅发送心跳期间的连接；客户端应忽略注释。心跳间隔可用 `SSE_HEARTBEAT_INTERVAL_MS` 调整，应小于反向代理的空闲超时。心跳不延长上游首字节、空闲或请求总超时。
 
 下游写入阻塞时暂停心跳，恢复可写后继续；请求取消、响应结束或连接关闭时停止心跳。总超时或服务关闭会解除阻塞的写入并关闭连接；连接仍可写时，按入口协议发送流内错误。
@@ -255,7 +257,7 @@ Responses 支持显式搜索 `tool_choice`、`allowed_tools`、`max_tool_calls`�
 
 Chat 入口支持单候选答案、文本、图片输入（保留 detail）、developer 角色、函数工具及调用回传、reasoning/refusal、采样控制，以及 text/json_object/json_schema 输出格式（保留名称和 strict）。`max_tokens` 与 `max_completion_tokens` 均支持，但不能同时提供。`n>1`、音频、logprobs、旧式 functions/function_call 和内置搜索参数返回 400；普通搜索函数由客户端执行。
 
-兼容 WorkBuddy 在 `messages[]` 中附加的 `agent` 客户端标记（字符串或 `null`）：校验后丢弃，不作为模型角色、消息 `name` 或上游参数。其他未知消息字段继续返回 400。
+兼容 WorkBuddy 在 `messages[]` 中附加的 `agent` 客户端标记（字符串或 `null`）：校验后丢弃，不作为模型角色、消息 `name` 或上游参数。其他未知消息字段直接忽略；非法 `agent` 类型仍返回 400。
 
 CC Switch 将 Codex 请求转换为 Chat 时使用的思考扩展可在 Chat 入口校验并原样转发，具体结构与边界见 [CCS 思考参数兼容](docs/compatibility.md#ccs-思考参数兼容)。
 

@@ -13,38 +13,6 @@ import {
   OpenAIAdapterError,
 } from "./types.js";
 
-const supportedFields = [
-  "model",
-  "messages",
-  "tools",
-  "tool_choice",
-  "parallel_tool_calls",
-  "max_tokens",
-  "max_completion_tokens",
-  "reasoning_effort",
-  "thinking",
-  "enable_thinking",
-  "reasoning_split",
-  "reasoning",
-  "response_format",
-  "stream",
-  "stream_options",
-  "temperature",
-  "top_p",
-  "stop",
-  "n",
-  "frequency_penalty",
-  "presence_penalty",
-  "seed",
-  "logit_bias",
-  "user",
-  "safety_identifier",
-  "service_tier",
-  "metadata",
-  "store",
-  "prompt_cache_key",
-];
-
 function invalid(message: string): never {
   throw new OpenAIAdapterError("INVALID_OPENAI_CHAT_REQUEST", message);
 }
@@ -54,12 +22,6 @@ function record(value: unknown, label: string): Record<string, unknown> {
     invalid(`${label} 必须是对象`);
   }
   return value as Record<string, unknown>;
-}
-
-function fields(value: Record<string, unknown>, allowed: readonly string[]): void {
-  if (Object.keys(value).some((key) => !allowed.includes(key))) {
-    invalid("Chat 请求包含不支持的字段");
-  }
 }
 
 function string(value: unknown, label: string, allowEmpty = false): string {
@@ -97,17 +59,13 @@ function decodeContent(
   return value.map((rawPart, index) => {
     const part = record(rawPart, "消息内容");
     if (part.type === "text") {
-      fields(part, ["type", "text"]);
       return { type: "text", text: string(part.text, "text", true) };
     }
     if (part.type === "refusal" && role === "assistant") {
-      fields(part, ["type", "refusal"]);
       return { type: "refusal", refusal: string(part.refusal, "refusal", true) };
     }
     if (part.type === "image_url" && role === "user") {
-      fields(part, ["type", "image_url"]);
       const image = record(part.image_url, "image_url");
-      fields(image, ["url", "detail"]);
       const url = string(image.url, "image_url.url");
       if (image.detail !== undefined) {
         if (image.detail !== "auto" && image.detail !== "low" && image.detail !== "high") {
@@ -129,7 +87,6 @@ function decodeMessage(value: unknown, options: ChatMessageOptions): Message {
   if (agent !== undefined && agent !== null) string(agent, "消息 agent", true);
   const role = input.role;
   if (role === "tool") {
-    fields(input, ["role", "content", "tool_call_id"]);
     const content = decodeContent(input.content, role, options);
     return {
       role,
@@ -146,12 +103,9 @@ function decodeMessage(value: unknown, options: ChatMessageOptions): Message {
   if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") {
     invalid("Chat 不支持此消息角色");
   }
-  fields(
-    input,
-    role === "assistant"
-      ? ["role", "content", "name", "tool_calls", "reasoning_content", "refusal"]
-      : ["role", "content", "name"],
-  );
+  if (input.function_call !== undefined || input.audio !== undefined) {
+    invalid("Chat 不支持旧式函数调用或音频消息");
+  }
   if (input.name !== undefined) options.name = string(input.name, "消息 name");
   const content = decodeContent(input.content, role, options);
   if (role === "assistant") {
@@ -169,10 +123,8 @@ function decodeMessage(value: unknown, options: ChatMessageOptions): Message {
       if (!Array.isArray(input.tool_calls)) invalid("tool_calls 必须是数组");
       for (const rawCall of input.tool_calls) {
         const call = record(rawCall, "工具调用");
-        fields(call, ["id", "type", "function"]);
         if (call.type !== "function") invalid("Chat 仅支持函数工具调用");
         const fn = record(call.function, "工具调用 function");
-        fields(fn, ["name", "arguments"]);
         const name = toolName(fn.name);
         content.push({
           type: "function_call",
@@ -199,10 +151,8 @@ function decodeTools(value: unknown, extensions: ChatRequestExtensions): Canonic
   extensions.tool_strict = toolStrict;
   return value.map((rawTool, index) => {
     const tool = record(rawTool, "工具");
-    fields(tool, ["type", "function"]);
     if (tool.type !== "function") invalid("Chat 仅支持函数工具，不支持内置搜索");
     const fn = record(tool.function, "工具 function");
-    fields(fn, ["name", "description", "parameters", "strict"]);
     const strict = optionalBoolean(fn.strict, "工具 strict");
     toolStrict[index] = fn.strict === null ? null : strict;
     return {
@@ -221,10 +171,8 @@ function decodeToolChoice(value: unknown, tools: CanonicalTool[]): ToolChoice | 
   if (value === undefined || value === null) return undefined;
   if (value === "auto" || value === "none" || value === "required") return { type: value };
   const choice = record(value, "tool_choice");
-  fields(choice, ["type", "function"]);
   if (choice.type !== "function") invalid("Chat 不支持此 tool_choice");
   const fn = record(choice.function, "tool_choice.function");
-  fields(fn, ["name"]);
   const name = toolName(fn.name);
   if (!tools.some((tool) => tool.type === "function" && tool.name === name)) {
     invalid("tool_choice 必须选择已声明的工具");
@@ -236,13 +184,11 @@ function decodeResponseFormat(value: unknown): ChatResponseFormat | undefined {
   if (value === undefined || value === null) return undefined;
   const format = record(value, "response_format");
   if (format.type === "text" || format.type === "json_object") {
-    fields(format, ["type"]);
+    if (format.json_schema !== undefined) invalid("json_schema 仅适用于 JSON Schema 输出格式");
     return { type: format.type };
   }
-  fields(format, ["type", "json_schema"]);
   if (format.type !== "json_schema") invalid("Chat 不支持此 response_format");
   const schema = record(format.json_schema, "response_format.json_schema");
-  fields(schema, ["name", "description", "schema", "strict"]);
   const strict = optionalBoolean(schema.strict, "json_schema.strict");
   return {
     type: "json_schema",
@@ -321,7 +267,6 @@ function decodeExtensions(input: Record<string, unknown>): ChatRequestExtensions
   if (store !== undefined) extensions.store = store;
   if (input.stream_options !== undefined && input.stream_options !== null) {
     const options = record(input.stream_options, "stream_options");
-    fields(options, ["include_usage"]);
     extensions.stream_options = {
       include_usage: optionalBoolean(options.include_usage, "include_usage") ?? false,
     };
@@ -334,7 +279,6 @@ function decodeExtensions(input: Record<string, unknown>): ChatRequestExtensions
   // CCS 使用供应商思考参数表达开关；仅保存原始语义，不推断或映射模型能力。
   if (input.thinking !== undefined) {
     const thinking = record(input.thinking, "thinking");
-    fields(thinking, ["type"]);
     if (thinking.type !== "enabled" && thinking.type !== "disabled")
       invalid("thinking.type 仅支持 enabled 或 disabled");
     extensions.thinking = { type: thinking.type };
@@ -347,7 +291,6 @@ function decodeExtensions(input: Record<string, unknown>): ChatRequestExtensions
   }
   if (input.reasoning !== undefined) {
     const reasoning = record(input.reasoning, "reasoning");
-    fields(reasoning, ["effort"]);
     extensions.reasoning = { effort: decodeReasoningEffort(reasoning.effort, "reasoning.effort") };
   }
   const responseFormat = decodeResponseFormat(input.response_format);
@@ -357,7 +300,19 @@ function decodeExtensions(input: Record<string, unknown>): ChatRequestExtensions
 
 export function decodeChatRequest(value: unknown): CanonicalRequest {
   const input = record(value, "Chat 请求体");
-  fields(input, supportedFields);
+  // Decode supported properties explicitly. Client additions are ignored, while
+  // known features whose semantics cannot be represented still fail explicitly.
+  for (const key of [
+    "audio",
+    "modalities",
+    "logprobs",
+    "top_logprobs",
+    "functions",
+    "function_call",
+    "web_search_options",
+  ]) {
+    if (input[key] !== undefined) invalid("Chat 不支持音频、logprobs、旧式函数或内置搜索参数");
+  }
   if (input.n !== undefined && input.n !== null && input.n !== 1)
     invalid("Chat 仅支持 n=1 的单候选答案");
   if (input.max_tokens !== undefined && input.max_completion_tokens !== undefined)

@@ -150,6 +150,37 @@ function conversation(body: Wire | undefined, protocol: Protocol) {
 describe("HTTP Responses previous_response_id", () => {
   it.each(
     protocols.flatMap((protocol) => [false, true].map((stream) => ({ protocol, stream }))),
+  )("ignores unknown fields without consuming continuation history space: %j", async ({
+    protocol,
+    stream,
+  }) => {
+    const { post, calls } = setup(protocol, { RESPONSES_HISTORY_MAX_CREDENTIAL_BYTES: "2048" });
+    const first = terminal(
+      await post({
+        stream,
+        client_extra: "private-top-level",
+        input: [
+          {
+            role: "user",
+            client_extra: "private-history".repeat(400),
+            content: [{ type: "input_text", text: "hello", client_extra: "private-content" }],
+          },
+        ],
+      }),
+    );
+    terminal(await post({ stream, previous_response_id: first.id, input: "next" }));
+    expect(calls).toHaveLength(2);
+    expect(conversation(calls[1]?.body, protocol)).toEqual([
+      { role: "user", text: "hello" },
+      { role: "assistant", text: "answer 1" },
+      { role: "user", text: "next" },
+    ]);
+    expect(calls[1]?.body.previous_response_id).toBeUndefined();
+    expect(JSON.stringify(calls.map(({ body }) => body))).not.toContain("private-");
+  });
+
+  it.each(
+    protocols.flatMap((protocol) => [false, true].map((stream) => ({ protocol, stream }))),
   )("accepts Codex client_metadata without forwarding or retaining it: %j", async ({
     protocol,
     stream,

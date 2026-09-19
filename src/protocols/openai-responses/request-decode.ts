@@ -10,29 +10,6 @@ import { OpenAIAdapterError, type ResponsesTextConfig } from "./types.js";
 import { decodeWebSearchHistory } from "./web-search.js";
 
 const errorCode = "INVALID_OPENAI_RESPONSES_REQUEST" as const;
-const supportedTopLevelFields = new Set([
-  "background",
-  "client_metadata",
-  "input",
-  "include",
-  "instructions",
-  "max_output_tokens",
-  "max_tool_calls",
-  "metadata",
-  "model",
-  "parallel_tool_calls",
-  "previous_response_id",
-  "prompt_cache_key",
-  "reasoning",
-  "store",
-  "stream",
-  "temperature",
-  "text",
-  "tool_choice",
-  "tools",
-  "top_p",
-]);
-
 function invalid(message: string): never {
   throw new OpenAIAdapterError(errorCode, message);
 }
@@ -260,8 +237,8 @@ function decodeInput(value: unknown): Message[] {
   return value.map((rawItem) => {
     const item = record(rawItem, "input item");
     if (item.type === "item_reference") {
-      if (Object.keys(item).some((key) => key !== "type" && key !== "id")) {
-        return invalid("item_reference 仅支持 type 和 id 字段");
+      if (item.content !== undefined) {
+        return invalid("item_reference 不支持内联 content");
       }
       return {
         role: "assistant",
@@ -330,10 +307,7 @@ function validateWebSearchTool(tool: Record<string, unknown>, preview: boolean):
     if (!isRecord(tool.filters)) {
       invalid("Invalid OpenAI Responses request: invalid Web Search filters");
     }
-    for (const key of Object.keys(tool.filters)) {
-      if (key !== "allowed_domains" && key !== "blocked_domains") {
-        invalid("不支持的网页搜索过滤条件");
-      }
+    for (const key of ["allowed_domains", "blocked_domains"]) {
       const domains = tool.filters[key];
       if (
         domains !== undefined &&
@@ -484,9 +458,6 @@ function decodeToolChoice(value: unknown, tools: CanonicalTool[]): ToolChoice | 
 function decodeText(value: unknown): ResponsesTextConfig | undefined {
   if (value === undefined) return undefined;
   const text = record(value, "text");
-  if (Object.keys(text).some((key) => key !== "format" && key !== "verbosity")) {
-    return invalid("text 包含不支持的字段");
-  }
   const verbosity = text.verbosity;
   if (
     verbosity !== undefined &&
@@ -503,17 +474,12 @@ function decodeText(value: unknown): ResponsesTextConfig | undefined {
   if (text.format === undefined) return result;
   const format = record(text.format, "text.format");
   if (format.type === "text" || format.type === "json_object") {
-    if (Object.keys(format).some((key) => key !== "type")) {
-      return invalid("文本格式包含不支持的字段");
+    if (format.schema !== undefined) {
+      return invalid("schema 仅适用于 JSON Schema 输出格式");
     }
     return { ...result, format: { type: format.type } };
   }
-  if (
-    format.type !== "json_schema" ||
-    Object.keys(format).some(
-      (key) => !["type", "name", "schema", "description", "strict"].includes(key),
-    )
-  ) {
+  if (format.type !== "json_schema") {
     return invalid("不支持的 text.format");
   }
   const name = string(format.name, "text.format.name");
@@ -557,7 +523,17 @@ function decodeExtensions(input: Record<string, unknown>): Record<string, unknow
       ? {}
       : { previous_response_id: input.previous_response_id }),
     ...(input.prompt_cache_key === undefined ? {} : { prompt_cache_key: input.prompt_cache_key }),
-    ...(input.reasoning === undefined ? {} : { reasoning: input.reasoning }),
+    ...(input.reasoning === undefined
+      ? {}
+      : {
+          reasoning: isRecord(input.reasoning)
+            ? Object.fromEntries(
+                Object.entries(input.reasoning).filter(([key]) =>
+                  ["context", "effort", "generate_summary", "mode", "summary"].includes(key),
+                ),
+              )
+            : input.reasoning,
+        }),
   };
   if (input.store !== undefined && input.store !== null && typeof input.store !== "boolean") {
     return invalid("Invalid OpenAI Responses request: store must be a boolean");
@@ -588,10 +564,9 @@ function decodeExtensions(input: Record<string, unknown>): Record<string, unknow
 
 export function decodeResponsesRequest(value: unknown): CanonicalRequest {
   const input = record(value, "body");
-  for (const key of Object.keys(input)) {
-    if (!supportedTopLevelFields.has(key)) {
-      return invalid("Unsupported OpenAI Responses request field");
-    }
+  // Read only supported properties; unknown client fields are never forwarded.
+  if (input.conversation !== undefined) {
+    return invalid("Conversations are not supported; use previous_response_id or send full input");
   }
   // Codex sends transport/client diagnostics here. Validate them without adding
   // them to model input, upstream metadata, or continuation history.
