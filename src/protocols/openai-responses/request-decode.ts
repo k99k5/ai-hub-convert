@@ -8,6 +8,7 @@ import type {
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../providers/web-search/internal.js";
 import { OpenAIAdapterError, type ResponsesTextConfig } from "./types.js";
 import { decodeWebSearchHistory } from "./web-search.js";
+import { conversationId } from "./conversation.js";
 
 const errorCode = "INVALID_OPENAI_RESPONSES_REQUEST" as const;
 function invalid(message: string): never {
@@ -565,8 +566,9 @@ function decodeExtensions(input: Record<string, unknown>): Record<string, unknow
 export function decodeResponsesRequest(value: unknown): CanonicalRequest {
   const input = record(value, "body");
   // Read only supported properties; unknown client fields are never forwarded.
-  if (input.conversation !== undefined) {
-    return invalid("Conversations are not supported; use previous_response_id or send full input");
+  const conversation = conversationId(input.conversation);
+  if (conversation !== undefined && input.previous_response_id != null) {
+    return invalid("conversation 和 previous_response_id 不能同时使用");
   }
   // Codex sends transport/client diagnostics here. Validate them without adding
   // them to model input, upstream metadata, or continuation history.

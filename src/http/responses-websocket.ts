@@ -13,6 +13,11 @@ import { StreamOutputLimitError } from "../stream/output-limits.js";
 import { ToolArgumentLimitError } from "../stream/tool-argument-limits.js";
 import { AuthenticationError, extractResponsesApiKey } from "./auth.js";
 import { mapUpstreamError } from "./upstream-errors.js";
+import type { ConversationTurn } from "../policies/conversation-store.js";
+import {
+  conversationItems,
+  withConversationFrame,
+} from "../protocols/openai-responses/conversation.js";
 
 type Wire = Record<string, unknown>;
 interface AbortScope {
@@ -247,6 +252,7 @@ class ResponsesWebSocketSession {
     const signal = AbortSignal.any([this.#controller.signal, controller.signal]);
     const lane = streamId ?? "";
     let completedId: string | undefined;
+    let conversation: ConversationTurn | undefined;
     try {
       const { type, stream_id, stream, generate, previous_response_id, ...body } = event;
       if (generate !== undefined && typeof generate !== "boolean") {
@@ -273,6 +279,13 @@ class ResponsesWebSocketSession {
         );
       }
       if (previous_response_id !== undefined && previous_response_id !== null) {
+        if (body.conversation != null) {
+          throw new WebSocketRequestError(
+            "invalid_request",
+            "conversation and previous_response_id cannot be used together",
+            "conversation",
+          );
+        }
         if (typeof previous_response_id !== "string" || previous_response_id.length === 0) {
           throw new WebSocketRequestError(
             "invalid_request",
@@ -310,9 +323,11 @@ class ResponsesWebSocketSession {
         );
       }
       const prepared = this.options.prepare({ ...body, stream: true }, this.apiKey);
+      conversation = prepared.conversation;
       // Continuation belongs to this connection; never rely on upstream persistence.
       prepared.body = { ...(prepared.body as Wire), store: false };
       const send = async (frame: ResponsesSseFrame | string) => {
+        frame = withConversationFrame(frame, conversation?.id);
         // WS carries one JSON event per message, without SSE framing or the [DONE] sentinel.
         if (typeof frame === "string") return;
         if (frame.event === "error") {
@@ -335,6 +350,7 @@ class ResponsesWebSocketSession {
         }
         if (frame.event === "response.completed") {
           const response = frame.data.response as Wire;
+          conversation?.commit(conversationItems(response.output as unknown[], true));
           completedId = response.id as string;
           this.#remember(lane, completedId, prepared.request.model, [
             ...prepared.input,
@@ -394,6 +410,7 @@ class ResponsesWebSocketSession {
       await this.#sendError(error, streamId);
     } finally {
       clearTimeout(timer);
+      conversation?.release();
     }
   }
 

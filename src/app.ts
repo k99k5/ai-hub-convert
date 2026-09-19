@@ -31,6 +31,12 @@ import { mapUpstreamError } from "./http/upstream-errors.js";
 import { normalizeReadToolArguments } from "./policies/read-tool.js";
 import { ResponsesReferenceCache } from "./policies/responses-reference-cache.js";
 import { ResponsesHistoryCache } from "./policies/responses-history-cache.js";
+import { ConversationError, ConversationStore } from "./policies/conversation-store.js";
+import { registerConversationRoutes } from "./http/conversations.js";
+import {
+  conversationItems,
+  withConversationFrame,
+} from "./protocols/openai-responses/conversation.js";
 import { finalizeThinkingBlock } from "./policies/thinking-signature.js";
 import {
   assertWebSearchSupported,
@@ -146,7 +152,11 @@ function outputLimits(config: AppConfig): StreamOutputLimits {
 
 function routeProtocol(url: string): RouteProtocol {
   if (url === "/v1/chat/completions") return "openai-chat";
-  return url === "/v1/responses" || url === "/v1/usage" || url === "/v1/models"
+  return url === "/v1/responses" ||
+    url === "/v1/usage" ||
+    url === "/v1/models" ||
+    url === "/v1/conversations" ||
+    url.startsWith("/v1/conversations/")
     ? "openai-responses"
     : "anthropic";
 }
@@ -187,6 +197,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     ...config.responsesHistory,
     maxEntryBytes: config.server.bodyLimitBytes,
   });
+  const conversations = new ConversationStore({
+    ...config.conversations,
+    maxConversationBytes: config.server.bodyLimitBytes,
+  });
   const cacheCleanup = setInterval(() => {
     referenceCache.prune();
     historyCache.prune();
@@ -214,6 +228,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     clearInterval(cacheCleanup);
     referenceCache.clear();
     historyCache.clear();
+    conversations.clear();
   });
   app.register(async (api) => {
     await api.register(fastifySSE, { heartbeatInterval: 0 });
@@ -221,9 +236,21 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       config,
       activeStreams,
       prepare: (value, apiKey) => {
-        const prepared = prepareResponsesRequest(value, apiKey, config, referenceCache);
-        assertWebSearchSupported(prepared.request, webSearchProviders);
-        return prepared;
+        const prepared = prepareResponsesRequest(
+          value,
+          apiKey,
+          config,
+          referenceCache,
+          undefined,
+          conversations,
+        );
+        try {
+          assertWebSearchSupported(prepared.request, webSearchProviders);
+          return prepared;
+        } catch (error) {
+          prepared.conversation?.release();
+          throw error;
+        }
       },
       run: (prepared, apiKey, scope, send) =>
         streamResponsesResponse(
@@ -247,6 +274,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         ),
     });
     api.register(registerHealthRoutes);
+    registerConversationRoutes(api, conversations);
     api.setErrorHandler((error, request, reply) => {
       const protocol = routeProtocol(request.url.split("?", 1)[0] ?? request.url);
       const boundaryError = isBoundaryError(error) ? error : undefined;
@@ -710,6 +738,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             config,
             referenceCache,
             historyCache,
+            conversations,
           );
           canonicalRequest = prepared.request;
           upstreamBody = prepared.body;
@@ -724,10 +753,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
               request_id: request.id,
             });
           }
-          if (error instanceof ResponsesContinuationError) {
+          if (error instanceof ResponsesContinuationError || error instanceof ConversationError) {
             return reply.code(error.status).send({
               error: {
-                type: "invalid_request_error",
+                type: error.status === 429 ? "rate_limit_error" : "invalid_request_error",
                 code: error.code,
                 message: error.message,
                 param: error.param,
@@ -754,6 +783,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         try {
           assertWebSearchSupported(canonicalRequest, webSearchProviders);
         } catch (error) {
+          prepared.conversation?.release();
           if (error instanceof WebSearchUnsupportedError) {
             return reply.code(501).send({
               error: {
@@ -769,6 +799,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
         const rememberResponse = (response: Record<string, unknown>) => {
           const output = response.output as unknown[];
+          prepared.conversation?.commit(conversationItems(output, true));
           referenceCache.remember(apiKey, canonicalRequest.model, output);
           if (prepared.historyComplete) {
             historyCache.remember(apiKey, canonicalRequest.model, response.id as string, [
@@ -804,7 +835,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
                 maxFrameBytes: config.upstream.sseFrameLimitBytes,
                 onTimeout: (error) => abortScope.abort(error),
               },
-              clientStream.send,
+              (frame) => clientStream.send(withConversationFrame(frame, prepared.conversation?.id)),
               rememberResponse,
               config.upstream.protocol,
               upstreamBody,
@@ -821,10 +852,13 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
               data: {
                 type: "error",
                 code:
-                  error instanceof ToolArgumentLimitError || error instanceof StreamOutputLimitError
+                  error instanceof ConversationError ||
+                  error instanceof ToolArgumentLimitError ||
+                  error instanceof StreamOutputLimitError
                     ? error.code
                     : "upstream_stream_error",
-                message: "The upstream stream failed",
+                message:
+                  error instanceof ConversationError ? error.message : "The upstream stream failed",
                 param: null,
               },
             });
@@ -833,6 +867,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             clientStream.dispose();
             removeActiveStream();
             abortScope.dispose();
+            prepared.conversation?.release();
           }
         }
 
@@ -865,6 +900,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             outputLimits(config),
           );
           abortScope.signal.throwIfAborted();
+          if (prepared.conversation) response.conversation = { id: prepared.conversation.id };
           if (response.status === "completed" && Array.isArray(response.output)) {
             rememberResponse(response);
           }
@@ -874,6 +910,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           return reply.code(mapped.status).send(mapped.body);
         } finally {
           abortScope.dispose();
+          prepared.conversation?.release();
         }
       },
     );

@@ -1,6 +1,6 @@
 # LLM Protocol Gateway
 
-一个不持久化数据的 OpenAI / Anthropic 协议转换网关。服务使用 TypeScript ESM、Fastify 5 和 Node.js 24，对外提供 Anthropic Messages、Anthropic token counting、OpenAI Responses 与 Chat Completions 接口；不使用数据库。Responses 支持 HTTP JSON/SSE 和 WebSocket。HTTP 的 `previous_response_id` 续轮使用有容量上限的短期输入/输出历史缓存，`item_reference` 使用独立的输出项缓存，均按调用凭据和请求模型隔离；WebSocket 历史仅在连接内保留，断线即清理。凭据、prompt 和会话均不写磁盘。
+一个不持久化数据的 OpenAI / Anthropic 协议转换网关。服务使用 TypeScript ESM、Fastify 5 和 Node.js 24，对外提供 Anthropic Messages、Anthropic token counting、OpenAI Responses、Conversations 与 Chat Completions 接口；不使用数据库。Responses 支持 HTTP JSON/SSE 和 WebSocket。HTTP 的 `previous_response_id` 续轮使用有容量上限的短期输入/输出历史缓存，`item_reference` 使用独立的输出项缓存，均按调用凭据和请求模型隔离；WebSocket 的响应 ID 历史仅在连接内保留。`conversation` 使用独立的有界内存存储，按调用凭据隔离，HTTP 和 WebSocket 可共用同一会话。凭据、prompt 和会话均不写磁盘，重启清空。
 
 ## 路由
 
@@ -10,6 +10,7 @@
 | `POST /v1/messages/count_tokens` | 无 | 默认 Chat 模式返回 501；不通过生成请求或本地估算计数 |
 | `POST /v1/responses` | `/v1/chat/completions` | 默认强制 Chat，转换回 Responses JSON/SSE；支持工具、`previous_response_id`、引用续轮和缓存统计 |
 | `GET /v1/responses`（WebSocket Upgrade） | `/v1/chat/completions` | 默认走 Chat HTTP/SSE，输出 Responses WS 事件；支持连接内增量续轮和并行流 |
+| `/v1/conversations`、`/v1/conversations/:id`、`/v1/conversations/:id/items` | 无 | 本地创建、读取、更新、删除会话及管理历史项；支持 Responses `conversation` 续聊 |
 | `POST /v1/chat/completions` | `/v1/chat/completions` | 完整 decode → canonical IR → encode；直接请求 Chat，不回退或重试 |
 | `GET /v1/usage` | `/v1/usage` | 透传用量查询；字段含义由上游定义 |
 | `GET /v1/models` | `/v1/models` | 透传模型列表查询 |
@@ -134,6 +135,28 @@ console.log(next.output_text);
 
 默认 Chat 模式中，ID 过期、未命中或凭据/模型不匹配时返回 HTTP 400 `previous_response_not_found`；省略 ID 并回传完整历史即可继续。显式 Responses 上游模式在本地未命中时保留原有 ID 透传能力，由上游判断是否可用；这类响应不会作为完整历史缓存在本地。展开后超过 `BODY_LIMIT_BYTES` 返回 HTTP 413。容量、清理和存储语义见[HTTP 续轮契约](docs/compatibility.md#responses-http-历史缓存)。
 
+## Conversations 会话
+
+先创建会话，再在每轮 Responses 请求中传同一个 `conversation` ID。网关自动加载历史并保存成功完成的本轮输入和输出，上游为 Chat 或 Responses 均可使用。
+
+```js
+const conversation = await client.conversations.create();
+await client.responses.create({
+  model: "deepseek-v4.1-flash",
+  conversation: conversation.id,
+  input: "记住这个编号：42",
+});
+await client.responses.create({
+  model: "deepseek-v4.1-flash",
+  conversation: conversation.id,
+  input: "刚才的编号是什么？",
+});
+```
+
+HTTP JSON/SSE 和 WebSocket 的 `response.create` 共用会话；WS 重连后可继续使用该 ID。也接受 `conversation:{id:"conv_..."}`，与非空 `previous_response_id` 互斥。顶层 instructions、工具定义和生成参数每轮提供，不写入会话历史。
+
+会话只在本进程内存中保存，直到删除或重启；不跨实例共享。相同 API key 可访问同一会话，支持更换模型，但内容仍须符合目标上游能力。单会话最多 4096 项，大小受 `BODY_LIMIT_BYTES` 限制；每凭据默认 32 MiB、128 个会话，全进程默认 128 MiB、1024 个会话。超限明确报错，不自动淘汰或截断历史。同一会话生成期间的并发写入返回 409，可在当前请求结束后重试。详见 [Conversations 兼容契约](docs/compatibility.md#conversations-内存会话)。
+
 ## Responses WebSocket
 
 连接 `ws://127.0.0.1:3000/v1/responses`，握手时携带 `Authorization: Bearer YOUR_UPSTREAM_KEY`。部署在 TLS 反向代理后使用 `wss://`，并让代理转发 WebSocket Upgrade。上游仍使用现有 HTTP/SSE，无需支持 WebSocket；`UPSTREAM_PROTOCOL=responses` 时改走上游 Responses HTTP/SSE。
@@ -175,7 +198,7 @@ HTTP 和 WS 均接受 Codex 的 `client_metadata`（JSON 对象或 `null`）。�
 
 每个流只保留最新成功响应的完整输入/输出历史；连接内总容量默认 32 MiB，超限按写入顺序淘汰，单条超限则不缓存，但仍完整返回生成结果。缺失、淘汰、模型不匹配或重连后的旧 ID 返回 `previous_response_not_found`，需要省略 ID 并发送完整历史。失败与 incomplete 响应不缓存；失败的同流续轮使其父 ID 失效，跨流失败不移除来源流的父 ID。
 
-WS 始终向上游发送 `store:false`，不提供跨连接或持久化恢复。默认每 30 秒发送 ping，未收到下一周期的 pong 则断开；连接最长 60 分钟。断线、到期或服务关闭会取消该连接所有上游请求并清理历史。具体限制及错误见[WebSocket 兼容契约](docs/compatibility.md#responses-websocket)。
+WS 始终向上游发送 `store:false`。连接内 `previous_response_id` 历史断线清理；使用 `conversation` 时，可在同一网关进程内跨连接恢复，进程重启后仍须新建会话。默认每 30 秒发送 ping，未收到下一周期的 pong 则断开；连接最长 60 分钟。断线、到期或服务关闭会取消该连接所有上游请求。具体限制及错误见[WebSocket 兼容契约](docs/compatibility.md#responses-websocket)。
 
 ## 配置
 
@@ -210,6 +233,8 @@ WS 始终向上游发送 `store:false`，不提供跨连接或持久化恢复。
 | `RESPONSES_HISTORY_TTL_MS` | `300000` | HTTP Responses 历史固定有效期，单位 ms，必须大于 0 |
 | `RESPONSES_HISTORY_MAX_CREDENTIAL_BYTES` | `33554432` | HTTP 历史每凭据字节预算，各模型共用；最多 128 条 |
 | `RESPONSES_HISTORY_MAX_BYTES` | `134217728` | HTTP 历史全进程字节预算；最多 1024 条，单条另受 `BODY_LIMIT_BYTES` 限制 |
+| `CONVERSATIONS_MAX_CREDENTIAL_BYTES` | `33554432` | 独立的 Conversations 每凭据内存字节预算；最多 128 个会话 |
+| `CONVERSATIONS_MAX_BYTES` | `134217728` | 独立的 Conversations 全进程内存字节预算；最多 1024 个会话 |
 | `SHUTDOWN_GRACE_MS` | `10000` | 优雅关闭期限 |
 | `CLAUDE_CODE_MIN_VERSION` | 空 | 接受范围的闭区间下界，例如 `2.1.63` |
 | `CLAUDE_CODE_MAX_VERSION` | 空 | 接受范围的闭区间上界，例如 `2.5.0` |
@@ -302,7 +327,7 @@ HTTP 上游必须显式启用 `ALLOW_INSECURE_UPSTREAM`；使用 HTTPS 时应填
 docker compose down
 ```
 
-Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖；重建或重启会清空 Responses 引用和历史缓存。它会复用镜像内置的 `/health/ready` healthcheck；该检查确认网关进程可接受请求，不代表上游服务连通。
+Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖；重建或重启会清空 Conversations 会话、Responses 引用和历史缓存。它会复用镜像内置的 `/health/ready` healthcheck；该检查确认网关进程可接受请求，不代表上游服务连通。
 
 镜像使用 Node 24 多阶段构建、固定 pnpm 10.6.3，只携带 production dependencies，并以非 root `node` 用户运行。镜像内置 `/health/ready` healthcheck。
 
@@ -330,7 +355,7 @@ Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖
 - 禁止SDK自动重试，避免重复计费或重复工具执行。
 - body、工具参数、流缓冲和超时必须有上限。
 - client disconnect应传播AbortSignal。
-- 不持久化凭据、prompt、会话或响应；Responses 引用与 HTTP 历史使用有容量上限的短期缓存，WS 另在连接内暂存历史，断线清理。调用凭据仅在处理请求或维持 WS 连接时使用，缓存键只保存凭据的 HMAC 散列。
+- 不持久化凭据、prompt、会话或响应；Responses 引用与 HTTP 历史使用有容量上限的短期缓存，WS 另在连接内暂存响应 ID 历史，断线清理。Conversations 使用独立的有界内存存储，删除或重启清理。调用凭据仅在处理请求或维持 WS 连接时使用，存储键只保存凭据的 HMAC 散列。
 
 ## 设计依据
 

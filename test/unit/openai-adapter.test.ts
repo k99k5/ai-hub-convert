@@ -299,14 +299,15 @@ describe("OpenAI Responses adapter", () => {
     ).toThrow(/invalid Web Search user location/);
   });
 
-  it("rejects unsupported top-level controls instead of silently changing semantics", () => {
+  it("rejects conflicting conversation continuation controls", () => {
     expect(() =>
       decodeResponsesRequest({
         model: "gpt-test",
         input: "hello",
         conversation: "conv_1",
+        previous_response_id: "resp_1",
       }),
-    ).toThrow(/Conversations are not supported/);
+    ).toThrow(/conversation 和 previous_response_id 不能同时使用/);
   });
 
   it("rejects non-JSON reasoning controls and sanitizes incomplete details", () => {

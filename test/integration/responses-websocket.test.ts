@@ -166,6 +166,144 @@ describe("Responses WebSocket transport", () => {
   it.each<Protocol>([
     "chat",
     "responses",
+  ])("shares a conversation across prewarm, connections and HTTP on %s", async (protocol) => {
+    const { app, url, calls } = await setup(protocol);
+    const headers = { authorization: "Bearer caller-key" };
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/conversations",
+      headers,
+      payload: { items: [{ role: "user", content: "seed context" }] },
+    });
+    expect(created.statusCode).toBe(200);
+    const conversation = created.json().id as string;
+    const firstPeer = await connect(url);
+    const prewarm = await firstPeer.turn({
+      conversation,
+      generate: false,
+      input: "prewarm context",
+    });
+    expect(prewarm.type).toBe("response.completed");
+    expect((prewarm.response as Wire).conversation).toEqual({ id: conversation });
+    const first = await firstPeer.turn({
+      conversation: { id: conversation },
+      input: "first",
+      instructions: "one turn only",
+    });
+    expect(first.type).toBe("response.completed");
+    firstPeer.socket.close();
+    await once(firstPeer.socket, "close");
+    const peer = await connect(url);
+    const second = await peer.turn({ conversation, input: "second" });
+    expect(second.type).toBe("response.completed");
+    expect((second.response as Wire).conversation).toEqual({ id: conversation });
+    const http = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers,
+      payload: { model: "m", conversation, input: "http next", stream: true },
+    });
+    expect(http.statusCode, http.body).toBe(200);
+    expect(http.body).toContain("event: response.completed");
+    expect(calls).toHaveLength(3);
+    const history = JSON.stringify(calls[2]?.body);
+    for (const text of [
+      "seed context",
+      "prewarm context",
+      "first",
+      "answer 1",
+      "second",
+      "answer 2",
+      "http next",
+    ])
+      expect(history).toContain(text);
+    expect(history).not.toContain("one turn only");
+    expect(calls.every(({ body }) => body.conversation === undefined && body.store === false)).toBe(
+      true,
+    );
+    const stored = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${conversation}/items`,
+      headers,
+    });
+    expect(stored.json().data).toHaveLength(8);
+    const conflict = await peer.turn({
+      conversation,
+      previous_response_id: responseId(second),
+      input: "conflict",
+    });
+    expect(conflict).toMatchObject({
+      type: "error",
+      status: 400,
+      error: { code: "invalid_request" },
+    });
+    const unauthorized = await connect(url, "other-key");
+    expect(await unauthorized.turn({ conversation })).toMatchObject({
+      type: "error",
+      status: 404,
+      error: { code: "conversation_not_found" },
+    });
+  });
+
+  it("releases a conversation after WS disconnect without appending a partial turn", async () => {
+    let aborted = false;
+    const { app, url, calls } = await setup("chat", {}, (round, _body, signal) => {
+      if (round > 1) return answer("chat", round);
+      return new Promise<Response>((_resolve, reject) =>
+        signal.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            reject(signal.reason);
+          },
+          { once: true },
+        ),
+      );
+    });
+    const headers = { authorization: "Bearer caller-key" };
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/conversations",
+      headers,
+      payload: {},
+    });
+    const conversation = created.json().id as string;
+    const first = await connect(url);
+    first.send({ type: "response.create", model: "m", conversation, input: "cancelled input" });
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    const peer = await connect(url);
+    expect(await peer.turn({ conversation })).toMatchObject({
+      type: "error",
+      status: 409,
+      error: { code: "conversation_busy" },
+    });
+    first.socket.terminate();
+    await vi.waitFor(() => expect(aborted).toBe(true));
+    await vi.waitFor(async () => {
+      const updated = await app.inject({
+        method: "POST",
+        url: `/v1/conversations/${conversation}`,
+        headers,
+        payload: { metadata: {} },
+      });
+      expect(updated.statusCode).toBe(200);
+    });
+    const stored = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${conversation}/items`,
+      headers,
+    });
+    expect(stored.json().data).toEqual([]);
+    expect(await peer.turn({ conversation, input: "retry" })).toHaveProperty(
+      "type",
+      "response.completed",
+    );
+    expect(JSON.stringify(calls[1]?.body)).not.toContain("cancelled input");
+  });
+
+  it.each<Protocol>([
+    "chat",
+    "responses",
   ])("ignores unknown frame and input fields across prewarm and continuation on %s", async (protocol) => {
     const { url, calls } = await setup(protocol, { WEBSOCKET_HISTORY_LIMIT_BYTES: "2048" });
     const peer = await connect(url);

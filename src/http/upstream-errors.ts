@@ -1,4 +1,5 @@
 import { UpstreamHttpError } from "../upstream/client.js";
+import { ConversationError } from "../policies/conversation-store.js";
 
 export type ErrorProtocol = "anthropic" | "openai-responses" | "openai-chat";
 
@@ -12,6 +13,20 @@ export function mapUpstreamError(
   error: unknown,
   requestId: string,
 ): MappedHttpError {
+  if (protocol !== "anthropic" && error instanceof ConversationError) {
+    return {
+      status: error.status,
+      body: {
+        error: {
+          type: error.status === 429 ? "rate_limit_error" : "invalid_request_error",
+          code: error.code,
+          message: error.message,
+          param: error.param,
+        },
+        request_id: requestId,
+      },
+    };
+  }
   const status = error instanceof UpstreamHttpError ? normalizeStatus(error.status) : 500;
 
   if (protocol === "anthropic") {

@@ -22,6 +22,10 @@ export interface AppConfig {
     maxCredentialBytes: number;
     maxBytes: number;
   };
+  conversations: {
+    maxCredentialBytes: number;
+    maxBytes: number;
+  };
   upstream: {
     baseUrl: URL;
     protocol: "chat" | "responses";
@@ -133,6 +137,20 @@ export function loadConfig(environment: Environment = process.env): AppConfig {
       maxBytes: parseInteger(
         environment.RESPONSES_HISTORY_MAX_BYTES,
         "RESPONSES_HISTORY_MAX_BYTES",
+        128 * 1024 * 1024,
+        { min: 1 },
+      ),
+    },
+    conversations: {
+      maxCredentialBytes: parseInteger(
+        environment.CONVERSATIONS_MAX_CREDENTIAL_BYTES,
+        "CONVERSATIONS_MAX_CREDENTIAL_BYTES",
+        32 * 1024 * 1024,
+        { min: 1 },
+      ),
+      maxBytes: parseInteger(
+        environment.CONVERSATIONS_MAX_BYTES,
+        "CONVERSATIONS_MAX_BYTES",
         128 * 1024 * 1024,
         { min: 1 },
       ),

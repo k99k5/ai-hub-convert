@@ -7,12 +7,13 @@
 - `POST /v1/responses`
 - `GET /v1/responses`（WebSocket Upgrade）
 - `POST /v1/chat/completions`
+- `/v1/conversations` 及其会话、历史项管理接口
 - `GET /v1/usage`
 - `GET /v1/models`
 - `GET /health/live`
 - `GET /health/ready`
 
-网关不持久化凭据、prompt、会话、conversation、response 或 token-count 结果。Responses 引用续轮使用短期输出项缓存，HTTP `previous_response_id` 使用独立的有界短期历史缓存；WS 历史另在连接内保留，断线即清理。缓存键只保存凭据的 HMAC 散列，WS 仅在存活连接处理上游请求时保留握手凭据。
+网关不持久化凭据、prompt、会话、conversation、response 或 token-count 结果。Responses 引用续轮使用短期输出项缓存，HTTP `previous_response_id` 使用独立的有界短期历史缓存；WS 响应 ID 历史另在连接内保留，断线即清理。Conversations 使用独立的有界内存存储，可在 HTTP 和 WS 之间共用，删除或进程重启清理。存储键只保存凭据的 HMAC 散列，WS 仅在存活连接处理上游请求时保留握手凭据。
 
 ## 路由与回退
 
@@ -21,7 +22,7 @@
 | Anthropic Messages JSON/SSE | 直接 Chat，不回退或重试 | Responses；仅明确 endpoint 不存在且零语义事件、零客户端写入时回退 Chat |
 | Anthropic count_tokens | HTTP 501，不调用上游 | Responses input_tokens；永不回退 |
 | OpenAI Responses JSON/SSE | 直接 Chat，不回退或重试 | Responses；永不回退 |
-| OpenAI Responses WebSocket | 连接内续轮展开后走 Chat HTTP/SSE | 连接内续轮展开后走 Responses HTTP/SSE |
+| OpenAI Responses WebSocket | 连接历史或 conversation 展开后走 Chat HTTP/SSE | 连接历史或 conversation 展开后走 Responses HTTP/SSE |
 | OpenAI Chat Completions JSON/SSE | 直接 Chat，不回退或重试 | 直接 Chat，不回退或重试 |
 
 `UPSTREAM_PROTOCOL` 只接受 `chat`（默认）或 `responses`。Chat 模式不探测 Responses，所有失败直接结束该请求；内置搜索所需的模型续轮仍全部使用 Chat。Responses 模式中的明确 endpoint 不存在仅包括 HTTP 405、501，或携带 `route_not_found`、`endpoint_not_found`、`unsupported_endpoint`、`not_implemented` 的 HTTP 404。认证、限流、服务端错误、timeout/disconnect、model missing、模糊 404、HTTP 200 后 malformed SSE 都不会触发回退。
@@ -135,9 +136,34 @@ Anthropic `tool_result.is_error:true` 在 Responses 和 Chat 上游的结果正�
 
 Chat 模式本地未命中时，在上游调用前返回 HTTP 400，`error.code=previous_response_not_found`、`error.param=previous_response_id`；不静默丢弃上下文。Responses 模式保留原生续轮兼容：本地未命中时，原样向上游发送 ID 和本轮输入，由上游验证凭据和历史；这类请求的祖先内容未知，因此其响应不会写入本地完整历史缓存。无额外探测或重试。
 
-展开历史后的请求仍受 `BODY_LIMIT_BYTES` 限制，超限返回 HTTP 413 `request_too_large`；引用展开继续使用原有大小限制。省略或设置 `previous_response_id:null` 表示不引用历史。历史缓存不写磁盘、不跨实例共享；重启后本地 ID 失效，多实例需要粘性路由，或由客户端回传完整历史。字节预算是序列化内容和元数据的记账上限，不是进程 RSS 上限。此功能不提供 GET response、删除 response、conversation 或后台任务 API；请求中的 `conversation` 仍返回 400，避免丢失会话上下文。
+展开历史后的请求仍受 `BODY_LIMIT_BYTES` 限制，超限返回 HTTP 413 `request_too_large`；引用展开继续使用原有大小限制。省略或设置 `previous_response_id:null` 表示不引用历史。历史缓存不写磁盘、不跨实例共享；重启后本地 ID 失效，多实例需要粘性路由，或由客户端回传完整历史。字节预算是序列化内容和元数据的记账上限，不是进程 RSS 上限。此功能不提供 GET response、删除 response 或后台任务 API；命名会话使用下述独立的 Conversations 接口。
 
 本地验证：`pnpm exec vitest run test/unit/responses-history-cache.test.ts test/integration/responses-previous-response.test.ts`，覆盖 JSON/SSE 交叉续轮、SDK、工具、凭据/模型隔离、容量和过期、分叉、失败及原生上游 ID 透传。
+
+### Conversations 内存会话
+
+Conversations 在网关本地管理，不向上游发送会话管理请求或本地会话 ID。兼容官方 SDK 的以下接口，均使用 Bearer 鉴权；网关验证凭据格式，上游只在生成时验证 API key 有效性。
+
+| 接口 | 行为 |
+| --- | --- |
+| `POST /v1/conversations` | 创建 `conv_...` 会话，接受可选 `metadata` 和初始 `items` |
+| `GET /v1/conversations/:id` | 返回 `id/object/created_at/metadata` |
+| `POST /v1/conversations/:id` | 替换指定的 metadata；省略时不修改，null 清空 |
+| `DELETE /v1/conversations/:id` | 返回 `conversation.deleted`，同时释放本地历史内存 |
+| `POST /v1/conversations/:id/items` | 原子追加最多 20 项，返回新增项列表 |
+| `GET /v1/conversations/:id/items` | 默认倒序，支持 `order=asc/desc`、`after` 和 1–100 的 `limit`，默认 20 |
+| `GET /v1/conversations/:id/items/:item_id` | 读取单项 |
+| `DELETE /v1/conversations/:id/items/:item_id` | 删除单项，返回所属 conversation 对象 |
+
+创建会话也最多携带 20 个初始项；metadata 最多 16 个字符串键值，键不超过 64 字符、值不超过 512 字符。历史项支持本项目 Responses 的文本、图片、推理、函数调用/结果和网页搜索历史子集；管理接口要求完整内容，拒绝未解析的 `item_reference`。未知附加字段忽略。缺省 item ID 和 status 由网关补齐，同一会话不允许重复 ID。列表返回已保存的支持字段，`include` 接受 `reasoning.encrypted_content`、`web_search_call.action.sources` 和 `message.input_image.image_url`，不补充未保存的数据。
+
+生成时传 `conversation:"conv_..."` 或 `conversation:{id:"conv_..."}`；null/省略表示不关联会话。与非 null 的 `previous_response_id` 同时使用返回 400。HTTP JSON/SSE 与 WS `response.create` 共用会话，所有携带 response 对象的事件及 JSON 响应均返回 `conversation:{id}`。网关加载当前历史并添加本轮 input，强制上游 `store:false`；input/output 在完整校验成功且状态为 completed 后一次性写入。上游失败、完成前取消、流损坏和 incomplete 不修改历史；容量错误也不会部分写入。WS `generate:false` 成功后保存输入，空输出不调用上游。顶层 instructions、工具声明、采样配置、请求 metadata 等每轮提供，不保存到会话。
+
+会话按 API key HMAC 隔离，不绑定模型；换模型仍执行目标协议的能力校验。未知、已删除、其他凭据或重启前的 ID 返回 404 `conversation_not_found`，不会隐式新建或透传到上游。默认每凭据 32 MiB/128 个会话，全进程 128 MiB/1024 个会话，字节预算由 `CONVERSATIONS_MAX_CREDENTIAL_BYTES`、`CONVERSATIONS_MAX_BYTES` 配置；每个会话最多 4096 项，序列化数据加元数据开销及展开后的请求另受 `BODY_LIMIT_BYTES` 限制。单会话超限返回 413，凭据/全局容量超限返回 429 `conversation_capacity_exceeded`。不按 TTL/FIFO 淘汰历史，删除会话或历史项后释放预算。
+
+同一会话生成期间，其他生成、更新、删除或追加操作返回 409 `conversation_busy`；读取可见上次已提交的内容，不同会话互不阻塞。会话只保存在当前进程，重启清空，多实例需要粘性路由。与官方持久化 Conversations 不同，删除本地会话同时释放其历史项；本项目不维护可单独检索的持久化 response 对象。
+
+本地验证：`test/integration/conversations.test.ts`、`test/integration/responses-websocket.test.ts`、`test/unit/conversation-store.test.ts`。
 
 ### Responses WebSocket
 
@@ -148,6 +174,7 @@ Chat 模式本地未命中时，在上游调用前返回 HTTP 400，`error.code=
 | 上游传输 | 依据 `UPSTREAM_PROTOCOL` 使用 Chat 或 Responses HTTP/SSE，始终 `store:false`；不连接上游 WS |
 | Codex 请求 | `stream` 可省略或为 `true`，兼容生成与 `generate:false` 预热；`client_metadata` 使用上述诊断字段规则 |
 | 增量续轮 | `previous_response_id` 在当前连接内、按模型查找成功响应；展开为完整历史后调用上游，不透传 ID |
+| 命名会话 | `conversation` 使用进程内共享存储，可跨 HTTP/WS 和 WS 连接续聊；与 `previous_response_id` 互斥 |
 | 续轮参数 | 只继承输入/输出上下文；`instructions`、工具定义、采样等生成参数每轮重传 |
 | 本地预备 | `generate:false` 返回空输出的成功响应和 ID，供续轮引用，不调用上游，不宣称模型预热 |
 | 多路并发 | `stream_id` 为 1–256 个 ASCII 字母、数字、`_`、`-`、`.`；最多 32 个命名流，另有默认流。同名 FIFO，不同名可并发 |
@@ -159,7 +186,7 @@ Chat 模式本地未命中时，在上游调用前返回 HTTP 400，`error.code=
 | 流控 | 等待 WS 写入回调后读取下一上游事件；所有流的待发送字节数上限为 `UPSTREAM_STREAM_OUTPUT_LIMIT_BYTES + UPSTREAM_SSE_FRAME_LIMIT_BYTES`，超限断开并取消上游 |
 | 心跳/寿命 | `WEBSOCKET_PING_INTERVAL_MS` 默认 30 秒，下周期未收到 pong 则终止；`WEBSOCKET_MAX_CONNECTION_MS` 默认且最多 60 分钟 |
 | 取消/清理 | 断线、到期、心跳失败、服务关闭取消全部上游请求，清空连接历史。单次生成仍遵守上游总超时、首字节与空闲超时 |
-| 恢复 | 不提供跨连接存储回退；重连或缓存 miss 后省略 ID/设 `null` 并发送完整输入上下文 |
+| 恢复 | 连接内响应 ID 不跨连接恢复；可回传完整历史，或继续使用同一进程中仍存在的 `conversation` |
 
 错误使用 `{type:"error", status, error:{type, code, message, param?}, stream_id?}`。非法 JSON 为 `invalid_json`；未知事件、非 true 的 `stream`、`background` 字段、非法 `client_metadata` 等无效请求为 `invalid_request`；历史不可用为 `previous_response_not_found`；队列超限为 429 `websocket_queue_full`；流数量超限为 `websocket_stream_limit_reached`；连接到期为 `websocket_connection_limit_reached`。wire 消息过大以 WS 1009 关闭，展开后过大返回 413 `request_too_large`。上游错误继续清洗，不回传私有上游消息、密钥或 prompt。
 
