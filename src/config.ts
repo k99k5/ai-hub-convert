@@ -23,6 +23,7 @@ export interface AppConfig {
     maxBytes: number;
   };
   conversations: {
+    ttlMs: number;
     maxCredentialBytes: number;
     maxBytes: number;
   };
@@ -142,6 +143,9 @@ export function loadConfig(environment: Environment = process.env): AppConfig {
       ),
     },
     conversations: {
+      ttlMs: parseInteger(environment.CONVERSATIONS_TTL_MS, "CONVERSATIONS_TTL_MS", 30 * 60_000, {
+        min: 1,
+      }),
       maxCredentialBytes: parseInteger(
         environment.CONVERSATIONS_MAX_CREDENTIAL_BYTES,
         "CONVERSATIONS_MAX_CREDENTIAL_BYTES",

@@ -155,7 +155,9 @@ await client.responses.create({
 
 HTTP JSON/SSE 和 WebSocket 的 `response.create` 共用会话；WS 重连后可继续使用该 ID。也接受 `conversation:{id:"conv_..."}`，与非空 `previous_response_id` 互斥。顶层 instructions、工具定义和生成参数每轮提供，不写入会话历史。
 
-会话只在本进程内存中保存，直到删除或重启；不跨实例共享。相同 API key 可访问同一会话，支持更换模型，但内容仍须符合目标上游能力。单会话最多 4096 项，大小受 `BODY_LIMIT_BYTES` 限制；每凭据默认 32 MiB、128 个会话，全进程默认 128 MiB、1024 个会话。超限明确报错，不自动淘汰或截断历史。同一会话生成期间的并发写入返回 409，可在当前请求结束后重试。详见 [Conversations 兼容契约](docs/compatibility.md#conversations-内存会话)。
+会话只在本进程内存中保存，默认空闲 30 分钟过期，可通过 `CONVERSATIONS_TTL_MS` 调整；相同 API key 读取、修改或使用会话时续期。生成期间不会过期，请求结束并释放会话后重新计时。每 30 秒扫描清理，读写时也检查过期；主动删除或进程重启同样清空历史。过期 ID 返回 404 `conversation_not_found`，需要新建会话并按需回传历史。会话不跨实例共享，多实例需要粘性路由。
+
+会话支持更换模型，但内容仍须符合目标上游能力。单会话最多 4096 项，大小受 `BODY_LIMIT_BYTES` 限制；每凭据默认 32 MiB、128 个会话，全进程默认 128 MiB、1024 个会话。这是会话存储的序列化数据及元数据预算，不是进程总内存上限。容量不足时先清理过期会话，仍超限则明确报错，不淘汰未过期会话或截断历史。同一会话生成期间的并发写入返回 409，可在当前请求结束后重试。详见 [Conversations 兼容契约](docs/compatibility.md#conversations-内存会话)。
 
 ## Responses WebSocket
 
@@ -233,6 +235,7 @@ WS 始终向上游发送 `store:false`。连接内 `previous_response_id` 历史
 | `RESPONSES_HISTORY_TTL_MS` | `300000` | HTTP Responses 历史固定有效期，单位 ms，必须大于 0 |
 | `RESPONSES_HISTORY_MAX_CREDENTIAL_BYTES` | `33554432` | HTTP 历史每凭据字节预算，各模型共用；最多 128 条 |
 | `RESPONSES_HISTORY_MAX_BYTES` | `134217728` | HTTP 历史全进程字节预算；最多 1024 条，单条另受 `BODY_LIMIT_BYTES` 限制 |
+| `CONVERSATIONS_TTL_MS` | `1800000` | Conversations 空闲有效期，单位 ms，必须大于 0；访问续期，生成期间不清理 |
 | `CONVERSATIONS_MAX_CREDENTIAL_BYTES` | `33554432` | 独立的 Conversations 每凭据内存字节预算；最多 128 个会话 |
 | `CONVERSATIONS_MAX_BYTES` | `134217728` | 独立的 Conversations 全进程内存字节预算；最多 1024 个会话 |
 | `SHUTDOWN_GRACE_MS` | `10000` | 优雅关闭期限 |
@@ -355,7 +358,7 @@ Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖
 - 禁止SDK自动重试，避免重复计费或重复工具执行。
 - body、工具参数、流缓冲和超时必须有上限。
 - client disconnect应传播AbortSignal。
-- 不持久化凭据、prompt、会话或响应；Responses 引用与 HTTP 历史使用有容量上限的短期缓存，WS 另在连接内暂存响应 ID 历史，断线清理。Conversations 使用独立的有界内存存储，删除或重启清理。调用凭据仅在处理请求或维持 WS 连接时使用，存储键只保存凭据的 HMAC 散列。
+- 不持久化凭据、prompt、会话或响应；Responses 引用与 HTTP 历史使用有容量上限的短期缓存，WS 另在连接内暂存响应 ID 历史，断线清理。Conversations 使用独立的有界内存存储，默认空闲 30 分钟、删除或重启清理。调用凭据仅在处理请求或维持 WS 连接时使用，存储键只保存凭据的 HMAC 散列。
 
 ## 设计依据
 

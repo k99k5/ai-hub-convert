@@ -117,17 +117,23 @@ describe("loadConfig", () => {
 
   it("configures bounded in-memory conversation storage", () => {
     expect(loadConfig(baseEnvironment).conversations).toEqual({
+      ttlMs: 30 * 60_000,
       maxCredentialBytes: 32 * 1024 * 1024,
       maxBytes: 128 * 1024 * 1024,
     });
     expect(
       loadConfig({
         ...baseEnvironment,
+        CONVERSATIONS_TTL_MS: "60000",
         CONVERSATIONS_MAX_CREDENTIAL_BYTES: "2048",
         CONVERSATIONS_MAX_BYTES: "4096",
       }).conversations,
-    ).toEqual({ maxCredentialBytes: 2048, maxBytes: 4096 });
-    for (const name of ["CONVERSATIONS_MAX_CREDENTIAL_BYTES", "CONVERSATIONS_MAX_BYTES"]) {
+    ).toEqual({ ttlMs: 60_000, maxCredentialBytes: 2048, maxBytes: 4096 });
+    for (const name of [
+      "CONVERSATIONS_TTL_MS",
+      "CONVERSATIONS_MAX_CREDENTIAL_BYTES",
+      "CONVERSATIONS_MAX_BYTES",
+    ]) {
       for (const value of ["0", "-1", "1.5", "invalid"])
         expect(() => loadConfig({ ...baseEnvironment, [name]: value })).toThrow(name);
     }

@@ -10,6 +10,7 @@ const apps: ReturnType<typeof buildApp>[] = [];
 const headers = { authorization: "Bearer caller-key" };
 afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()));
+  vi.restoreAllMocks();
 });
 
 function answer(
@@ -160,6 +161,37 @@ function texts(body: Wire, protocol: Protocol): string[] {
 }
 
 describe("Conversations API", () => {
+  it.each([
+    false,
+    true,
+  ])("renews active history and rejects expired IDs before upstream calls, stream=%s", async (stream) => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const { client, post, calls } = setup("chat", { CONVERSATIONS_TTL_MS: "1000" });
+    const conversation = await client.conversations.create({
+      items: [{ role: "user", content: "seed" }],
+    });
+    now = 900;
+    expect((await client.conversations.retrieve(conversation.id)).id).toBe(conversation.id);
+    now = 1800;
+    terminal(await post({ conversation: conversation.id, input: "next", stream }));
+    expect(texts(calls[0] as Wire, "chat")).toEqual(["seed", "next"]);
+    now = 2700;
+    expect((await client.conversations.items.list(conversation.id)).data).toHaveLength(3);
+    now = 3700;
+    await expect(client.conversations.retrieve(conversation.id)).rejects.toMatchObject({
+      status: 404,
+      code: "conversation_not_found",
+    });
+    const expired = await post({ conversation: conversation.id, input: "too late", stream });
+    expect(expired.statusCode).toBe(404);
+    expect(expired.json()).toMatchObject({ error: { code: "conversation_not_found" } });
+    expect(calls).toHaveLength(1);
+    const fresh = await client.conversations.create();
+    terminal(await post({ conversation: fresh.id, input: "fresh start", stream }));
+    expect(texts(calls[1] as Wire, "chat")).toEqual(["fresh start"]);
+  });
+
   it("works with SDK creation, metadata, item pagination, retrieval and deletion", async () => {
     const { client, calls } = setup();
     const conversation = await client.conversations.create({

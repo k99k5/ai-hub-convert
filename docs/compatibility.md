@@ -13,7 +13,7 @@
 - `GET /health/live`
 - `GET /health/ready`
 
-网关不持久化凭据、prompt、会话、conversation、response 或 token-count 结果。Responses 引用续轮使用短期输出项缓存，HTTP `previous_response_id` 使用独立的有界短期历史缓存；WS 响应 ID 历史另在连接内保留，断线即清理。Conversations 使用独立的有界内存存储，可在 HTTP 和 WS 之间共用，删除或进程重启清理。存储键只保存凭据的 HMAC 散列，WS 仅在存活连接处理上游请求时保留握手凭据。
+网关不持久化凭据、prompt、会话、conversation、response 或 token-count 结果。Responses 引用续轮使用短期输出项缓存，HTTP `previous_response_id` 使用独立的有界短期历史缓存；WS 响应 ID 历史另在连接内保留，断线即清理。Conversations 使用独立的有界内存存储，可在 HTTP 和 WS 之间共用，默认空闲 30 分钟、删除或进程重启清理。存储键只保存凭据的 HMAC 散列，WS 仅在存活连接处理上游请求时保留握手凭据。
 
 ## 路由与回退
 
@@ -159,7 +159,9 @@ Conversations 在网关本地管理，不向上游发送会话管理请求或本
 
 生成时传 `conversation:"conv_..."` 或 `conversation:{id:"conv_..."}`；null/省略表示不关联会话。与非 null 的 `previous_response_id` 同时使用返回 400。HTTP JSON/SSE 与 WS `response.create` 共用会话，所有携带 response 对象的事件及 JSON 响应均返回 `conversation:{id}`。网关加载当前历史并添加本轮 input，强制上游 `store:false`；input/output 在完整校验成功且状态为 completed 后一次性写入。上游失败、完成前取消、流损坏和 incomplete 不修改历史；容量错误也不会部分写入。WS `generate:false` 成功后保存输入，空输出不调用上游。顶层 instructions、工具声明、采样配置、请求 metadata 等每轮提供，不保存到会话。
 
-会话按 API key HMAC 隔离，不绑定模型；换模型仍执行目标协议的能力校验。未知、已删除、其他凭据或重启前的 ID 返回 404 `conversation_not_found`，不会隐式新建或透传到上游。默认每凭据 32 MiB/128 个会话，全进程 128 MiB/1024 个会话，字节预算由 `CONVERSATIONS_MAX_CREDENTIAL_BYTES`、`CONVERSATIONS_MAX_BYTES` 配置；每个会话最多 4096 项，序列化数据加元数据开销及展开后的请求另受 `BODY_LIMIT_BYTES` 限制。单会话超限返回 413，凭据/全局容量超限返回 429 `conversation_capacity_exceeded`。不按 TTL/FIFO 淘汰历史，删除会话或历史项后释放预算。
+会话按 API key HMAC 隔离，不绑定模型；换模型仍执行目标协议的能力校验。未知、过期、已删除、其他凭据或重启前的 ID 返回 404 `conversation_not_found`，不会隐式新建或透传到上游。默认每凭据 32 MiB/128 个会话，全进程 128 MiB/1024 个会话，字节预算由 `CONVERSATIONS_MAX_CREDENTIAL_BYTES`、`CONVERSATIONS_MAX_BYTES` 配置；每个会话最多 4096 项，序列化数据加元数据开销及展开后的请求另受 `BODY_LIMIT_BYTES` 限制。单会话超限返回 413，凭据/全局容量超限返回 429 `conversation_capacity_exceeded`。容量检查前清理已过期会话，不按 FIFO 淘汰未过期会话或截断历史；过期、删除会话或删除历史项后释放相应预算。这些预算约束存储数据，不代表进程 RSS 上限。
+
+空闲有效期由 `CONVERSATIONS_TTL_MS` 配置，默认 1800000 ms（30 分钟），必须大于 0。使用单调时钟计时，相同凭据读取会话/历史项、修改会话或开始生成时续期；其他凭据的访问不会续期。生成租约存活期间不清理，成功、失败或取消后释放租约时重新获得完整有效期。每 30 秒主动清理过期会话，计时器不阻止进程退出；读写操作同样检查到期，不会因尚未扫描而恢复过期 ID。应用关闭时停止扫描并清空存储。WebSocket ping/pong 不算会话访问。
 
 同一会话生成期间，其他生成、更新、删除或追加操作返回 409 `conversation_busy`；读取可见上次已提交的内容，不同会话互不阻塞。会话只保存在当前进程，重启清空，多实例需要粘性路由。与官方持久化 Conversations 不同，删除本地会话同时释放其历史项；本项目不维护可单独检索的持久化 response 对象。
 

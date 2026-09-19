@@ -163,6 +163,65 @@ function responseId(event: Wire): string {
 }
 
 describe("Responses WebSocket transport", () => {
+  it("renews prewarmed conversations, protects long generations, and rejects expired history", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const gate = Promise.withResolvers<Response>();
+    const { app, url, calls } = await setup(
+      "chat",
+      { CONVERSATIONS_TTL_MS: "1000" },
+      () => gate.promise,
+    );
+    const headers = { authorization: "Bearer caller-key" };
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/conversations",
+      headers,
+      payload: {},
+    });
+    const conversation = created.json().id as string;
+    const peer = await connect(url);
+    now = 900;
+    expect(
+      await peer.turn({ conversation, generate: false, input: "prewarm context" }),
+    ).toHaveProperty("type", "response.completed");
+    expect(calls).toHaveLength(0);
+    now = 1800;
+    const start = peer.events.length;
+    peer.send({ type: "response.create", model: "m", conversation, input: "long turn" });
+    try {
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      now = 5000;
+      const busy = await app.inject({
+        method: "GET",
+        url: `/v1/conversations/${conversation}/items`,
+        headers,
+      });
+      expect(busy.statusCode).toBe(200);
+      expect(busy.json().data).toHaveLength(1);
+    } finally {
+      gate.resolve(answer("chat"));
+    }
+    await peer.until((event) => event.type === "response.completed", start);
+    expect(JSON.stringify(calls[0]?.body)).toContain("prewarm context");
+    now = 5900;
+    const saved = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${conversation}/items`,
+      headers,
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().data).toHaveLength(3);
+    now = 6900;
+    expect(await peer.turn({ conversation, input: "expired" })).toMatchObject({
+      type: "error",
+      status: 404,
+      error: { code: "conversation_not_found" },
+    });
+    expect(calls).toHaveLength(1);
+    expect(peer.socket.readyState).toBe(WebSocket.OPEN);
+  });
+
   it.each<Protocol>([
     "chat",
     "responses",

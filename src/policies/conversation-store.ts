@@ -15,14 +15,17 @@ interface Entry {
   json: string;
   bytes: number;
   busy: boolean;
+  expiresAt: number;
 }
 interface StoreOptions {
+  ttlMs?: number;
   maxConversationBytes?: number;
   maxCredentialBytes?: number;
   maxBytes?: number;
   maxCredentialEntries?: number;
   maxEntries?: number;
   maxItems?: number;
+  now?: () => number;
 }
 
 export class ConversationError extends Error {
@@ -54,16 +57,18 @@ export class ConversationStore {
 
   constructor(options: StoreOptions = {}) {
     this.#options = {
+      ttlMs: 30 * 60_000,
       maxConversationBytes: 32 * 1024 * 1024,
       maxCredentialBytes: 32 * 1024 * 1024,
       maxBytes: 128 * 1024 * 1024,
       maxCredentialEntries: 128,
       maxEntries: 1024,
       maxItems: 4096,
+      now: () => performance.now(),
       ...options,
     };
     for (const [name, value] of Object.entries(this.#options)) {
-      if (!Number.isSafeInteger(value) || value < 1) {
+      if (name !== "now" && (!Number.isSafeInteger(value) || (value as number) < 1)) {
         throw new Error(`Conversation store ${name} must be a positive safe integer`);
       }
     }
@@ -74,6 +79,7 @@ export class ConversationStore {
     metadata: Record<string, string>,
     items: ConversationItem[],
   ): Conversation {
+    this.prune();
     const document: Document = {
       id: `conv_${randomUUID()}`,
       object: "conversation",
@@ -94,7 +100,7 @@ export class ConversationStore {
         "Conversation capacity reached; delete an unused conversation",
       );
     }
-    const entry: Entry = { owner, json: "", bytes: 0, busy: false };
+    const entry: Entry = { owner, json: "", bytes: 0, busy: false, expiresAt: 0 };
     this.#write(key, entry, document);
     return this.#resource(document);
   }
@@ -118,8 +124,7 @@ export class ConversationStore {
   ): { id: string; object: "conversation.deleted"; deleted: true } {
     const { key, entry } = this.#get(apiKey, id);
     this.#assertIdle(entry);
-    this.#entries.delete(key);
-    this.#bytes -= entry.bytes;
+    this.#remove(key, entry);
     return { id, object: "conversation.deleted", deleted: true };
   }
 
@@ -168,6 +173,7 @@ export class ConversationStore {
           "Conversation turn is no longer active",
         );
       }
+      this.prune();
     };
     return {
       id,
@@ -186,8 +192,16 @@ export class ConversationStore {
         if (closed) return;
         closed = true;
         entry.busy = false;
+        entry.expiresAt = this.#options.now() + this.#options.ttlMs;
       },
     };
+  }
+
+  prune(): void {
+    const now = this.#options.now();
+    for (const [key, entry] of this.#entries) {
+      if (!entry.busy && entry.expiresAt <= now) this.#remove(key, entry);
+    }
   }
 
   clear(): void {
@@ -243,10 +257,12 @@ export class ConversationStore {
     this.#bytes += bytes - entry.bytes;
     entry.json = json;
     entry.bytes = bytes;
+    entry.expiresAt = this.#options.now() + this.#options.ttlMs;
     this.#entries.set(key, entry);
   }
 
   #get(apiKey: string, id: string): { key: string; entry: Entry } {
+    this.prune();
     const key = this.#key(this.#owner(apiKey), id);
     const entry = this.#entries.get(key);
     if (!entry)
@@ -255,7 +271,13 @@ export class ConversationStore {
         "conversation_not_found",
         "Conversation was not found or is no longer available",
       );
+    entry.expiresAt = this.#options.now() + this.#options.ttlMs;
     return { key, entry };
+  }
+
+  #remove(key: string, entry: Entry): void {
+    this.#entries.delete(key);
+    this.#bytes -= entry.bytes;
   }
 
   #assertIdle(entry: Entry): void {

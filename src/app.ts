@@ -204,6 +204,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   const cacheCleanup = setInterval(() => {
     referenceCache.prune();
     historyCache.prune();
+    conversations.prune();
   }, 30_000);
   cacheCleanup.unref();
   const webSearchProviders = createDefaultWebSearchRegistry(options.webSearchProvider);

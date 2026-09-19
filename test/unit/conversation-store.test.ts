@@ -4,6 +4,141 @@ import { ConversationError, ConversationStore } from "../../src/policies/convers
 const item = (id: string, text = "hello") => ({ id, type: "message", role: "user", content: text });
 
 describe("ConversationStore", () => {
+  it("expires after thirty idle minutes and renews on reads and writes", () => {
+    let now = 0;
+    const ttl = 30 * 60_000;
+    const store = new ConversationStore({ now: () => now });
+    const conversation = store.create("key", {}, [item("msg_1")]);
+    now = ttl - 1;
+    expect(store.retrieve("key", conversation.id).id).toBe(conversation.id);
+    now += ttl - 1;
+    expect(store.items("key", conversation.id)).toEqual([item("msg_1")]);
+    now += ttl - 1;
+    store.update("key", conversation.id, { topic: "still active" });
+    now += ttl - 1;
+    store.append("key", conversation.id, [item("msg_2")]);
+    now += ttl - 1;
+    store.deleteItem("key", conversation.id, "msg_1");
+    now += ttl;
+    for (const operation of [
+      () => store.retrieve("key", conversation.id),
+      () => store.items("key", conversation.id),
+      () => store.update("key", conversation.id, {}),
+      () => store.append("key", conversation.id, []),
+      () => store.begin("key", conversation.id),
+    ])
+      expect(operation).toThrowError(expect.objectContaining({ code: "conversation_not_found" }));
+  });
+
+  it("does not renew a conversation accessed with another credential", () => {
+    let now = 0;
+    const store = new ConversationStore({ ttlMs: 100, now: () => now });
+    const conversation = store.create("key-a", {}, []);
+    now = 99;
+    expect(() => store.retrieve("key-b", conversation.id)).toThrowError(
+      expect.objectContaining({ status: 404 }),
+    );
+    now = 100;
+    expect(() => store.retrieve("key-a", conversation.id)).toThrowError(
+      expect.objectContaining({ status: 404 }),
+    );
+  });
+
+  it.each([
+    { maxCredentialEntries: 1 },
+    { maxEntries: 1 },
+    { maxCredentialBytes: 1000 },
+    { maxBytes: 1000 },
+  ])("reclaims expired capacity before creating another conversation: %j", (limits) => {
+    let now = 0;
+    const store = new ConversationStore({ ...limits, ttlMs: 100, now: () => now });
+    const first = store.create("key", {}, []);
+    expect(() => store.create("key", {}, [])).toThrowError(
+      expect.objectContaining({ status: 429 }),
+    );
+    now = 100;
+    const second = store.create("key", {}, []);
+    expect(() => store.retrieve("key", first.id)).toThrowError(
+      expect.objectContaining({ status: 404 }),
+    );
+    store.prune();
+    store.prune();
+    expect(() => store.create("key", {}, [])).toThrowError(
+      expect.objectContaining({ status: 429 }),
+    );
+    now = 200;
+    store.prune();
+    expect(() => store.retrieve("key", second.id)).toThrowError(
+      expect.objectContaining({ status: 404 }),
+    );
+    expect(store.create("key", {}, [])).toHaveProperty("object", "conversation");
+  });
+
+  it.each([
+    false,
+    true,
+  ])("protects active turns and restarts idle time on release, commit=%s", (commit) => {
+    let now = 0;
+    const store = new ConversationStore({ ttlMs: 100, maxEntries: 1, now: () => now });
+    const conversation = store.create("key", {}, []);
+    const turn = store.begin("key", conversation.id);
+    turn.stage([item("msg_1")]);
+    now = 1000;
+    store.prune();
+    expect(() => store.create("other-key", {}, [])).toThrowError(
+      expect.objectContaining({ status: 429 }),
+    );
+    if (commit) turn.commit([item("msg_2")]);
+    now = 1500;
+    store.prune();
+    turn.release();
+    expect(store.items("key", conversation.id)).toHaveLength(commit ? 2 : 0);
+    now = 1599;
+    turn.release();
+    store.prune();
+    expect(() => store.create("other-key", {}, [])).toThrowError(
+      expect.objectContaining({ status: 429 }),
+    );
+    now = 1600;
+    store.prune();
+    expect(() => store.retrieve("key", conversation.id)).toThrowError(
+      expect.objectContaining({ status: 404 }),
+    );
+    expect(store.create("other-key", {}, [])).toHaveProperty("object", "conversation");
+  });
+
+  it("frees expired histories before committing an active turn that needs their byte budget", () => {
+    let now = 0;
+    const store = new ConversationStore({
+      ttlMs: 100,
+      maxCredentialBytes: 1800,
+      maxBytes: 1800,
+      now: () => now,
+    });
+    const expired = store.create("key", {}, [item("msg_old", "x".repeat(500))]);
+    const active = store.create("key", {}, []);
+    const turn = store.begin("key", active.id);
+    const output = [item("msg_new", "x".repeat(500))];
+    expect(() => turn.commit(output)).toThrowError(expect.objectContaining({ status: 429 }));
+    now = 100;
+    turn.commit(output);
+    turn.release();
+    expect(store.items("key", active.id)).toEqual(output);
+    expect(() => store.retrieve("key", expired.id)).toThrowError(
+      expect.objectContaining({ status: 404 }),
+    );
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+  ])("rejects invalid idle timeouts: %s", (ttlMs) => {
+    expect(() => new ConversationStore({ ttlMs })).toThrow(/positive safe integer/);
+  });
+
   it("isolates credentials, snapshots returned data, and clears all state on shutdown", () => {
     const store = new ConversationStore();
     const input = item("msg_1");
