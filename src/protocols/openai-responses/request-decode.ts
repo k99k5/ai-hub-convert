@@ -9,6 +9,7 @@ import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../providers/web-search/intern
 import { OpenAIAdapterError, type ResponsesTextConfig } from "./types.js";
 import { decodeWebSearchHistory } from "./web-search.js";
 import { conversationId } from "./conversation.js";
+import { normalizeResponsesTools } from "./tool-compat.js";
 
 const errorCode = "INVALID_OPENAI_RESPONSES_REQUEST" as const;
 function invalid(message: string): never {
@@ -391,7 +392,7 @@ function decodeTools(value: unknown): CanonicalTool[] {
       };
     }
     if (tool.type !== "function") {
-      return invalid("Unsupported OpenAI Responses tool");
+      return invalid(`Unsupported OpenAI Responses tool type: ${String(tool.type)}`);
     }
     if (tool.name === INTERNAL_WEB_SEARCH_TOOL_NAME) {
       invalid("函数名称与网关保留的搜索工具名称冲突");
@@ -564,7 +565,7 @@ function decodeExtensions(input: Record<string, unknown>): Record<string, unknow
 }
 
 export function decodeResponsesRequest(value: unknown): CanonicalRequest {
-  const input = record(value, "body");
+  const { wire: input, bindings } = normalizeResponsesTools(record(value, "body"));
   // Read only supported properties; unknown client fields are never forwarded.
   const conversation = conversationId(input.conversation);
   if (conversation !== undefined && input.previous_response_id != null) {
@@ -629,6 +630,7 @@ export function decodeResponsesRequest(value: unknown): CanonicalRequest {
 
   return {
     source: "openai-responses",
+    ...(bindings.length === 0 ? {} : { responsesToolBindings: bindings }),
     model: string(input.model, "model"),
     ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
     messages: [

@@ -24,6 +24,40 @@ function content(value: unknown): unknown {
   });
 }
 
+function tool(raw: Wire): Wire {
+  if (raw.type === "namespace")
+    return {
+      ...pick(raw, ["type", "name", "description"]),
+      tools: (raw.tools as Wire[]).map(tool),
+    };
+  if (raw.type === "function")
+    return pick(raw, ["type", "name", "description", "parameters", "strict"]);
+  if (raw.type === "custom")
+    return {
+      ...pick(raw, ["type", "name", "description"]),
+      ...(raw.format === undefined
+        ? {}
+        : { format: pick(raw.format as Wire, ["type", "syntax", "definition"]) }),
+    };
+  return {
+    ...pick(raw, ["type", "search_context_size", "external_web_access", "search_content_types"]),
+    ...(raw.filters == null
+      ? {}
+      : { filters: pick(raw.filters as Wire, ["allowed_domains", "blocked_domains"]) }),
+    ...(raw.user_location == null
+      ? {}
+      : {
+          user_location: pick(raw.user_location as Wire, [
+            "type",
+            "city",
+            "country",
+            "region",
+            "timezone",
+          ]),
+        }),
+  };
+}
+
 export function normalizeResponsesInput(input: readonly unknown[]): unknown[] {
   return input.map((raw) => {
     const item = raw as Wire;
@@ -39,7 +73,12 @@ export function normalizeResponsesInput(input: readonly unknown[]): unknown[] {
           summary: content(item.summary),
         };
       case "function_call":
-        return pick(item, ["type", "id", "status", "call_id", "name", "arguments"]);
+        return pick(item, ["type", "id", "status", "call_id", "name", "namespace", "arguments"]);
+      case "custom_tool_call":
+        return pick(item, ["type", "id", "status", "call_id", "name", "namespace", "input"]);
+      case "additional_tools":
+        return { ...pick(item, ["type", "id", "role"]), tools: (item.tools as Wire[]).map(tool) };
+      case "custom_tool_call_output":
       case "function_call_output":
         return {
           ...pick(item, ["type", "id", "status", "call_id"]),

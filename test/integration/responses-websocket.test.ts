@@ -455,11 +455,14 @@ describe("Responses WebSocket transport", () => {
     expect(peer.events.some((event) => event.type === "response.output_text.delta")).toBe(true);
   });
 
-  it("works with the official OpenAI ResponsesWS client, including continuation", async () => {
+  it.each([
+    "/v1",
+    "",
+  ])("works with the official OpenAI ResponsesWS client and continuation (base path=%s)", async (basePath) => {
     const { url, calls } = await setup();
     const client = new OpenAI({
       apiKey: "caller-key",
-      baseURL: url.replace("ws:", "http:").replace(/\/responses$/, ""),
+      baseURL: `${new URL(url).origin.replace("ws:", "http:")}${basePath}`,
       maxRetries: 0,
     });
     const ws = new ResponsesWS(client);
@@ -746,21 +749,24 @@ describe("Responses WebSocket transport", () => {
     expect((await peer.turn()).type).toBe("response.completed");
   });
 
-  it("requires Bearer authentication before upgrading and returns 426 for ordinary GET", async () => {
+  it.each([
+    "/v1/responses",
+    "/responses?client=codex",
+  ])("requires Bearer authentication before upgrading and returns 426 for ordinary GET: %s", async (path) => {
     const { app, url, calls } = await setup();
     for (const headers of [
       {},
       { authorization: "Basic private-key" },
       { "x-api-key": "private-key" },
     ]) {
-      const socket = new WebSocket(url, { headers });
+      const socket = new WebSocket(`${new URL(url).origin}${path}`, { headers });
       sockets.push(socket);
       const [error] = await once(socket, "error");
       expect((error as Error).message).toContain("401");
     }
     const response = await app.inject({
       method: "GET",
-      url: "/v1/responses",
+      url: path,
       headers: { authorization: "Bearer key" },
     });
     expect(response.statusCode).toBe(426);

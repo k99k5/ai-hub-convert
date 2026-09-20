@@ -1441,7 +1441,7 @@ describe("decodeResponsesRequest hardening", () => {
     { tools: "x" },
     { tools: [{ type: "function", name: "f", parameters: {}, description: 1 }] },
     { tools: [{ type: "function", name: "f", parameters: {}, strict: "yes" }] },
-    { tools: [{ type: "custom", name: "f", parameters: {} }] },
+    { tools: [{ type: "custom", name: "f", format: { type: "unsupported" } }] },
     { tools: [{ type: "web_search", user_location: { city: 1 } }] },
     { tools: [{ type: "web_search", filters: "x" }] },
     { tool_choice: { type: "other" } },

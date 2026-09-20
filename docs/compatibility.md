@@ -4,9 +4,9 @@
 
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`
-- `POST /v1/responses`
-- `GET /v1/responses`（WebSocket Upgrade）
-- `POST /v1/chat/completions`
+- `POST /v1/responses`、`POST /responses`
+- `GET /v1/responses`、`GET /responses`（WebSocket Upgrade）
+- `POST /v1/chat/completions`、`POST /chat/completions`
 - `/v1/conversations` 及其会话、历史项管理接口
 - `GET /v1/usage`
 - `GET /v1/models`
@@ -90,6 +90,26 @@
 Responses 的工具结果文本数组按原顺序直接拼接为字符串，保留空白和换行，不自动插入分隔符；空数组归一化为空字符串。JSON 与 SSE 请求采用相同规则，适用于客户端执行普通搜索函数后的结果回传。混入图片、文件或未知内容类型时整条请求返回 HTTP 400，不会仅提取文字并丢弃其他内容。
 
 Anthropic `tool_result.is_error:true` 在 Responses 和 Chat 上游的结果正文中编码为 JSON 字符串 `{"is_error":true,"output":"原始结果文本"}`；成功结果继续保持原文，包括空白和换行。不会在 OpenAI 工具结果对象上增加协议不支持的字段。发往 Responses 的历史中，文本、图片与工具调用按原顺序编码，只合并连续的文本和图片内容。
+
+### Codex Responses 工具兼容
+
+Responses 入口在 Chat 和 Responses 两种上游模式中均接受 Codex GUI 的以下工具格式，覆盖 HTTP JSON、SSE 和 WebSocket：
+
+| 输入 | 转换与返回 |
+| --- | --- |
+| `namespace` | 展开组内的 function/custom 工具，用稳定别名区分不同命名空间和工具类型；保留组说明与工具说明。调用返回时恢复原 `name`、`namespace` 和 `call_id` |
+| `custom` | 转成参数为 `{ "input": "原始文本" }` 的普通函数；返回时拆出字符串，恢复 `custom_tool_call.input`。不把 JSON 包装暴露给客户端 |
+| `input.additional_tools` | 仅接受 `role:"developer"` 与工具数组，按输入顺序收集声明，同一工具以后面的声明为准；不作为聊天正文转发。声明保留在本地输入历史中，可随 HTTP/WS 续轮与 Conversations 继承 |
+| `custom_tool_call_output` | 与普通函数结果一样接受字符串或纯 `input_text` 数组，保留调用 ID、文本、空白与换行 |
+| 显式 `tool_choice` / `allowed_tools` | 按工具类型、名称和可选 `namespace` 解析，并转换为同一上游别名 |
+
+顶层 `tools` 仍需每轮提供。缓存保存恢复后的 Responses 输出项；完整历史、`previous_response_id`、`item_reference` 和 Conversations 均可回传带命名空间的函数调用及 custom 调用/结果。映射仅属于当前请求，不引入跨凭据共享状态。未支持的工具类型仍返回 400，错误包含实际类型。
+
+`custom.format` 接受 `text` 或 `grammar`（`lark` / `regex`）。grammar 定义进入上游工具说明；普通函数转换无法提供原生 grammar 的硬性约束。流式 custom 参数沿用现有参数/输出预算，在完整 JSON 参数校验后一次性发出 `response.custom_tool_call_input.delta` 和 `.done`，事件序号重新连续编号。非法 JSON、缺失/非字符串 input 或多余参数不会产生成功的 custom 调用或完成响应，也不会写入成功历史。嵌套 namespace、组内非 function/custom 工具不支持。
+
+Codex 的 `base_url` 可带或不带 `/v1`。`/responses` 是 `/v1/responses` 的 HTTP JSON/SSE 和 WebSocket 别名；`/chat/completions` 是 `/v1/chat/completions` 的 HTTP JSON/SSE 别名。请求在路由匹配前内部归一化，保留查询参数，不产生重定向；两种路径共用鉴权、校验、预算和缓存，HTTP `previous_response_id` 可跨路径续轮。其他接口仍使用原路径。
+
+验证：`pnpm exec vitest run test/unit/responses-tool-compat.test.ts test/integration/codex-gui-tools.test.ts`。
 
 ### Responses 引用缓存
 

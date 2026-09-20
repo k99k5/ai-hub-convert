@@ -8,10 +8,10 @@
 | --- | --- | --- |
 | `POST /v1/messages` | `/v1/chat/completions` | 默认强制 Chat，转换回 Anthropic JSON/SSE，不探测 Responses、不回退 |
 | `POST /v1/messages/count_tokens` | 无 | 默认 Chat 模式返回 501；不通过生成请求或本地估算计数 |
-| `POST /v1/responses` | `/v1/chat/completions` | 默认强制 Chat，转换回 Responses JSON/SSE；支持工具、`previous_response_id`、引用续轮和缓存统计 |
-| `GET /v1/responses`（WebSocket Upgrade） | `/v1/chat/completions` | 默认走 Chat HTTP/SSE，输出 Responses WS 事件；支持连接内增量续轮和并行流 |
+| `POST /v1/responses`、`POST /responses` | `/v1/chat/completions` | 默认强制 Chat，转换回 Responses JSON/SSE；支持工具、`previous_response_id`、引用续轮和缓存统计 |
+| `GET /v1/responses`、`GET /responses`（WebSocket Upgrade） | `/v1/chat/completions` | 默认走 Chat HTTP/SSE，输出 Responses WS 事件；支持连接内增量续轮和并行流 |
 | `/v1/conversations`、`/v1/conversations/:id`、`/v1/conversations/:id/items` | 无 | 本地创建、读取、更新、删除会话及管理历史项；支持 Responses `conversation` 续聊 |
-| `POST /v1/chat/completions` | `/v1/chat/completions` | 完整 decode → canonical IR → encode；直接请求 Chat，不回退或重试 |
+| `POST /v1/chat/completions`、`POST /chat/completions` | `/v1/chat/completions` | 完整 decode → canonical IR → encode；直接请求 Chat，不回退或重试 |
 | `GET /v1/usage` | `/v1/usage` | 透传用量查询；字段含义由上游定义 |
 | `GET /v1/models` | `/v1/models` | 透传模型列表查询 |
 | `GET /health/live` | 无 | 进程存活检查 |
@@ -46,7 +46,7 @@ pnpm dev
 UPSTREAM_BASE_URL=https://gateway.example.com/v1
 ```
 
-调用方凭据按入口协议读取并转成上游 Bearer：Anthropic 接受 `x-api-key`，并兼容 Bearer；Responses 和 Chat 接受 Bearer。`model` 原样透传。Anthropic SDK 或 Chatbox 的 Anthropic 模式 base URL 应填写 `http://127.0.0.1:3000`，不要追加 `/v1`；SDK 会自行请求 `/v1/messages`。OpenAI SDK 的 base URL 填写 `http://127.0.0.1:3000/v1`。这与上游地址 `UPSTREAM_BASE_URL` 是两个不同配置。
+调用方凭据按入口协议读取并转成上游 Bearer：Anthropic 接受 `x-api-key`，并兼容 Bearer；Responses 和 Chat 接受 Bearer。`model` 原样透传。Anthropic SDK 或 Chatbox 的 Anthropic 模式 base URL 应填写 `http://127.0.0.1:3000`，不要追加 `/v1`；SDK 会自行请求 `/v1/messages`。OpenAI SDK 的 base URL 可填写 `http://127.0.0.1:3000/v1`；只调用 Responses 或 Chat Completions 时也可填写 `http://127.0.0.1:3000`，两种路径共用鉴权、校验和处理逻辑，无重定向。模型列表、用量和 Conversations 等接口仍使用 `/v1`。这与上游地址 `UPSTREAM_BASE_URL` 是两个不同配置。
 
 Anthropic 示例：
 
@@ -195,6 +195,8 @@ ws.on("error", console.error);
 每条客户端消息是一个 `response.create` JSON 对象。`stream` 可省略或设为 `true`，兼容 Codex CLI 的生成和 `generate:false` 预热请求；其他 `stream` 值及 `background` 字段返回 400。服务器按消息发送 `response.*` JSON 事件，没有 SSE 的 `event:` / `data:` 包装或 `[DONE]`。工具结果通过下一条请求的 `input` 中的 `function_call_output` 回传；`instructions`、工具定义和其他生成参数每轮重新提供。
 
 HTTP 和 WS 均接受 Codex 的 `client_metadata`（JSON 对象或 `null`）。它只作为客户端诊断字段被校验后丢弃，不转发给上游、不混入 `metadata`、模型输入或续轮历史；原有 `metadata` 语义保持不变。
+
+Codex GUI 的 `namespace` 工具组、`custom` 文本工具和 `input` 中的 `additional_tools` 声明支持 HTTP JSON/SSE 与 WebSocket。网关将它们转换为普通函数供上游调用，返回时恢复命名空间、`custom_tool_call` 和原始文本；工具结果及各类本地续轮沿用相同映射。`custom` 的 grammar 会保留为工具说明，转换后不具备上游原生 grammar 的强制约束；完整规则见 [Codex 工具兼容](docs/compatibility.md#codex-responses-工具兼容)。Codex 直连本服务时 `base_url` 可填写 `http://127.0.0.1:3000` 或 `http://127.0.0.1:3000/v1`，HTTP 和 WebSocket 均支持。
 
 省略 `stream_id` 使用默认流；指定后，同名流按顺序执行，不同流可以并发，返回事件附带对应 `stream_id`。每个连接最多 32 个命名流。`previous_response_id` 可引用本连接同一模型的最近成功响应，也可从另一个流分叉；省略或设为 `null` 开始新会话。`generate:false` 只在本地准备输入上下文并返回空输出的响应 ID，不调用或预热上游模型。
 

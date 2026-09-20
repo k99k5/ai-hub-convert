@@ -17,7 +17,13 @@ interface Entry {
   expiresAt: number;
 }
 
-const supportedTypes = new Set(["message", "reasoning", "function_call", "web_search_call"]);
+const supportedTypes = new Set([
+  "message",
+  "reasoning",
+  "function_call",
+  "custom_tool_call",
+  "web_search_call",
+]);
 
 export class ResponsesReferenceCache {
   readonly #secret = randomBytes(32);

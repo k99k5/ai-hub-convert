@@ -132,6 +132,15 @@ export interface CanonicalRequest {
   stream: boolean;
   metadata?: Record<string, unknown>;
   extensions?: ProviderExtensions;
+  // Responses-only identities for portable function tools, restored at the edge.
+  responsesToolBindings?: ResponsesToolBinding[];
+}
+
+export interface ResponsesToolBinding {
+  upstreamName: string;
+  type: "function" | "custom";
+  name: string;
+  namespace?: string;
 }
 
 export interface Citation {

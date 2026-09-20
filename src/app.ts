@@ -71,6 +71,7 @@ import {
   type PreparedResponsesRequest,
 } from "./protocols/openai-responses/prepare.js";
 import { encodeResponsesResponse } from "./protocols/openai-responses/response-encode.js";
+import { ResponsesToolOutput } from "./protocols/openai-responses/tool-compat.js";
 import {
   chatEventForResponses,
   encodeChatAsResponses,
@@ -209,6 +210,12 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   cacheCleanup.unref();
   const webSearchProviders = createDefaultWebSearchRegistry(options.webSearchProvider);
   const app = Fastify({
+    rewriteUrl: (request) => {
+      const url = request.url ?? "/";
+      const path = url.split("?", 1)[0];
+      // Share handlers, validation and state for HTTP and WebSocket aliases.
+      return path === "/responses" || path === "/chat/completions" ? `/v1${url}` : url;
+    },
     ajv: { customOptions: { coerceTypes: false, removeAdditional: false } },
     bodyLimit: config.server.bodyLimitBytes,
     connectionTimeout: config.server.connectionTimeoutMs,
@@ -885,20 +892,22 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             abortScope.signal,
             webSearchOptions(canonicalRequest).webSearch,
           );
-          const response = addResponsesWebSearch(
-            config.upstream.protocol === "chat"
-              ? encodeChatAsResponses(
-                  decodeChatResponse(upstreamResponse, {
-                    preserveWireMetadata: true,
-                    allowIncompleteToolArguments: true,
-                  }),
-                )
-              : encodeResponsesResponse(
-                  decodeResponsesResponse(upstreamResponse, { preserveWireMetadata: true }),
-                ),
-            getWebSearchExecutions(upstreamResponse),
-            includeWebSearchSources(canonicalRequest),
-            outputLimits(config),
+          const response = new ResponsesToolOutput(canonicalRequest.responsesToolBindings).response(
+            addResponsesWebSearch(
+              config.upstream.protocol === "chat"
+                ? encodeChatAsResponses(
+                    decodeChatResponse(upstreamResponse, {
+                      preserveWireMetadata: true,
+                      allowIncompleteToolArguments: true,
+                    }),
+                  )
+                : encodeResponsesResponse(
+                    decodeResponsesResponse(upstreamResponse, { preserveWireMetadata: true }),
+                  ),
+              getWebSearchExecutions(upstreamResponse),
+              includeWebSearchSources(canonicalRequest),
+              outputLimits(config),
+            ),
           );
           abortScope.signal.throwIfAborted();
           if (prepared.conversation) response.conversation = { id: prepared.conversation.id };
@@ -936,6 +945,7 @@ async function streamResponsesResponse(
   const encoder = new ResponsesStreamEncoder(argumentLimits, streamOutputLimits, {
     includeWebSearchSources: includeWebSearchSources(request),
   });
+  const tools = new ResponsesToolOutput(request.responsesToolBindings);
   let terminal: ResponsesSseFrame | undefined;
   for await (const event of upstream.streamCompletion(
     protocol === "chat" ? "chat/completions" : "responses",
@@ -951,9 +961,9 @@ async function streamResponsesResponse(
       ...webSearchOptions(request),
     },
   )) {
-    for (const frame of encoder.encode(
-      protocol === "chat" ? chatEventForResponses(event) : event,
-    )) {
+    for (const frame of encoder
+      .encode(protocol === "chat" ? chatEventForResponses(event) : event)
+      .flatMap((frame) => tools.frames(frame))) {
       if (frame.event === "response.completed" || frame.event === "response.incomplete") {
         terminal = frame;
       } else await send(frame);
