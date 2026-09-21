@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
+import fastifyCors from "@fastify/cors";
 import type { SSEPluginOptions } from "@fastify/sse";
 import type { FastifyPluginAsync } from "fastify";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
@@ -227,6 +228,14 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         censor: "[REDACTED]",
       },
     },
+  });
+
+  app.register(fastifyCors, {
+    origin: config.server.corsOrigins,
+    methods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
+    // Reflect requested headers so browser SDK metadata headers also pass preflight.
+    exposedHeaders: ["x-request-id", "request-id", "retry-after"],
+    credentials: false,
   });
 
   app.addHook("preClose", async () => {

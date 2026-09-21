@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fastify/cors": "11.3.0",
     "@fastify/sse": "0.6.0",
     "@fastify/type-provider-typebox": "6.1.0",
     "@fastify/websocket": "11.3.0",

@@ -4,6 +4,7 @@ export interface AppConfig {
   server: {
     host: string;
     port: number;
+    corsOrigins: string | string[];
     bodyLimitBytes: number;
     connectionTimeoutMs: number;
     requestTimeoutMs: number;
@@ -63,6 +64,7 @@ export function loadConfig(environment: Environment = process.env): AppConfig {
     server: {
       host: environment.HOST || "127.0.0.1",
       port: parseInteger(environment.PORT, "PORT", 3000, { min: 1, max: 65_535 }),
+      corsOrigins: parseCorsOrigins(environment.CORS_ORIGINS),
       bodyLimitBytes: parseInteger(
         environment.BODY_LIMIT_BYTES,
         "BODY_LIMIT_BYTES",
@@ -246,6 +248,15 @@ export function loadConfig(environment: Environment = process.env): AppConfig {
       ),
     },
   };
+}
+
+function parseCorsOrigins(value: string | undefined): string | string[] {
+  if (value === undefined || value.trim() === "" || value.trim() === "*") return "*";
+  const origins = value.split(",").map((origin) => origin.trim());
+  if (origins.some((origin) => origin === "" || origin.includes("*"))) {
+    throw new Error("CORS_ORIGINS must be * or a comma-separated list of exact origins");
+  }
+  return origins;
 }
 
 function parseUpstreamProtocol(value: string | undefined): "chat" | "responses" {

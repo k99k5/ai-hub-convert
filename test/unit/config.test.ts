@@ -6,6 +6,19 @@ const baseEnvironment = {
 };
 
 describe("loadConfig", () => {
+  it("defaults CORS to wildcard and supports exact origin lists", () => {
+    expect(loadConfig(baseEnvironment).server.corsOrigins).toBe("*");
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        CORS_ORIGINS: " https://app.example, http://localhost:5173 ",
+      }).server.corsOrigins,
+    ).toEqual(["https://app.example", "http://localhost:5173"]);
+    for (const value of ["https://app.example,", "*,https://app.example", "https://*.example"]) {
+      expect(() => loadConfig({ ...baseEnvironment, CORS_ORIGINS: value })).toThrow("CORS_ORIGINS");
+    }
+  });
+
   it("loads conservative defaults", () => {
     const config = loadConfig(baseEnvironment);
 

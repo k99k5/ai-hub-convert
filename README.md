@@ -48,6 +48,8 @@ UPSTREAM_BASE_URL=https://gateway.example.com/v1
 
 调用方凭据按入口协议读取并转成上游 Bearer：Anthropic 接受 `x-api-key`，并兼容 Bearer；Responses 和 Chat 接受 Bearer。`model` 原样透传。Anthropic SDK 或 Chatbox 的 Anthropic 模式 base URL 应填写 `http://127.0.0.1:3000`，不要追加 `/v1`；SDK 会自行请求 `/v1/messages`。OpenAI SDK 的 base URL 可填写 `http://127.0.0.1:3000/v1`；只调用 Responses 或 Chat Completions 时也可填写 `http://127.0.0.1:3000`，两种路径共用鉴权、校验和处理逻辑，无重定向。模型列表、用量和 Conversations 等接口仍使用 `/v1`。这与上游地址 `UPSTREAM_BASE_URL` 是两个不同配置。
 
+浏览器跨域调用默认启用 CORS（`CORS_ORIGINS=*`），支持 `OPTIONS` 预检、Bearer / `x-api-key` 及 SDK 自定义请求头，JSON、错误和 SSE 响应均包含跨域响应头。如需限制来源，设置 `CORS_ORIGINS=https://app.example.com,http://localhost:5173`（精确来源，不带路径或末尾 `/`）。客户端仍需提供上游 API key；不支持 Cookie / `credentials: "include"` 模式，浏览器请使用默认 credentials 设置或 `"omit"`。CORS 白名单只限制浏览器读取响应，不代替接口鉴权。
+
 Anthropic 示例：
 
 ```bash
