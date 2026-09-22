@@ -340,6 +340,44 @@ Compose 服务不持久化数据，不需要挂载数据卷或启动额外依赖
 
 镜像使用 Node 24 多阶段构建、固定 pnpm 10.6.3，只携带 production dependencies，并以非 root `node` 用户运行。镜像内置 `/health/ready` healthcheck。
 
+### Linux 安全更新（Git + Docker Compose）
+
+使用 [scripts/docker-update.sh](scripts/docker-update.sh) 更新已有的单实例 `gateway`。要求 Bash、Git、Python 3、`flock` 和支持 `up --wait --wait-timeout` 的 Docker Compose v2；当前分支需配置 Git upstream，工作区需干净，忽略的 `.env` 可以保留。
+
+```bash
+# 在服务器的仓库目录执行：默认 git pull --ff-only 后构建
+bash scripts/docker-update.sh
+
+# 已手动 checkout/pull 到目标提交时，只构建和更新
+bash scripts/docker-update.sh --no-pull
+
+# 可选：最多等待 15 分钟排空，超时取消更新并恢复旧服务接收请求
+bash scripts/docker-update.sh --drain-timeout 900
+```
+
+脚本先保存旧镜像与更新前解析的 Compose 配置，在旧服务继续接收请求时执行 `docker compose build --pull gateway`。构建成功后进入排空模式：新业务请求返回 HTTP 503 和 `Retry-After: 5`，已有 HTTP 请求、SSE 流及已接收/排队的 WebSocket 生成继续执行。默认一直等到在途请求数为 **0**，才重建容器并等待 Docker 健康检查；不会用固定停止倒计时强行截断请求。空闲 WebSocket、HTTP keep-alive 和健康检查不阻止更新；业务请求本身的超时、客户端断开行为保持原样。
+
+构建失败不停止旧服务；排空期间 Ctrl+C、TERM/HUP 或等待超时会取消更新并恢复接收请求。切换或健康检查失败时，脚本尝试用备份镜像及配置回滚；回滚也会先排空仍在运行的新容器。回滚失败明确返回非零状态并保留备份，不会宣告更新成功。所有操作仅针对 `gateway`，不执行 `compose down`、卷删除或镜像清理，也不重置 Git 工作区或覆盖 `.env`。
+
+成功后会打印手动回滚命令，例如：
+
+```bash
+bash scripts/docker-update.sh --rollback .docker-update/backups/20260922T120000Z-xxxxxx
+```
+
+备份位于 `.docker-update/backups/`，包含旧镜像标签、提交记录和解析后的配置；配置可能含敏感环境变量，目录权限为 `700`、文件为 `600`，已排除 Git 和 Docker 构建上下文。请保留对应镜像，确认无需回滚后再由运维清理。Git 拉取成功后，即使运行容器回滚，工作区仍保留拉取后的代码，便于修复和重试。`--wait-timeout` 控制新容器及回滚的健康检查时限（默认 120 秒），与 `--drain-timeout` 独立。自定义部署可重复传 `-f`、`--env-file`，或用 `-p` 指定现有 Compose project；使用与首次部署一致的参数。
+
+排空控制通过容器内的私有 Unix socket 工作，不在公网 HTTP 接口上开放。可以查看状态或在异常中断后恢复服务：
+
+```bash
+docker compose exec -T gateway node dist/ops/control-cli.js status
+docker compose exec -T gateway node dist/ops/control-cli.js resume
+```
+
+**首次从不支持排空的旧镜像升级**：脚本会拒绝自动重启。需要先安排一次维护窗口，停止发送新请求并确认旧请求全部结束，再按常规方式部署这版；后续更新就能自动排空。直接执行 `docker stop` / `docker compose down` 仍使用原来的关闭流程，请使用更新脚本完成安全更新。单实例切换会有短暂不可用，重启会清空内存会话和续轮缓存；排空保证已接受的请求完成，不保留跨重启的会话 ID。
+
+脚本回归测试：`python3 test/scripts/docker-update.test.py`（Linux，使用隔离的 Git 仓库与 Docker 测试替身）。
+
 ## 开发命令
 
 | 命令 | 说明 |

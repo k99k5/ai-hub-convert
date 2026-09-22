@@ -20,6 +20,7 @@ import {
 } from "./policies/cache/capabilities.js";
 import type { PromptCacheSidecar } from "./policies/cache/sidecar.js";
 import { registerHealthRoutes } from "./http/health.js";
+import { registerRequestDrain, RequestDrain } from "./http/request-drain.js";
 import {
   AnthropicMessagesBodySchema,
   AnthropicTokenCountBodySchema,
@@ -113,6 +114,7 @@ interface BuildAppOptions {
   logger?: FastifyServerOptions["logger"];
   upstreamFetch?: typeof globalThis.fetch;
   webSearchProvider?: WebSearchProvider;
+  drain?: RequestDrain;
 }
 
 interface AnthropicMessageBody {
@@ -194,6 +196,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       : { webSearchProvider: options.webSearchProvider }),
   });
   const activeStreams = new ActiveStreamRegistry();
+  const drain = options.drain ?? new RequestDrain();
   const referenceCache = new ResponsesReferenceCache();
   const historyCache = new ResponsesHistoryCache({
     ...config.responsesHistory,
@@ -248,10 +251,12 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     conversations.clear();
   });
   app.register(async (api) => {
+    registerRequestDrain(api, drain);
     await api.register(fastifySSE, { heartbeatInterval: 0 });
     await registerResponsesWebSocket(api, {
       config,
       activeStreams,
+      drain,
       prepare: (value, apiKey) => {
         const prepared = prepareResponsesRequest(
           value,
@@ -290,7 +295,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           prepared.body,
         ),
     });
-    api.register(registerHealthRoutes);
+    await registerHealthRoutes(api, drain);
     registerConversationRoutes(api, conversations);
     api.setErrorHandler((error, request, reply) => {
       const protocol = routeProtocol(request.url.split("?", 1)[0] ?? request.url);

@@ -12,3 +12,4 @@ Thumbs.db
 
 .pnpm-store/
 .zcode/
+.docker-update/

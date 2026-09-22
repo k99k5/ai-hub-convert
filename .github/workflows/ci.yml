@@ -37,6 +37,11 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+      - name: Safe Docker update workflow
+        run: |
+          bash -n scripts/docker-update.sh
+          python3 test/scripts/docker-update.test.py
+
       - name: Coverage
         run: pnpm test:coverage
 

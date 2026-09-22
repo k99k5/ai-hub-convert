@@ -12,6 +12,7 @@ import type { ActiveStreamRegistry } from "../stream/active-streams.js";
 import { StreamOutputLimitError } from "../stream/output-limits.js";
 import { ToolArgumentLimitError } from "../stream/tool-argument-limits.js";
 import { AuthenticationError, extractResponsesApiKey } from "./auth.js";
+import { DRAIN_MESSAGE, finishHttpUpgrade, type RequestDrain } from "./request-drain.js";
 import { mapUpstreamError } from "./upstream-errors.js";
 import type { ConversationTurn } from "../policies/conversation-store.js";
 import {
@@ -28,6 +29,7 @@ interface AbortScope {
 interface WebSocketOptions {
   config: AppConfig;
   activeStreams: ActiveStreamRegistry;
+  drain: RequestDrain;
   prepare(value: unknown, apiKey: string): PreparedResponsesRequest;
   run(
     prepared: PreparedResponsesRequest,
@@ -97,6 +99,8 @@ export async function registerResponsesWebSocket(
           },
         }),
     wsHandler: (socket, request) => {
+      // Count WS work per accepted generation, not for the idle connection.
+      finishHttpUpgrade(request);
       new ResponsesWebSocketSession(
         socket,
         extractResponsesApiKey(request.headers),
@@ -223,6 +227,8 @@ class ResponsesWebSocketSession {
           429,
         );
       }
+      const release = this.options.drain.enter();
+      if (!release) throw new WebSocketRequestError("server_draining", DRAIN_MESSAGE, null, 503);
       this.#pendingRequests++;
       this.#pendingBytes += bytes;
       const lane = streamId ?? "";
@@ -231,6 +237,7 @@ class ResponsesWebSocketSession {
         .then(() => this.#run(event as Wire, streamId))
         .catch((error: unknown) => this.abort(error))
         .finally(() => {
+          release();
           this.#pendingRequests--;
           this.#pendingBytes -= bytes;
           if (this.#lanes.get(lane) === task) this.#lanes.delete(lane);
@@ -443,7 +450,12 @@ class ResponsesWebSocketSession {
         status: error.status,
         body: {
           error: {
-            type: error.status === 429 ? "rate_limit_error" : "invalid_request_error",
+            type:
+              error.status === 503
+                ? "server_error"
+                : error.status === 429
+                  ? "rate_limit_error"
+                  : "invalid_request_error",
             code: error.code,
             message: error.message,
             param: error.param,
