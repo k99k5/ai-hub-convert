@@ -14,6 +14,7 @@ function createConnection(options: ConstructorParameters<typeof ClientSseSender>
     destroyed: false,
     writable: true,
     writableNeedDrain: false,
+    flushHeaders: vi.fn(),
     write: vi.fn((_frame: string) => true),
     destroy: vi.fn(() => {
       connected = false;
@@ -22,9 +23,11 @@ function createConnection(options: ConstructorParameters<typeof ClientSseSender>
       close?.();
     }),
   };
+  const header = vi.fn();
   const sender = new ClientSseSender(
     {
       raw,
+      header,
       sse: {
         get isConnected() {
           return connected;
@@ -33,9 +36,8 @@ function createConnection(options: ConstructorParameters<typeof ClientSseSender>
           close = callback;
         },
         send: (frame) => send(frame),
-        close: () => {
-          connected = false;
-          close?.();
+        sendHeaders: () => {
+          raw.headersSent = true;
         },
       },
     },
@@ -44,6 +46,7 @@ function createConnection(options: ConstructorParameters<typeof ClientSseSender>
 
   return {
     raw,
+    header,
     sender,
     setSend: (replacement: typeof send) => {
       send = replacement;
@@ -88,28 +91,113 @@ describe("ClientSseSender", () => {
   });
 
   it("propagates a send failure while the connection remains open", async () => {
-    const connection = createConnection();
+    vi.useFakeTimers();
+    const connection = createConnection({ heartbeatIntervalMs: 20 });
     const failure = new Error("write failed");
     connection.setSend(() => Promise.reject(failure));
 
     await expect(connection.sender.send({ event: "error", data: {} })).rejects.toBe(failure);
     expect(connection.sender.pendingWriteCount).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("starts heartbeats only after a successful SSE write and disposes them", async () => {
+  it("sends comment heartbeats before the first data frame and disposes them", async () => {
     vi.useFakeTimers();
     const abort = new AbortController();
     const connection = createConnection({ signal: abort.signal, heartbeatIntervalMs: 20 });
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(19);
     expect(connection.raw.write).not.toHaveBeenCalled();
-    await connection.sender.send("first");
+    expect(connection.raw.headersSent).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connection.raw.write).toHaveBeenCalledExactlyOnceWith(": ping\n\n");
+    expect(connection.header).toHaveBeenCalledWith("Cache-Control", "no-cache, no-transform");
+    expect(connection.header).toHaveBeenCalledWith("X-Accel-Buffering", "no");
+    expect(connection.raw.flushHeaders).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(20);
-    expect(connection.raw.write).toHaveBeenCalledExactlyOnceWith(": heartbeat\n\n");
+    expect(connection.raw.write).toHaveBeenCalledTimes(2);
     connection.sender.dispose();
     await vi.advanceTimersByTimeAsync(100);
-    expect(connection.raw.write).toHaveBeenCalledOnce();
+    expect(connection.raw.write).toHaveBeenCalledTimes(2);
     expect(getEventListeners(abort.signal, "abort")).toHaveLength(0);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("resets the idle deadline after every real data frame", async () => {
+    vi.useFakeTimers();
+    const connection = createConnection({ heartbeatIntervalMs: 20 });
+    for (let index = 0; index < 10; index++) {
+      await vi.advanceTimersByTimeAsync(15);
+      await connection.sender.send({ data: { index } });
+    }
+    await vi.advanceTimersByTimeAsync(19);
+    expect(connection.raw.write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connection.raw.write).toHaveBeenCalledExactlyOnceWith(": ping\n\n");
+    await vi.advanceTimersByTimeAsync(10);
+    await connection.sender.send("resumed");
+    await vi.advanceTimersByTimeAsync(19);
+    expect(connection.raw.write).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connection.raw.write).toHaveBeenCalledTimes(2);
+    connection.sender.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not create a heartbeat timer when disabled", async () => {
+    vi.useFakeTimers();
+    const connection = createConnection({ heartbeatIntervalMs: 0 });
+    await connection.sender.send("first");
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(connection.raw.write).not.toHaveBeenCalled();
+    connection.sender.dispose();
+  });
+
+  it("does not let Anthropic protocol pings reset the comment heartbeat deadline", async () => {
+    vi.useFakeTimers();
+    const connection = createConnection({ heartbeatIntervalMs: 20 });
+    await connection.sender.send("first");
+    for (let index = 0; index < 3; index++) {
+      await vi.advanceTimersByTimeAsync(5);
+      await connection.sender.send(
+        { event: "ping", data: { type: "ping" } },
+        { resetHeartbeat: false },
+      );
+    }
+    expect(connection.raw.write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5);
+    expect(connection.raw.write).toHaveBeenCalledExactlyOnceWith(": ping\n\n");
+    connection.sender.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    "disconnect",
+    "abort",
+    "dispose",
+  ])("cleans up on %s before the first frame", async (reason) => {
+    vi.useFakeTimers();
+    const abort = new AbortController();
+    const connection = createConnection({ signal: abort.signal, heartbeatIntervalMs: 20 });
+    if (reason === "disconnect") connection.disconnect();
+    else if (reason === "abort") abort.abort();
+    else connection.sender.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(abort.signal, "abort")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(connection.raw.write).not.toHaveBeenCalled();
+    expect(connection.raw.headersSent).toBe(false);
+  });
+
+  it("stops heartbeats after an error frame even without cancellation", async () => {
+    vi.useFakeTimers();
+    const connection = createConnection({ heartbeatIntervalMs: 20 });
+    await vi.advanceTimersByTimeAsync(20);
+    await connection.sender.sendError({ event: "error", data: { type: "error" } });
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(connection.raw.write).toHaveBeenCalledOnce();
+    connection.sender.dispose();
   });
 
   it("skips heartbeats while a data write is pending and resumes after drain", async () => {

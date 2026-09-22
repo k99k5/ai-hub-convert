@@ -82,7 +82,7 @@ describe("cancellation with a connected but non-reading SSE client", () => {
         this: ServerResponse,
         ...args: Parameters<typeof originalWrite>
       ) {
-        if (String(args[0]) === ": heartbeat\n\n") {
+        if (String(args[0]) === ": ping\n\n") {
           heartbeats++;
           if (this.writableNeedDrain) blockedHeartbeats++;
         }

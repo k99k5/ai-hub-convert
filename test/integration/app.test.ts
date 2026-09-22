@@ -243,7 +243,7 @@ describe("stream lifecycle", () => {
     let upstreamAborted = false;
     const app = createApp(
       {
-        ANTHROPIC_PING_INTERVAL_MS: "1",
+        SSE_HEARTBEAT_INTERVAL_MS: "0",
         UPSTREAM_FIRST_BYTE_TIMEOUT_MS: "5",
         UPSTREAM_STREAM_IDLE_TIMEOUT_MS: "50",
       },

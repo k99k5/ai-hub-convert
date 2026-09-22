@@ -81,7 +81,9 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 
 Chat、Responses（含 WebSocket）和 Anthropic 入口默认忽略顶层及嵌套协议对象中的未知附加字段，不向上游转发，也不写入 Responses 续轮历史，无需配置开关。已知参数的类型、取值及不支持的消息/内容/工具类型仍然校验；工具参数、JSON Schema 和 metadata 中的业务字段完整保留。
 
-Responses 与 Chat 在首个下游事件发出后，默认每 15 秒发送 SSE 注释心跳 `: heartbeat`，用于维持思考、工具等待或上游仅发送心跳期间的连接；客户端应忽略注释。心跳间隔可用 `SSE_HEARTBEAT_INTERVAL_MS` 调整，应小于反向代理的空闲超时。心跳不延长上游首字节、空闲或请求总超时。
+仅 `stream:true` 的 Responses、Chat 和 Anthropic 请求启用 SSE 注释心跳：从等待上游开始计时，下游连续 15 秒无真实数据时发送注释 `: ping\n\n`，每次真实数据输出后重新计时。新增心跳不包含 `data:` 或 `event:`，客户端应忽略注释；Anthropic 原有的命名 `event: ping` 保留，且不重置注释心跳计时。响应使用 `Cache-Control: no-cache, no-transform` 和 `X-Accel-Buffering: no`，首次数据或心跳会立即刷新响应头。注释心跳间隔可用 `SSE_HEARTBEAT_INTERVAL_MS` 调整（如 `20000`），`0` 禁用；客户端断开、上游结束、报错或请求取消时停止。非流式响应保持不变，心跳也不延长上游首字节、空闲或请求总超时。
+
+首条心跳会将 HTTP 响应提交为 SSE 200；之后的上游错误通过入口协议的流内错误事件返回。首条心跳或数据之前发生的错误仍返回 HTTP JSON 错误及对应状态码。
 
 下游写入阻塞时暂停心跳，恢复可写后继续；请求取消、响应结束或连接关闭时停止心跳。总超时或服务关闭会解除阻塞的写入并关闭连接；连接仍可写时，按入口协议发送流内错误。
 
@@ -231,7 +233,7 @@ WS 始终向上游发送 `store:false`。连接内 `previous_response_id` 历史
 | `UPSTREAM_TOOL_ARGUMENT_LIMIT_BYTES` | `1048576` | 单次工具参数流上限 |
 | `UPSTREAM_STREAM_TOOL_ARGUMENT_LIMIT_BYTES` | `8388608` | 单条响应中全部工具参数流上限 |
 | `ANTHROPIC_PING_INTERVAL_MS` | `15000` | Anthropic 命名 `event: ping` 间隔 |
-| `SSE_HEARTBEAT_INTERVAL_MS` | `15000` | Responses / Chat 的 SSE 注释心跳间隔；首个事件后启动，`0` 禁用 |
+| `SSE_HEARTBEAT_INTERVAL_MS` | `15000` | SSE 空闲注释心跳间隔，覆盖首包等待；每次数据输出后重新计时，`0` 禁用 |
 | `WEBSOCKET_PING_INTERVAL_MS` | `30000` | WS ping/pong 心跳间隔，`0` 禁用 |
 | `WEBSOCKET_MAX_CONNECTION_MS` | `3600000` | WS 连接寿命，范围 1–3600000 ms |
 | `WEBSOCKET_MAX_PENDING_REQUESTS` | `64` | 每个连接执行中与排队请求的总数上限；这些请求的原始消息总字节数还受 `BODY_LIMIT_BYTES` 限制 |

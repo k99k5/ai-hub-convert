@@ -416,7 +416,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
             config.upstream.timeoutMs,
           );
           const removeActiveStream = activeStreams.add(abortScope);
-          const clientStream = new ClientSseSender(reply, { signal: abortScope.signal });
+          const clientStream = new ClientSseSender(reply, {
+            signal: abortScope.signal,
+            heartbeatIntervalMs: config.server.sseHeartbeatIntervalMs,
+          });
           reply.sse.onClose(() => abortScope.abort(new Error("Client disconnected")));
           try {
             await streamAnthropicResponse(
@@ -441,7 +444,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
                 onTimeout: (error) => abortScope.abort(error),
               },
               config.server.anthropicPingIntervalMs,
-              clientStream.send,
+              (frame) => clientStream.send(frame, { resetHeartbeat: frame.event !== "ping" }),
               config.upstream.protocol,
             );
             return;
