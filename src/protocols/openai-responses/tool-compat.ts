@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ResponsesToolBinding } from "../../core/ir.js";
+import { normalizeResponsesTool } from "./input-normalize.js";
 import type { ResponsesSseFrame } from "./stream-encode.js";
 import { OpenAIAdapterError } from "./types.js";
 
@@ -60,7 +61,7 @@ export function normalizeResponsesTools(body: Wire): {
   const bindings = new Map<string, ResponsesToolBinding>();
   const names = new Map<string, string>();
   const definitions = new Map<string, Wire>();
-  const bind = (type: "function" | "custom", toolName: string, group?: string): string => {
+  const bind = (type: ResponsesToolBinding["type"], toolName: string, group?: string): string => {
     if ((type === "custom" || group !== undefined) && !/^[a-zA-Z0-9_-]{1,64}$/.test(toolName)) {
       invalid(
         "Custom and namespaced tool names must contain 1-64 letters, digits, underscores or hyphens",
@@ -84,7 +85,7 @@ export function normalizeResponsesTools(body: Wire): {
     }
     return upstreamName;
   };
-  const add = (raw: unknown, group?: string, groupDescription?: string): void => {
+  const add = (raw: unknown, group?: string, groupDescription?: string): Wire[] => {
     if (!record(raw)) invalid("Invalid OpenAI Responses request: tool must be an object");
     if (raw.type === "namespace") {
       if (group !== undefined) invalid("Nested tool namespaces are not supported");
@@ -93,14 +94,29 @@ export function normalizeResponsesTools(body: Wire): {
         invalid("namespace tools must be an array with a namespace name");
       if (raw.description !== undefined && typeof raw.description !== "string")
         invalid("namespace description must be a string");
-      for (const tool of raw.tools) add(tool, groupName, raw.description as string | undefined);
-      return;
+      return raw.tools.flatMap((tool) =>
+        add(tool, groupName, raw.description as string | undefined),
+      );
+    }
+    if (raw.type === "tool_search" && group === undefined) {
+      if (raw.execution !== "client") invalid("tool_search only supports execution: client");
+      if (!record(raw.parameters)) invalid("client tool_search parameters must be an object");
+      if (raw.description != null && typeof raw.description !== "string")
+        invalid("tool_search description must be a string or null");
+      const tool: Wire = {
+        type: "function",
+        name: bind("tool_search", "tool_search"),
+        parameters: raw.parameters,
+        ...(raw.description == null ? {} : { description: raw.description }),
+      };
+      definitions.set(identity("tool_search", "tool_search"), tool);
+      return [tool];
     }
     if (raw.type !== "function" && raw.type !== "custom") {
       if (group !== undefined)
         invalid(`Unsupported OpenAI Responses namespace tool type: ${String(raw.type)}`);
       definitions.set(`builtin:${String(raw.type)}:${definitions.size}`, raw);
-      return;
+      return [raw];
     }
     const toolName = name(raw.name, "tool name");
     const upstreamName = bind(raw.type, toolName, group);
@@ -132,6 +148,7 @@ export function normalizeResponsesTools(body: Wire): {
     // additional_tools adds declarations in input order; later versions replace
     // an earlier declaration of the same tool without introducing duplicates.
     definitions.set(identity(raw.type, toolName, group), tool);
+    return [tool];
   };
   if (body.tools != null) {
     if (!Array.isArray(body.tools))
@@ -139,37 +156,59 @@ export function normalizeResponsesTools(body: Wire): {
     for (const tool of body.tools) add(tool);
   }
   const input = Array.isArray(body.input)
-    ? body.input
-        .filter((item: unknown) => {
-          if (!record(item) || item.type !== "additional_tools") return true;
+    ? body.input.flatMap((item: unknown) => {
+        if (!record(item)) return [item];
+        if (item.type === "additional_tools") {
           if (item.role !== "developer" || !Array.isArray(item.tools))
             invalid("additional_tools requires role developer and a tools array");
           for (const tool of item.tools) add(tool);
-          return false;
-        })
-        .map((item: unknown) => {
-          if (!record(item)) return item;
-          if (item.type === "custom_tool_call_output")
-            return { ...item, type: "function_call_output" };
-          if (item.type !== "function_call" && item.type !== "custom_tool_call") return item;
-          const group = namespace(item.namespace);
-          const toolName = name(item.name, "tool call name");
-          const custom = item.type === "custom_tool_call";
-          if (custom && typeof item.input !== "string")
-            invalid("custom_tool_call.input must be a string");
-          const { namespace: _namespace, input: _input, ...call } = item;
-          return {
+          return [];
+        }
+        if (item.type === "tool_search_call" || item.type === "tool_search_output") {
+          if (item.execution !== undefined && item.execution !== "client")
+            invalid(`${item.type} only supports execution: client`);
+          const callId = name(item.call_id, `${item.type} call_id`);
+          const fields = { id: item.id, status: item.status, call_id: callId };
+          if (item.type === "tool_search_call") {
+            if (!record(item.arguments)) invalid("tool_search_call.arguments must be an object");
+            return [
+              {
+                ...fields,
+                type: "function_call",
+                name: bind("tool_search", "tool_search"),
+                arguments: JSON.stringify(item.arguments),
+              },
+            ];
+          }
+          if (!Array.isArray(item.tools)) invalid("tool_search_output.tools must be an array");
+          const tools = item.tools.flatMap((tool) => add(tool)).map(normalizeResponsesTool);
+          return [{ ...fields, type: "function_call_output", output: JSON.stringify({ tools }) }];
+        }
+        if (item.type === "custom_tool_call_output")
+          return [{ ...item, type: "function_call_output" }];
+        if (item.type !== "function_call" && item.type !== "custom_tool_call") return [item];
+        const group = namespace(item.namespace);
+        const toolName = name(item.name, "tool call name");
+        const custom = item.type === "custom_tool_call";
+        if (custom && typeof item.input !== "string")
+          invalid("custom_tool_call.input must be a string");
+        const { namespace: _namespace, input: _input, ...call } = item;
+        return [
+          {
             ...call,
             type: "function_call",
             name: bind(custom ? "custom" : "function", toolName, group),
             ...(custom ? { arguments: JSON.stringify({ input: item.input }) } : {}),
-          };
-        })
+          },
+        ];
+      })
     : body.input;
   const choice = (value: unknown): unknown => {
     if (!record(value)) return value;
     if (value.type === "allowed_tools" && Array.isArray(value.tools))
       return { ...value, tools: value.tools.map(choice) };
+    if (value.type === "tool_search")
+      return { type: "function", name: bind("tool_search", "tool_search") };
     if (value.type !== "function" && value.type !== "custom") return value;
     const toolName = name(value.name, "tool_choice name");
     const group = namespace(value.namespace);
@@ -204,6 +243,22 @@ function customInput(value: unknown): string {
   return parsed.input;
 }
 
+function searchArguments(value: unknown): Wire {
+  let parsed: unknown;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : undefined;
+  } catch {
+    /* Report a protocol error below. */
+  }
+  if (!record(parsed)) {
+    throw new OpenAIAdapterError(
+      "INVALID_OPENAI_RESPONSES_RESPONSE",
+      "Upstream tool_search arguments must be a JSON object",
+    );
+  }
+  return parsed;
+}
+
 // Restore before sending or remembering outputs, so caches and client history
 // contain native Responses items rather than internal aliases/JSON wrappers.
 export class ResponsesToolOutput {
@@ -219,6 +274,16 @@ export class ResponsesToolOutput {
     if (!record(value) || value.type !== "function_call") return value;
     const binding = this.#bindings.get(value.name as string);
     if (!binding) return value;
+    if (binding.type === "tool_search") {
+      return {
+        type: "tool_search_call",
+        id: value.id,
+        call_id: value.call_id,
+        status: value.status,
+        execution: "client",
+        arguments: added ? {} : searchArguments(value.arguments),
+      };
+    }
     const { arguments: args, ...item } = value;
     const fields = {
       ...item,
@@ -249,6 +314,14 @@ export class ResponsesToolOutput {
       this.#items.delete(data.output_index);
     }
     const binding = this.#items.get(data.output_index);
+    // Native search calls carry an arguments object on output_item.done; there
+    // are no function argument delta/done events for the client to execute.
+    if (
+      binding?.type === "tool_search" &&
+      (frame.event === "response.function_call_arguments.delta" ||
+        frame.event === "response.function_call_arguments.done")
+    )
+      return [];
     if (binding?.type === "custom" && frame.event === "response.function_call_arguments.delta")
       return [];
     if (binding?.type === "custom" && frame.event === "response.function_call_arguments.done") {

@@ -200,7 +200,7 @@ ws.on("error", console.error);
 
 HTTP 和 WS 均接受 Codex 的 `client_metadata`（JSON 对象或 `null`）。它只作为客户端诊断字段被校验后丢弃，不转发给上游、不混入 `metadata`、模型输入或续轮历史；原有 `metadata` 语义保持不变。
 
-Codex GUI 的 `namespace` 工具组、`custom` 文本工具和 `input` 中的 `additional_tools` 声明支持 HTTP JSON/SSE 与 WebSocket。网关将它们转换为普通函数供上游调用，返回时恢复命名空间、`custom_tool_call` 和原始文本；工具结果及各类本地续轮沿用相同映射。`custom` 的 grammar 会保留为工具说明，转换后不具备上游原生 grammar 的强制约束；完整规则见 [Codex 工具兼容](docs/compatibility.md#codex-responses-工具兼容)。Codex 直连本服务时 `base_url` 可填写 `http://127.0.0.1:3000` 或 `http://127.0.0.1:3000/v1`，HTTP 和 WebSocket 均支持。
+Codex CLI/GUI 的 `namespace` 工具组、`custom` 文本工具、客户端 `tool_search` 和 `input` 中的 `additional_tools` 声明支持 HTTP JSON/SSE 与 WebSocket。网关将它们转换为普通函数供上游调用，返回时恢复原生调用格式；客户端搜索返回的工具会接入后续调用，工具结果及各类本地续轮沿用相同映射。`custom` 的 grammar 会保留为工具说明，转换后不具备上游原生 grammar 的强制约束；完整规则见 [Codex 工具兼容](docs/compatibility.md#codex-responses-工具兼容)。Codex 直连本服务时 `base_url` 可填写 `http://127.0.0.1:3000` 或 `http://127.0.0.1:3000/v1`，HTTP 和 WebSocket 均支持。
 
 省略 `stream_id` 使用默认流；指定后，同名流按顺序执行，不同流可以并发，返回事件附带对应 `stream_id`。每个连接最多 32 个命名流。`previous_response_id` 可引用本连接同一模型的最近成功响应，也可从另一个流分叉；省略或设为 `null` 开始新会话。`generate:false` 只在本地准备输入上下文并返回空输出的响应 ID，不调用或预热上游模型。
 

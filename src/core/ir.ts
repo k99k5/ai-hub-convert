@@ -138,7 +138,7 @@ export interface CanonicalRequest {
 
 export interface ResponsesToolBinding {
   upstreamName: string;
-  type: "function" | "custom";
+  type: "function" | "custom" | "tool_search";
   name: string;
   namespace?: string;
 }

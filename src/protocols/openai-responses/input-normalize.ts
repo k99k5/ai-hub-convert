@@ -24,14 +24,16 @@ function content(value: unknown): unknown {
   });
 }
 
-function tool(raw: Wire): Wire {
+export function normalizeResponsesTool(raw: Wire): Wire {
   if (raw.type === "namespace")
     return {
       ...pick(raw, ["type", "name", "description"]),
-      tools: (raw.tools as Wire[]).map(tool),
+      tools: (raw.tools as Wire[]).map(normalizeResponsesTool),
     };
   if (raw.type === "function")
     return pick(raw, ["type", "name", "description", "parameters", "strict"]);
+  if (raw.type === "tool_search")
+    return pick(raw, ["type", "execution", "description", "parameters"]);
   if (raw.type === "custom")
     return {
       ...pick(raw, ["type", "name", "description"]),
@@ -76,8 +78,18 @@ export function normalizeResponsesInput(input: readonly unknown[]): unknown[] {
         return pick(item, ["type", "id", "status", "call_id", "name", "namespace", "arguments"]);
       case "custom_tool_call":
         return pick(item, ["type", "id", "status", "call_id", "name", "namespace", "input"]);
+      case "tool_search_call":
+        return pick(item, ["type", "id", "status", "call_id", "execution", "arguments"]);
+      case "tool_search_output":
+        return {
+          ...pick(item, ["type", "id", "status", "call_id", "execution"]),
+          tools: (item.tools as Wire[]).map(normalizeResponsesTool),
+        };
       case "additional_tools":
-        return { ...pick(item, ["type", "id", "role"]), tools: (item.tools as Wire[]).map(tool) };
+        return {
+          ...pick(item, ["type", "id", "role"]),
+          tools: (item.tools as Wire[]).map(normalizeResponsesTool),
+        };
       case "custom_tool_call_output":
       case "function_call_output":
         return {

@@ -93,23 +93,27 @@ Anthropic `tool_result.is_error:true` 在 Responses 和 Chat 上游的结果正�
 
 ### Codex Responses 工具兼容
 
-Responses 入口在 Chat 和 Responses 两种上游模式中均接受 Codex GUI 的以下工具格式，覆盖 HTTP JSON、SSE 和 WebSocket：
+Responses 入口在 Chat 和 Responses 两种上游模式中均接受 Codex CLI/GUI 的以下工具格式，覆盖 HTTP JSON、SSE 和 WebSocket：
 
 | 输入 | 转换与返回 |
 | --- | --- |
 | `namespace` | 展开组内的 function/custom 工具，用稳定别名区分不同命名空间和工具类型；保留组说明与工具说明。调用返回时恢复原 `name`、`namespace` 和 `call_id` |
 | `custom` | 转成参数为 `{ "input": "原始文本" }` 的普通函数；返回时拆出字符串，恢复 `custom_tool_call.input`。不把 JSON 包装暴露给客户端 |
+| `tool_search`（`execution:"client"`） | 使用客户端提供的对象型 `parameters` 转成普通函数，保留搜索说明；返回时恢复 `tool_search_call`、`execution:"client"`、调用 ID 和对象型 `arguments`，由客户端执行搜索 |
+| `tool_search_call` / `tool_search_output` | 搜索调用与结果作为普通函数调用/结果回放；将结果中的工具声明接入后续请求，并将搜索结果里的工具名同步映射为上游别名。支持普通函数、命名空间和 custom 工具及空搜索结果 |
 | `input.additional_tools` | 仅接受 `role:"developer"` 与工具数组，按输入顺序收集声明，同一工具以后面的声明为准；不作为聊天正文转发。声明保留在本地输入历史中，可随 HTTP/WS 续轮与 Conversations 继承 |
 | `custom_tool_call_output` | 与普通函数结果一样接受字符串或纯 `input_text` 数组，保留调用 ID、文本、空白与换行 |
 | 显式 `tool_choice` / `allowed_tools` | 按工具类型、名称和可选 `namespace` 解析，并转换为同一上游别名 |
 
-顶层 `tools` 仍需每轮提供。缓存保存恢复后的 Responses 输出项；完整历史、`previous_response_id`、`item_reference` 和 Conversations 均可回传带命名空间的函数调用及 custom 调用/结果。映射仅属于当前请求，不引入跨凭据共享状态。未支持的工具类型仍返回 400，错误包含实际类型。
+顶层 `tools` 仍需每轮提供。缓存保存恢复后的 Responses 输出项；完整历史、`previous_response_id`、`item_reference` 和 Conversations 均可回传带命名空间的函数调用、custom 调用/结果及客户端搜索调用。`tool_search_output` 中发现的工具随输入历史保留，可用于后续轮次。映射仅属于当前请求，不引入跨凭据共享状态。未支持的工具类型仍返回 400，错误包含实际类型。
+
+客户端工具搜索遵循 [OpenAI tool search 协议](https://developers.openai.com/api/docs/guides/tools-tool-search)。流式搜索参数在完整校验后以 `response.output_item.done` 中的对象返回，不生成 `response.function_call_arguments.*` 事件；事件序号保持连续。非对象搜索参数不会产生完成调用或成功历史。`tool_choice:{type:"tool_search"}` 及 `allowed_tools` 中的搜索选择使用相同映射。当前要求搜索声明显式指定 `execution:"client"` 和对象型 `parameters`，不支持默认/server 托管搜索；已声明或搜索加载的工具直接进入上游函数列表，不模拟服务端的延迟加载。
 
 `custom.format` 接受 `text` 或 `grammar`（`lark` / `regex`）。grammar 定义进入上游工具说明；普通函数转换无法提供原生 grammar 的硬性约束。流式 custom 参数沿用现有参数/输出预算，在完整 JSON 参数校验后一次性发出 `response.custom_tool_call_input.delta` 和 `.done`，事件序号重新连续编号。非法 JSON、缺失/非字符串 input 或多余参数不会产生成功的 custom 调用或完成响应，也不会写入成功历史。嵌套 namespace、组内非 function/custom 工具不支持。
 
 Codex 的 `base_url` 可带或不带 `/v1`。`/responses` 是 `/v1/responses` 的 HTTP JSON/SSE 和 WebSocket 别名；`/chat/completions` 是 `/v1/chat/completions` 的 HTTP JSON/SSE 别名。请求在路由匹配前内部归一化，保留查询参数，不产生重定向；两种路径共用鉴权、校验、预算和缓存，HTTP `previous_response_id` 可跨路径续轮。其他接口仍使用原路径。
 
-验证：`pnpm exec vitest run test/unit/responses-tool-compat.test.ts test/integration/codex-gui-tools.test.ts`。
+验证：`pnpm exec vitest run test/unit/responses-tool-compat.test.ts test/unit/responses-tool-search.test.ts test/integration/codex-gui-tools.test.ts test/integration/codex-tool-search.test.ts`。
 
 ### Responses 引用缓存
 

@@ -22,6 +22,7 @@ const supportedTypes = new Set([
   "reasoning",
   "function_call",
   "custom_tool_call",
+  "tool_search_call",
   "web_search_call",
 ]);
 
