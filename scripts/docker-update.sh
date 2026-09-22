@@ -153,9 +153,14 @@ finish() {
   exit "$status"
 }
 
+# Bash can unwind main's local variables before the EXIT trap runs on errexit.
+# Recovery state must remain available until finish has resumed or restored service.
+root='' backup='' rollback_needed=0 drained_container=''
+wait_timeout=120 drain_timeout=0
+
 # Keep the executable body in a function: git pull may replace this script on disk.
 main() {
-  local root state pull=1 rollback_directory='' wait_timeout=120 drain_timeout=0 backup='' rollback_needed=0 drained_container=''
+  local state pull=1 rollback_directory=''
   root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
   local -a compose=(docker compose --project-directory "$root")
   while (( $# )); do
