@@ -328,11 +328,7 @@ function validateWebSearchTool(tool: Record<string, unknown>, preview: boolean):
       }
     }
   }
-  if (!preview && tool.search_content_types !== undefined) {
-    invalid("Invalid OpenAI Responses request: Web Search does not support search content types");
-  }
   if (
-    preview &&
     tool.search_content_types !== undefined &&
     (!Array.isArray(tool.search_content_types) ||
       !tool.search_content_types.every(

@@ -211,6 +211,7 @@ describe("Responses 网关搜索 HTTP 闭环", () => {
           {
             type: "web_search",
             external_web_access: true,
+            search_content_types: ["text"],
             search_context_size: "low",
             user_location: { country: "CN", city: "上海", timezone: "Asia/Shanghai" },
             filters: {
@@ -254,6 +255,7 @@ describe("Responses 网关搜索 HTTP 闭环", () => {
     expect(JSON.stringify(bodies[1]?.input)).toContain("搜索摘要");
     expect(JSON.stringify(bodies[1]?.input)).not.toContain("不可使用");
     expect(JSON.stringify(bodies)).not.toContain("web_search_call.action.sources");
+    expect(JSON.stringify(bodies)).not.toContain("search_content_types");
     expect(JSON.stringify(result)).not.toContain(INTERNAL_WEB_SEARCH_TOOL_NAME);
     if (stream) {
       expect(events.filter((event) => event.type === "response.created")).toHaveLength(1);
@@ -330,6 +332,9 @@ describe("Responses 网关搜索 HTTP 闭环", () => {
     apps.push(app);
     for (const tool of [
       { type: "web_search", external_web_access: false },
+      { type: "web_search", search_content_types: ["image"] },
+      { type: "web_search", search_content_types: ["text", "image"] },
+      { type: "web_search_2025_08_26", search_content_types: ["text", "image"] },
       { type: "web_search_preview", search_content_types: ["image"] },
     ]) {
       const response = await app.inject({

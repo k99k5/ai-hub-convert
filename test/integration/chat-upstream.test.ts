@@ -556,7 +556,7 @@ describe("默认强制 Chat 上游", () => {
       payload: {
         model: "m",
         input: "搜索资料",
-        tools: [{ type: "web_search" }],
+        tools: [{ type: "web_search", search_content_types: ["text"] }],
         include: ["web_search_call.action.sources"],
         stream,
       },

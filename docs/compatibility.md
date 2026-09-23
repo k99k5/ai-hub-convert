@@ -227,7 +227,7 @@ Conversations 在网关本地管理，不向上游发送会话管理请求或本
 - Anthropic：`web_search_20250305`、`web_search_20260209`、`web_search_20260318`；
 - OpenAI：`web_search`、`web_search_2025_08_26`、`web_search_preview`、`web_search_preview_2025_03_11`。
 
-不使用 prefix matching。Anthropic `response_inclusion` 仅在 `web_search_20260318` 接受 `full | excluded`；OpenAI preview 只接受 preview contract 的 `search_content_types`，stable/versioned 类型使用 `filters.allowed_domains`。
+不使用 prefix matching。Anthropic `response_inclusion` 仅在 `web_search_20260318` 接受 `full | excluded`；OpenAI 上述四种搜索类型均接受 `search_content_types:["text"]`，域名过滤 `filters.allowed_domains` / `filters.blocked_domains` 仅适用于 stable/versioned 类型。
 
 内置 Web Search 由独立 provider registry 执行，当前 provider 为 DuckDuckGo。请求进入 canonical Web Search 后会 materialize 为网关保留的内部 function；上游模型发起该调用时，网关执行搜索、回填结果并继续 completion。Anthropic JSON/SSE 出口会把执行轨迹表示为原生 `server_tool_use` / `web_search_tool_result`，并同步 `usage.server_tool_use.web_search_requests`。网关自身生成的 server-search replay block 在后续 Anthropic 请求中会被识别并过滤，普通名为 `web_search` 的自定义 function 不会被当作内置搜索。
 
@@ -250,7 +250,7 @@ Anthropic `user_location` 的 city、country、region、timezone 字符串进入
 | `user_location.city / region / country` | 作为搜索词的位置提示，并提供给模型；不承诺精确地理定位或原生地区排序 |
 | `user_location.timezone` | 作为模型生成查询时的提示；不会转换为 DuckDuckGo 时区过滤 |
 | `external_web_access:true` 或省略 | 在线检索；`false` 返回 400，网关没有离线搜索缓存 |
-| preview `search_content_types` | 支持文本；包含 `image` 返回 400，不执行图片搜索 |
+| `search_content_types`（上述四种搜索类型） | 省略、`[]` 或 `["text"]` 执行文本搜索；非数组、未知类型或包含 `image` 返回 400，不执行图片搜索 |
 
 每次执行在 JSON 中生成独立的 `web_search_call`，包含稳定的网关调用 ID、`status:"completed"`、`action.type:"search"`、`query` 和 `queries`。JSON 搜索记录位于最终模型输出之前；流式则保留实时可见顺序。SSE 生命周期为 `response.output_item.added` → `response.web_search_call.in_progress` → `response.web_search_call.searching` → `response.web_search_call.completed` → `response.output_item.done`，最终响应的搜索项与已发送的完成事件一致。普通文本无需等待搜索轮次全部结束。
 

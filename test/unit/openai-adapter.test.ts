@@ -264,7 +264,7 @@ describe("OpenAI Responses adapter", () => {
     const malformedTools = [
       { type: "web_search_2026_01_01" },
       { type: "web_search", search_context_size: "maximum" },
-      { type: "web_search", search_content_types: ["text"] },
+      { type: "web_search", search_content_types: "text" },
       { type: "web_search_preview", filters: { allowed_domains: ["example.test"] } },
       { type: "web_search_preview", search_content_types: ["video"] },
       { type: "web_search", filters: { allowed_domains: "example.test" } },

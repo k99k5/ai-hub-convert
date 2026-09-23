@@ -21,6 +21,12 @@ const completion = {
   usage: { inputTokens: 3, outputTokens: 2 },
 } as const;
 const encodeOptions = { store: false, promptCache: { kind: "none" } } as const;
+const webSearchTypes = [
+  "web_search",
+  "web_search_2025_08_26",
+  "web_search_preview",
+  "web_search_preview_2025_03_11",
+] as const;
 
 function webSearchCitations(...args: Parameters<typeof iterateWebSearchCitations>) {
   return [...iterateWebSearchCitations(...args)];
@@ -36,17 +42,50 @@ function request(fields: Record<string, unknown> = {}) {
 }
 
 describe("Responses 网关搜索请求", () => {
-  it.each([
-    "web_search",
-    "web_search_2025_08_26",
-    "web_search_preview",
-    "web_search_preview_2025_03_11",
-  ])("支持工具版本和显式选择 %s", (type) => {
+  it.each(webSearchTypes)("支持工具版本和显式选择 %s", (type) => {
     const canonical = request({ tools: [{ type }], tool_choice: { type } });
     expect(encodeResponsesRequest(canonical, encodeOptions).tool_choice).toEqual({
       type: "function",
       name: INTERNAL_WEB_SEARCH_TOOL_NAME,
     });
+  });
+
+  it.each(webSearchTypes)("%s 接受显式文本搜索类型", (type) => {
+    for (const searchContentTypes of [["text"], []]) {
+      const canonical = request({
+        tools: [{ type, search_content_types: searchContentTypes }],
+        tool_choice: { type },
+      });
+      expect(canonical.tools).toEqual([
+        { type: "web_search", provider: "web-search", version: type },
+      ]);
+      const encoded = encodeResponsesRequest(canonical, encodeOptions);
+      expect(encoded.tool_choice).toEqual({
+        type: "function",
+        name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+      });
+      expect(encoded.tools?.[0]).toMatchObject({
+        type: "function",
+        name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+      });
+      expect(encoded.tools?.[0]).not.toHaveProperty("search_content_types");
+    }
+  });
+
+  it.each(webSearchTypes)("%s 拒绝畸形搜索类型", (type) => {
+    for (const searchContentTypes of ["text", null, {}, ["video"], ["text", 1], ["text", null]]) {
+      expect(() =>
+        request({ tools: [{ type, search_content_types: searchContentTypes }] }),
+      ).toThrow("Invalid OpenAI Responses request: invalid Web Search content types");
+    }
+  });
+
+  it.each(webSearchTypes)("%s 明确拒绝无法执行的图片搜索", (type) => {
+    for (const searchContentTypes of [["image"], ["text", "image"]]) {
+      expect(() =>
+        request({ tools: [{ type, search_content_types: searchContentTypes }] }),
+      ).toThrow("DuckDuckGo Lite 搜索只支持文本结果，不支持图片搜索");
+    }
   });
 
   it("传递可实现的参数并只把推理 include 发给上游", () => {
