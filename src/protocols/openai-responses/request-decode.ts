@@ -6,10 +6,10 @@ import type {
   ToolChoice,
 } from "../../core/ir.js";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../providers/web-search/internal.js";
-import { OpenAIAdapterError, type ResponsesTextConfig } from "./types.js";
-import { decodeWebSearchHistory } from "./web-search.js";
 import { conversationId } from "./conversation.js";
 import { normalizeResponsesTools } from "./tool-compat.js";
+import { OpenAIAdapterError, type ResponsesTextConfig } from "./types.js";
+import { decodeWebSearchHistory } from "./web-search.js";
 
 const errorCode = "INVALID_OPENAI_RESPONSES_REQUEST" as const;
 function invalid(message: string): never {
@@ -291,9 +291,6 @@ function validateWebSearchTool(tool: Record<string, unknown>, preview: boolean):
   if (tool.external_web_access !== undefined && typeof tool.external_web_access !== "boolean") {
     invalid("external_web_access 必须是布尔值");
   }
-  if (tool.external_web_access === false) {
-    invalid("DuckDuckGo 搜索不支持 external_web_access=false 的离线缓存模式");
-  }
   if (
     tool.search_context_size !== undefined &&
     tool.search_context_size !== "low" &&
@@ -363,6 +360,9 @@ function decodeTools(value: unknown): CanonicalTool[] {
         type: "web_search" as const,
         provider: "web-search" as const,
         version: tool.type,
+        ...(tool.external_web_access === undefined
+          ? {}
+          : { externalWebAccess: tool.external_web_access as boolean }),
         ...(isRecord(tool.filters) && Array.isArray(tool.filters.allowed_domains)
           ? { allowedDomains: [...tool.filters.allowed_domains] as string[] }
           : {}),

@@ -20,6 +20,9 @@ export function assertWebSearchSupported(
     if (tool.type !== "web_search") {
       continue;
     }
+    if (tool.externalWebAccess === false) {
+      continue;
+    }
     if (!registry.get(tool.provider).capabilities().execute) {
       throw new WebSearchUnsupportedError();
     }

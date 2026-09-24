@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ResponsesToolBinding } from "../../core/ir.js";
+import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../providers/web-search/internal.js";
 import { normalizeResponsesTool } from "./input-normalize.js";
 import type { ResponsesSseFrame } from "./stream-encode.js";
 import { OpenAIAdapterError } from "./types.js";
@@ -29,6 +30,10 @@ function namespace(value: unknown): string | undefined {
 
 function identity(type: string, toolName: string, group?: string): string {
   return JSON.stringify([type, group ?? null, toolName]);
+}
+
+function isUnnamespacedWebSearch(value: Wire): boolean {
+  return value.name === "web_search" && (value.namespace === undefined || value.namespace === null);
 }
 
 function customDescription(tool: Wire): string {
@@ -112,6 +117,18 @@ export function normalizeResponsesTools(body: Wire): {
       definitions.set(identity("tool_search", "tool_search"), tool);
       return [tool];
     }
+    if (raw.type === "custom" && group === undefined && isUnnamespacedWebSearch(raw)) {
+      // 兼容客户端搜索别名；保留原工具身份，使续轮声明仍按顺序覆盖。
+      customDescription(raw);
+      const tool: Wire = {
+        type: "web_search",
+        ...(raw.external_web_access === undefined
+          ? {}
+          : { external_web_access: raw.external_web_access }),
+      };
+      definitions.set(identity("custom", "web_search"), tool);
+      return [tool];
+    }
     if (raw.type !== "function" && raw.type !== "custom") {
       if (group !== undefined)
         invalid(`Unsupported OpenAI Responses namespace tool type: ${String(raw.type)}`);
@@ -192,6 +209,16 @@ export function normalizeResponsesTools(body: Wire): {
         const custom = item.type === "custom_tool_call";
         if (custom && typeof item.input !== "string")
           invalid("custom_tool_call.input must be a string");
+        if (custom && group === undefined && isUnnamespacedWebSearch(item)) {
+          return [
+            {
+              ...item,
+              type: "function_call",
+              name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+              arguments: JSON.stringify({ query: item.input }),
+            },
+          ];
+        }
         const { namespace: _namespace, input: _input, ...call } = item;
         return [
           {
@@ -209,6 +236,7 @@ export function normalizeResponsesTools(body: Wire): {
       return { ...value, tools: value.tools.map(choice) };
     if (value.type === "tool_search")
       return { type: "function", name: bind("tool_search", "tool_search") };
+    if (value.type === "custom" && isUnnamespacedWebSearch(value)) return { type: "web_search" };
     if (value.type !== "function" && value.type !== "custom") return value;
     const toolName = name(value.name, "tool_choice name");
     const group = namespace(value.namespace);

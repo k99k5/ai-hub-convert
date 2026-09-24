@@ -96,4 +96,23 @@ describe("Web Search preflight", () => {
       ),
     ).toThrowError(WebSearchUnsupportedError);
   });
+
+  it("allows offline empty-result search without an executable provider", () => {
+    const registry = new WebSearchProviderRegistry();
+    registry.register("web-search", providerWithExecution(false));
+
+    expect(() =>
+      assertWebSearchSupported(
+        requestWithTools([
+          {
+            type: "web_search",
+            provider: "web-search",
+            version: "web_search",
+            externalWebAccess: false,
+          },
+        ]),
+        registry,
+      ),
+    ).not.toThrow();
+  });
 });

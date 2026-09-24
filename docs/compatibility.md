@@ -99,6 +99,7 @@ Responses 入口在 Chat 和 Responses 两种上游模式中均接受 Codex CLI/
 | --- | --- |
 | `namespace` | 展开组内的 function/custom 工具，用稳定别名区分不同命名空间和工具类型；保留组说明与工具说明。调用返回时恢复原 `name`、`namespace` 和 `call_id` |
 | `custom` | 转成参数为 `{ "input": "原始文本" }` 的普通函数；返回时拆出字符串，恢复 `custom_tool_call.input`。不把 JSON 包装暴露给客户端 |
+| 未命名空间的 `custom` `name:"web_search"` | 兼容为网关内置 Web Search，返回 `web_search_call`；支持布尔扩展 `external_web_access`，在续轮历史中保留。同一 custom 搜索按身份去重，后声明覆盖前声明；命名空间内同名工具仍按普通 custom 工具处理 |
 | `tool_search`（`execution:"client"`） | 使用客户端提供的对象型 `parameters` 转成普通函数，保留搜索说明；返回时恢复 `tool_search_call`、`execution:"client"`、调用 ID 和对象型 `arguments`，由客户端执行搜索 |
 | `tool_search_call` / `tool_search_output` | 搜索调用与结果作为普通函数调用/结果回放；将结果中的工具声明接入后续请求，并将搜索结果里的工具名同步映射为上游别名。支持普通函数、命名空间和 custom 工具及空搜索结果 |
 | `input.additional_tools` | 仅接受 `role:"developer"` 与工具数组，按输入顺序收集声明，同一工具以后面的声明为准；不作为聊天正文转发。声明保留在本地输入历史中，可随 HTTP/WS 续轮与 Conversations 继承 |
@@ -249,7 +250,8 @@ Anthropic `user_location` 的 city、country、region、timezone 字符串进入
 | stable `filters.allowed_domains` / `filters.blocked_domains` | 每个列表最多 100 个无协议和路径的域名，匹配域名及其子域名；中文域名通过 IDNA 与 Punycode 统一匹配；在已检索结果上过滤 |
 | `user_location.city / region / country` | 作为搜索词的位置提示，并提供给模型；不承诺精确地理定位或原生地区排序 |
 | `user_location.timezone` | 作为模型生成查询时的提示；不会转换为 DuckDuckGo 时区过滤 |
-| `external_web_access:true` 或省略 | 在线检索；`false` 返回 400，网关没有离线搜索缓存 |
+| `external_web_access:true` 或省略 | 在线检索 |
+| `external_web_access:false` | 不访问 DuckDuckGo，直接回填空结果；搜索项仍正常完成 |
 | `search_content_types`（上述四种搜索类型） | 省略、`[]` 或 `["text"]` 执行文本搜索；非数组、未知类型或包含 `image` 返回 400，不执行图片搜索 |
 
 每次执行在 JSON 中生成独立的 `web_search_call`，包含稳定的网关调用 ID、`status:"completed"`、`action.type:"search"`、`query` 和 `queries`。JSON 搜索记录位于最终模型输出之前；流式则保留实时可见顺序。SSE 生命周期为 `response.output_item.added` → `response.web_search_call.in_progress` → `response.web_search_call.searching` → `response.web_search_call.completed` → `response.output_item.done`，最终响应的搜索项与已发送的完成事件一致。普通文本无需等待搜索轮次全部结束。
@@ -260,7 +262,7 @@ Anthropic `user_location` 的 city、country、region、timezone 字符串进入
 
 既有 DuckDuckGo 降级行为保持不变：请求失败、限流或无结果均作为空结果回填，`completed` 表示搜索尝试结束，不保证结果非空；调用方取消则终止请求。上游在同一轮混合内部搜索和需要客户端执行的函数仍会拒绝，防止缺少函数结果时继续调用模型。
 
-兼容性收紧：同一请求只接受一个内置搜索声明，函数不能占用 `__ai_hub_web_search` 保留名称，显式工具选择必须指向已声明工具。此前重复搜索声明会产生相同内部函数，离线和图片参数可能被忽略；现在返回明确的 400。迁移时保留一个搜索版本、移除无法实现的参数并选择文本在线检索，无配置或数据迁移。
+兼容性收紧：同一请求只接受一个内置搜索声明，函数不能占用 `__ai_hub_web_search` 保留名称，显式工具选择必须指向已声明工具。未命名空间的 `custom` 工具 `name:"web_search"` 会兼容为内置搜索；命名空间内的同名 custom 工具仍按普通 custom 工具处理。`external_web_access:false` 不执行网络搜索并回填空结果，图片参数仍返回明确的 400。迁移时保留一个搜索版本，无配置或数据迁移。
 
 本地复现（不依赖网络服务）：
 

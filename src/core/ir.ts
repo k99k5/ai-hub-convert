@@ -81,6 +81,7 @@ export interface FunctionTool {
 export interface WebSearchTool {
   type: "web_search";
   provider: "web-search";
+  externalWebAccess?: boolean;
   maxUses?: number;
   allowedDomains?: string[];
   blockedDomains?: string[];

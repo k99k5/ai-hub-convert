@@ -37,6 +37,7 @@ export function normalizeResponsesTool(raw: Wire): Wire {
   if (raw.type === "custom")
     return {
       ...pick(raw, ["type", "name", "description"]),
+      ...(raw.name === "web_search" ? pick(raw, ["external_web_access"]) : {}),
       ...(raw.format === undefined
         ? {}
         : { format: pick(raw.format as Wire, ["type", "syntax", "definition"]) }),

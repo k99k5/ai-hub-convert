@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { decodeResponsesRequest } from "../../src/protocols/openai-responses/request-decode.js";
 import { encodeResponsesChatRequest } from "../../src/protocols/openai-responses/chat-bridge.js";
+import { encodeResponsesRequest } from "../../src/protocols/openai-responses/encode.js";
 import { normalizeResponsesInput } from "../../src/protocols/openai-responses/input-normalize.js";
-import { ResponsesToolOutput } from "../../src/protocols/openai-responses/tool-compat.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai-responses/request-decode.js";
 import { ResponsesStreamEncoder } from "../../src/protocols/openai-responses/stream-encode.js";
+import { ResponsesToolOutput } from "../../src/protocols/openai-responses/tool-compat.js";
+import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
 
 const fn = { type: "function", name: "run", parameters: { type: "object", properties: {} } };
 const custom = {
@@ -24,6 +26,144 @@ function present<T>(value: T | undefined): T {
 }
 
 describe("Codex Responses tool compatibility", () => {
+  it.each([
+    "top",
+    "additional",
+    "discovery",
+  ] as const)("重复 custom 搜索按工具身份覆盖且保留离线策略：%s", (source) => {
+    const online = { type: "custom", name: "web_search", external_web_access: true };
+    const offline = { ...online, external_web_access: false };
+    const declaration = (tool: typeof online, id: string) =>
+      source === "discovery"
+        ? { type: "tool_search_output", call_id: id, tools: [tool] }
+        : { type: "additional_tools", role: "developer", tools: [tool] };
+    const input = [
+      ...(source === "top" ? [] : [declaration(online, "first")]),
+      declaration(offline, "second"),
+    ];
+    const body = {
+      model: "m",
+      ...(source === "top" ? { tools: [online] } : {}),
+      input,
+      tool_choice: {
+        type: "allowed_tools",
+        mode: "required",
+        tools: [{ type: "custom", name: "web_search" }],
+      },
+    };
+    for (const history of [input, normalizeResponsesInput(input)]) {
+      const request = decodeResponsesRequest({ ...body, input: history });
+      expect(request.tools).toEqual([
+        {
+          type: "web_search",
+          provider: "web-search",
+          version: "web_search",
+          externalWebAccess: false,
+        },
+      ]);
+      expect(request.toolChoice).toEqual({ type: "required" });
+    }
+  });
+
+  it("custom 搜索后声明可以重新开启在线模式", () => {
+    const tool = { type: "custom", name: "web_search", external_web_access: false };
+    const request = decodeResponsesRequest({
+      model: "m",
+      tools: [tool],
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [{ ...tool, external_web_access: true }],
+        },
+      ],
+    });
+    expect(request.tools).toHaveLength(1);
+    expect(request.tools[0]).toHaveProperty("externalWebAccess", true);
+  });
+
+  it.each(["false", null, 0])("custom 搜索仍校验离线标记类型：%j", (value) => {
+    expect(() =>
+      decodeResponsesRequest({
+        model: "m",
+        tools: [{ type: "custom", name: "web_search", external_web_access: value }],
+      }),
+    ).toThrow("external_web_access 必须是布尔值");
+  });
+
+  it("保留普通同名函数和命名空间 custom 的身份", () => {
+    const request = decodeResponsesRequest({
+      model: "m",
+      tools: [
+        { type: "custom", name: "web_search", external_web_access: false },
+        { ...fn, name: "web_search" },
+        group("client", [{ type: "custom", name: "web_search" }]),
+      ],
+    });
+    expect(request.tools.map((tool) => tool.type)).toEqual(["web_search", "function", "function"]);
+    expect(request.responsesToolBindings).toMatchObject([
+      { type: "custom", name: "web_search", namespace: "client" },
+    ]);
+    expect(() =>
+      decodeResponsesRequest({
+        model: "m",
+        tools: [{ type: "custom", name: "web_search" }, { type: "web_search" }],
+      }),
+    ).toThrow("同一请求只能声明一个内置网页搜索工具");
+  });
+
+  it("maps an unnamespaced custom web_search tool to gateway Web Search", () => {
+    const request = decodeResponsesRequest({
+      model: "m",
+      tools: [{ type: "custom", name: "web_search", format: { type: "text" } }],
+      tool_choice: { type: "custom", name: "web_search", namespace: null },
+    });
+    expect(request.tools).toEqual([
+      { type: "web_search", provider: "web-search", version: "web_search" },
+    ]);
+    expect(request.responsesToolBindings).toBeUndefined();
+    expect(
+      encodeResponsesRequest(request, { store: false, promptCache: { kind: "none" } }).tool_choice,
+    ).toEqual({ type: "function", name: INTERNAL_WEB_SEARCH_TOOL_NAME });
+  });
+
+  it("replays legacy custom web_search calls as internal search history", () => {
+    const request = decodeResponsesRequest({
+      model: "m",
+      tools: [{ type: "custom", name: "web_search" }],
+      input: [
+        {
+          type: "custom_tool_call",
+          call_id: "search_call",
+          name: "web_search",
+          input: "历史查询",
+        },
+        {
+          type: "custom_tool_call_output",
+          call_id: "search_call",
+          output: "历史结果",
+        },
+      ],
+    });
+    const encoded = encodeResponsesRequest(request, {
+      store: false,
+      promptCache: { kind: "none" },
+    });
+    expect(encoded.input).toEqual([
+      {
+        type: "function_call",
+        call_id: "search_call",
+        name: INTERNAL_WEB_SEARCH_TOOL_NAME,
+        arguments: '{"query":"历史查询"}',
+      },
+      {
+        type: "function_call_output",
+        call_id: "search_call",
+        output: "历史结果",
+      },
+    ]);
+  });
+
   it("keeps names distinct and stable across namespace, tool kind and declaration order", () => {
     const tools = [fn, group("left"), group("right"), { type: "custom", name: "run" }];
     const first = decodeResponsesRequest({ model: "m", tools });

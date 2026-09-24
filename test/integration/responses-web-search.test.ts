@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
-import { loadResponsesConfig as loadConfig } from "../helpers/config.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai-responses/request-decode.js";
+import { ResponsesStreamEncoder } from "../../src/protocols/openai-responses/stream-encode.js";
 import { DuckDuckGoWebSearchProvider } from "../../src/providers/web-search/duckduckgo.js";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
 import { UpstreamClient } from "../../src/upstream/client.js";
-import { ResponsesStreamEncoder } from "../../src/protocols/openai-responses/stream-encode.js";
-import { decodeResponsesRequest } from "../../src/protocols/openai-responses/request-decode.js";
+import { loadResponsesConfig as loadConfig } from "../helpers/config.js";
 import { responsesStream } from "../helpers/upstream.js";
 
 type Wire = Record<string, unknown>;
@@ -321,7 +321,84 @@ describe("Responses 网关搜索 HTTP 闭环", () => {
     expect((output[1]?.content as Wire[])[0]?.annotations).toEqual([]);
   });
 
-  it("不支持的离线和图片语义在发起任何网络请求前拒绝", async () => {
+  it.each([false, true])("custom web_search 兼容为内置搜索，stream=%s", async (stream) => {
+    let calls = 0;
+    const searchFetch = vi.fn(async () => new Response(resultHtml));
+    const app = buildApp({
+      config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
+      logger: false,
+      webSearchProvider: new DuckDuckGoWebSearchProvider(searchFetch),
+      upstreamFetch: async (_input, _init) => {
+        calls += 1;
+        const body = modelResponse(calls === 1);
+        return stream ? responsesStream(body) : Response.json(body);
+      },
+    });
+    apps.push(app);
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: { authorization: "Bearer test-key" },
+      payload: {
+        model: "model-test",
+        input: "搜索",
+        stream,
+        tools: [{ type: "custom", name: "web_search", format: { type: "text" } }],
+        tool_choice: { type: "custom", name: "web_search" },
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    const body = stream ? (frames(response.body).at(-1)?.response as Wire) : response.json<Wire>();
+    expect((body.output as Wire[]).some((item) => item.type === "web_search_call")).toBe(true);
+    expect(searchFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(
+    [false, true].flatMap((stream) => ["web_search", "custom"].map((type) => ({ stream, type }))),
+  )("external_web_access=false 直接回填空结果：%j", async ({ stream, type }) => {
+    let calls = 0;
+    const searchFetch = vi.fn(async () => new Response(resultHtml));
+    const bodies: Wire[] = [];
+    const app = buildApp({
+      config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
+      logger: false,
+      upstreamFetch: async (_input, init) => {
+        bodies.push(JSON.parse(init?.body as string) as Wire);
+        calls += 1;
+        const body = modelResponse(calls === 1);
+        return stream ? responsesStream(body) : Response.json(body);
+      },
+      webSearchProvider: new DuckDuckGoWebSearchProvider(searchFetch),
+    });
+    apps.push(app);
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: { authorization: "Bearer test-key" },
+      payload: {
+        model: "model-test",
+        input: "搜索",
+        stream,
+        tools: [
+          {
+            type,
+            ...(type === "custom" ? { name: "web_search" } : {}),
+            external_web_access: false,
+          },
+        ],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    const body = stream ? (frames(response.body).at(-1)?.response as Wire) : response.json<Wire>();
+    expect((body.output as Wire[]).some((item) => item.type === "web_search_call")).toBe(true);
+    const toolResult = (bodies[1]?.input as Wire[]).find(
+      (item) => item.type === "function_call_output",
+    );
+    expect(JSON.parse(toolResult?.output as string).results).toEqual([]);
+    expect(searchFetch).not.toHaveBeenCalled();
+  });
+
+  it("图片搜索语义在发起任何网络请求前拒绝", async () => {
     const fetch = vi.fn(async () => Response.json(modelResponse()));
     const app = buildApp({
       config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
@@ -331,7 +408,6 @@ describe("Responses 网关搜索 HTTP 闭环", () => {
     });
     apps.push(app);
     for (const tool of [
-      { type: "web_search", external_web_access: false },
       { type: "web_search", search_content_types: ["image"] },
       { type: "web_search", search_content_types: ["text", "image"] },
       { type: "web_search_2025_08_26", search_content_types: ["text", "image"] },

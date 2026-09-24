@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { decodeResponsesRequest } from "../../src/protocols/openai-responses/request-decode.js";
+import type { CanonicalEvent } from "../../src/core/events.js";
+import type { Citation } from "../../src/core/ir.js";
 import { encodeResponsesRequest } from "../../src/protocols/openai-responses/encode.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai-responses/request-decode.js";
 import { ResponsesStreamEncoder } from "../../src/protocols/openai-responses/stream-encode.js";
 import {
   addResponsesWebSearch,
@@ -10,8 +12,6 @@ import {
 } from "../../src/protocols/openai-responses/web-search.js";
 import { INTERNAL_WEB_SEARCH_TOOL_NAME } from "../../src/providers/web-search/internal.js";
 import { StreamOutputLimitError } from "../../src/stream/output-limits.js";
-import type { CanonicalEvent } from "../../src/core/events.js";
-import type { Citation } from "../../src/core/ir.js";
 
 const source = { title: "资料", url: "https://example.test/doc", content: "内容" };
 const search = { id: "call_search", query: "资料", results: [source] };
@@ -122,6 +122,16 @@ describe("Responses 网关搜索请求", () => {
     expect(encoded.tools?.[0]?.description).toContain("Asia/Shanghai");
   });
 
+  it("保留 external_web_access=false 作为离线空结果策略", () => {
+    const canonical = request({
+      tools: [{ type: "web_search", external_web_access: false }],
+    });
+    expect(canonical.tools[0]).toMatchObject({
+      type: "web_search",
+      externalWebAccess: false,
+    });
+  });
+
   it("普通同名函数和内置搜索分别选择", () => {
     const tools = [
       { type: "web_search" },
@@ -147,7 +157,6 @@ describe("Responses 网关搜索请求", () => {
   });
 
   it.each([
-    { tools: [{ type: "web_search", external_web_access: false }] },
     { tools: [{ type: "web_search", external_web_access: "true" }] },
     { tools: [{ type: "web_search_preview", search_content_types: ["image"] }] },
     { tools: [{ type: "web_search" }, { type: "web_search_preview" }] },

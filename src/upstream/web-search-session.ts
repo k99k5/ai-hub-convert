@@ -4,10 +4,10 @@ import { matchesSearchDomain } from "../providers/web-search/domains.js";
 import type { WebSearchProvider } from "../providers/web-search/types.js";
 import { StreamOutputLimitError } from "../stream/output-limits.js";
 import {
+  type CompletionPath,
   readCompletionUsage,
   replaceCompletionUsage,
   sumUsage,
-  type CompletionPath,
 } from "./usage.js";
 import {
   appendWebSearchResults,
@@ -75,7 +75,11 @@ export class WebSearchSession {
           : { blockedDomains: this.policy.blockedDomains }),
       };
       yield { type: "web_search_start", id: call.id, query: search.query };
-      const results = (await this.provider.execute(search, { requestId: call.id, signal })).filter(
+      const fetchedResults =
+        this.policy?.externalWebAccess === false
+          ? []
+          : await this.provider.execute(search, { requestId: call.id, signal });
+      const results = fetchedResults.filter(
         (result) =>
           (!search.domains?.length || matchesSearchDomain(result.url, search.domains)) &&
           (!search.blockedDomains?.length ||

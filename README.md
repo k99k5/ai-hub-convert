@@ -285,7 +285,7 @@ Anthropic JSON/SSE 出口会生成原生 `server_tool_use` / `web_search_tool_re
 
 Responses JSON/SSE 出口会生成 `web_search_call`，SSE 在实际搜索前发送 `in_progress` / `searching`，结果返回后发送 `completed`。通过 `include:["web_search_call.action.sources"]` 获取搜索来源；答案里实际出现的检索链接会附带 `url_citation`。返回的 `output` 可以直接放入下一轮 `input`，搜索记录作为历史上下文处理，不重新执行。
 
-Responses 支持显式搜索 `tool_choice`、`allowed_tools`、`max_tool_calls`、上下文大小及域名过滤。DuckDuckGo Lite 的位置只作为检索提示；不支持离线缓存和图片检索，相关请求返回 400。具体映射、历史回传和兼容性变化见 [Responses 搜索兼容说明](docs/compatibility.md#responses-网关搜索)。
+Responses 支持显式搜索 `tool_choice`、`allowed_tools`、`max_tool_calls`、上下文大小及域名过滤。未命名空间的 `custom` 工具 `name:"web_search"` 兼容为内置搜索；DuckDuckGo Lite 的位置只作为检索提示。`external_web_access:false` 直接返回空搜索结果且不访问网络；图片检索仍返回 400。具体映射、历史回传和兼容性变化见 [Responses 搜索兼容说明](docs/compatibility.md#responses-网关搜索)。
 
 ## 兼容范围
 
