@@ -56,7 +56,7 @@ export class PingedIterator<T> {
       clearTimeout(this.#timer);
       this.#timer = undefined;
     }
-    void this.iterator.return?.();
+    void this.iterator.return?.().catch(() => undefined);
   }
 
   #startRead(): void {

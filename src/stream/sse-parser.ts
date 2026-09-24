@@ -117,7 +117,7 @@ async function readWithTimeout(
       const error = new SseStreamTimeoutError(phase);
       onTimeout?.(error);
       reject(error);
-      void reader.cancel(error);
+      void reader.cancel(error).catch(() => undefined);
     }, timeoutMs);
   });
   try {

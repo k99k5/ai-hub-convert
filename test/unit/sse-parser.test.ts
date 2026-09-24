@@ -185,6 +185,33 @@ describe("parseSseStream", () => {
     expect(onTimeout).toHaveBeenCalledWith(expect.any(SseStreamTimeoutError));
   });
 
+  it("does not leak a rejected reader cancel after a timeout", async () => {
+    const bytes = new TextEncoder().encode("data: first\n\n");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+      },
+      cancel(reason) {
+        expect(reason).toBeInstanceOf(SseStreamTimeoutError);
+        return Promise.reject(reason);
+      },
+    });
+
+    await expect(
+      (async () => {
+        for await (const _event of parseSseStream(stream, {
+          firstByteTimeoutMs: 50,
+          idleTimeoutMs: 5,
+        })) {
+          // No event is expected.
+        }
+      })(),
+    ).rejects.toMatchObject({ name: "SseStreamTimeoutError", phase: "idle" });
+
+    // Let the cancellation promise settle after the parser attaches its rejection handler.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
   it("times out when the upstream becomes idle after an event", async () => {
     const bytes = new TextEncoder().encode("data: first\n\n");
     const stream = new ReadableStream<Uint8Array>({

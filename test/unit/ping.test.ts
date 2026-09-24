@@ -61,6 +61,25 @@ describe("PingedIterator", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("does not leak a rejected wrapped iterator cleanup", async () => {
+    const failure = new Error("iterator cleanup failed");
+    const close = vi.fn(async () => {
+      throw failure;
+    });
+    const iterator = new PingedIterator<string>(
+      {
+        next: async () => ({ done: true, value: undefined }),
+        return: close,
+      },
+      10,
+    );
+
+    iterator.close();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("emits one ping after the client stream becomes idle", async () => {
     vi.useFakeTimers();
     const source = controlledIterator<string>();
