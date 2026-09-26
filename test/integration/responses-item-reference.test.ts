@@ -143,7 +143,7 @@ describe("Responses 内存引用续轮", () => {
     }
     if (stream) {
       expect(second.body).toContain('"type":"response.completed"');
-      expect(second.body).toContain("data: [DONE]");
+      expect(second.body).not.toContain("data: [DONE]");
     } else expect(second.json().output[1].content[0].text).toBe("准备搜索");
   });
 

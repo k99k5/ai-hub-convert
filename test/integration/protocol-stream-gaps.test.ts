@@ -74,7 +74,7 @@ describe("流式协议缺口 HTTP 回归", () => {
       incomplete_details: { reason: "max_output_tokens" },
       output: [{ type: "function_call", arguments: '{"x":', status: "incomplete" }],
     });
-    expect(response.body).toContain("data: [DONE]");
+    expect(response.body).not.toContain("data: [DONE]");
     expect(requests).toHaveLength(1);
   });
 

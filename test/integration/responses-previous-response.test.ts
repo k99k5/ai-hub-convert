@@ -132,7 +132,7 @@ function terminal(result: {
     .map((line) => JSON.parse(line.slice(6)) as Wire)
     .find((event) => event.type === "response.completed" || event.type === "response.incomplete");
   expect(event, result.body).toBeDefined();
-  expect(result.body).toContain("data: [DONE]");
+  expect(result.body).not.toContain("data: [DONE]");
   return event?.response as Wire;
 }
 

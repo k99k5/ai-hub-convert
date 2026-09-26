@@ -152,7 +152,13 @@ describe("SSE downstream heartbeats", () => {
       expect(wire).not.toContain("event: error");
       expect(wire).not.toContain("data: : ping");
       expect(wire).not.toContain('data: {"type":"ping"}');
-      expect(wire).toContain(url === "/v1/messages" ? "event: message_stop" : "data: [DONE]");
+      expect(wire).toContain(
+        url === "/v1/messages"
+          ? "event: message_stop"
+          : url === "/v1/responses"
+            ? "event: response.completed"
+            : "data: [DONE]",
+      );
     } finally {
       clearTimeout(deadline);
       ready.resolve(source.response);
@@ -439,8 +445,10 @@ describe("SSE downstream heartbeats", () => {
       }
       expect(wire).not.toContain("event: error");
       expect(wire).not.toContain('"error":{');
-      expect(wire).toContain("data: [DONE]");
-      if (url === "/v1/responses") expect(wire).toContain("event: response.completed");
+      if (url === "/v1/responses") {
+        expect(wire).toContain("event: response.completed");
+        expect(wire).not.toContain("data: [DONE]");
+      } else expect(wire).toContain("data: [DONE]");
       expect(upstream).toHaveBeenCalledOnce();
     } finally {
       clearTimeout(deadline);

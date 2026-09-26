@@ -67,8 +67,10 @@ describe.each(routes)("Unversioned $path alias", ({ path, payload }) => {
       );
       if (stream) {
         expect(response.body).toContain("hello from upstream");
-        expect(response.body).toContain("data: [DONE]");
-        if (path === "/responses") expect(response.body).toContain("event: response.completed");
+        if (path === "/responses") {
+          expect(response.body).toContain("event: response.completed");
+          expect(response.body).not.toContain("data: [DONE]");
+        } else expect(response.body).toContain("data: [DONE]");
       } else {
         expect(response.json()).toMatchObject(
           path === "/responses"

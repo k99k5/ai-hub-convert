@@ -73,7 +73,7 @@ describe("Responses 引用缓存的应用边界", () => {
     expect(response.statusCode).toBe(200);
     if (stream) {
       expect(response.body).toContain("event: response.incomplete");
-      expect(response.body).toContain("data: [DONE]");
+      expect(response.body).not.toContain("data: [DONE]");
     } else expect(response.json()).toMatchObject({ status: "incomplete" });
     const followup = await reference(app, stream);
     expect(followup.statusCode).toBe(400);
@@ -109,7 +109,7 @@ describe("Responses 引用缓存的应用边界", () => {
     "response.failed",
     "response.cancelled",
     "error",
-  ])("明确失败终态 %s 仅发送一次清洗错误，不缓存或发送 DONE", async (type) => {
+  ])("明确失败终态 %s 仅发送一次清洗错误，不缓存或发送成功终态", async (type) => {
     const frames = responsesFrames(outputResponse()).slice(0, -2);
     frames.push(
       `event: ${type}\ndata: ${JSON.stringify({
@@ -147,7 +147,7 @@ describe("Responses 引用缓存的应用边界", () => {
     if (stream) {
       expect(response.body).toContain(text);
       expect(response.body).toContain("event: response.completed");
-      expect(response.body).toContain("data: [DONE]");
+      expect(response.body).not.toContain("data: [DONE]");
     } else {
       expect(response.json().status).toBe("completed");
       expect(response.json().output[0].content[0].text).toBe(text);

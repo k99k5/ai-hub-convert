@@ -954,7 +954,7 @@ async function streamResponsesResponse(
   argumentLimits: ToolArgumentLimits,
   streamOutputLimits: StreamOutputLimits,
   timeoutOptions: StreamTimeoutOptions,
-  send: (frame: ResponsesSseFrame | string) => Promise<void>,
+  send: (frame: ResponsesSseFrame) => Promise<void>,
   remember: (response: Record<string, unknown>) => void,
   protocol: AppConfig["upstream"]["protocol"],
   body: unknown,
@@ -991,8 +991,8 @@ async function streamResponsesResponse(
   signal.throwIfAborted();
   const response = terminal.data.response as Record<string, unknown>;
   if (terminal.event === "response.completed" && Array.isArray(response.output)) remember(response);
+  // Responses ends with a typed JSON event; a Chat [DONE] sentinel breaks JSON-only clients.
   await send(terminal);
-  await send("[DONE]");
 }
 
 function webSearchOptions(request: CanonicalRequest) {

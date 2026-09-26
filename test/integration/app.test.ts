@@ -2130,7 +2130,7 @@ describe("OpenAI Responses conversion", () => {
     expect(response.body).toContain('"item_id":"msg_stream_2"');
     expect(response.body).toContain("event: response.completed");
     expect(response.body).toContain('"text":"normalized"');
-    expect(response.body).toContain("data: [DONE]\n\n");
+    expect(response.body).not.toContain("data: [DONE]\n\n");
     expect(urls).toEqual(["https://gateway.example.test/v1/responses"]);
   });
 
@@ -2168,7 +2168,8 @@ describe("OpenAI Responses conversion", () => {
     expect(response.body).toContain("event: response.function_call_arguments.delta");
     expect(response.body).toContain('"arguments":"{\\"city\\":\\"Paris\\"}"');
     expect(response.body).toContain('"reasoning_tokens":1');
-    expect(response.body).toContain("data: [DONE]\n\n");
+    expect(response.body).toContain("event: response.completed");
+    expect(response.body).not.toContain("data: [DONE]\n\n");
   });
 
   it("returns an OpenAI error and never calls Chat when Responses is unavailable", async () => {

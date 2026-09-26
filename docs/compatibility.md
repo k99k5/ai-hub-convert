@@ -352,7 +352,7 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 - 仅 `stream:true` 的 Anthropic / Responses / Chat 请求启用注释心跳 `: ping\n\n`，新增心跳不使用 `data:` 或 `event:`。从等待上游开始计时，每连续 15 秒没有下游真实数据时发送一次；真实数据输出会重置计时。通过 `SSE_HEARTBEAT_INTERVAL_MS` 调整或设为 `0` 禁用。上游心跳被解析器消费后，网关独立维持下游连接；断开、结束或报错时清理定时器。心跳不改变任何上游超时预算，非流式响应行为不变。
 - 首次数据或心跳会立即刷新 SSE 响应头，设置 `Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`，随后直接写入响应流。
 - 心跳由发送器统一管理，数据写入等待 `drain` 或响应存在背压时跳过心跳，恢复可写后继续。请求取消立即停止心跳；若有阻塞写入则销毁连接并释放等待者，使请求总超时和服务关闭能完成清理。连接仍可写时保留入口协议的流内错误；已取消请求的错误帧若也产生背压，则直接关闭连接，不再等待 `drain`。
-- Responses SSE 重新生成单调 `sequence_number`，终态后发送 `[DONE]`。
+- Responses SSE 重新生成单调 `sequence_number`，以 `response.completed` 或 `response.incomplete` JSON 事件结束，随后关闭流，不追加 Chat Completions 的 `data: [DONE]`。所有 `data:` 帧均为 JSON，兼容逐帧解码的客户端；上游 Responses 附带的 `[DONE]` 仍可被消费。
 - Chat 工具调用的后续增量允许 `id`、`type`、`function.name` 为 `null`，或省略 / 置空 `function`；这些表示没有新元数据，沿用已建立的调用信息。首个分片仍须提供调用 ID 和函数名，非空身份变化和非法字段类型仍会报错，各入口的参数完整性与预算校验保持原有规则。该兼容形状与 [vLLM 的可空 DeltaToolCall / DeltaFunctionCall 字段](https://docs.vllm.ai/en/v0.11.0/api/vllm/entrypoints/openai/protocol.html#vllm.entrypoints.openai.protocol.DeltaToolCall)一致。
 - Web Search 的各轮模型调用保持真实 SSE；普通输出实时转发，内部 function 不暴露给客户端。Anthropic 在搜索等待期间持续发送 ping，并在搜索结果到达时输出对应的原生搜索块。
 - 模型轮次、搜索执行和受限回退共享请求总超时；最终 token/cache usage 累计所有轮次，后续轮次的 HTTP 错误不能触发 Chat 回退。

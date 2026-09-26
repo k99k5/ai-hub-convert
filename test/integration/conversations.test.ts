@@ -148,7 +148,7 @@ function terminal(response: { statusCode: number; body: string }): {
     (event) => event.type === "response.completed" || event.type === "response.incomplete",
   );
   expect(end, response.body).toBeDefined();
-  expect(response.body).toContain("data: [DONE]");
+  expect(response.body).not.toContain("data: [DONE]");
   return { response: end?.response as Wire, events };
 }
 
