@@ -173,7 +173,10 @@ const results = [
   {
     type: "custom_tool_call_output",
     call_id: "call_1",
-    output: [{ type: "input_text", text: "done" }],
+    output: [
+      { type: "input_text", text: "done" },
+      { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=", detail: "original" },
+    ],
   },
 ];
 
@@ -185,6 +188,28 @@ function validateHistory(protocol: Protocol, body: Wire) {
   expect(text).not.toContain('"custom_tool_call"');
   expect(text).toContain("found");
   expect(text).toContain("done");
+  expect(text).toContain("data:image/png;base64,aGVsbG8=");
+  if (protocol === "chat") {
+    expect((body.messages as Wire[]).slice(-4)).toMatchObject([
+      { role: "assistant" },
+      { role: "tool", tool_call_id: "call_0" },
+      { role: "tool", tool_call_id: "call_1" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Tool result (call_1):" },
+          { type: "text", text: "done" },
+          { type: "image_url", image_url: { detail: "high" } },
+        ],
+      },
+    ]);
+  } else {
+    expect(body.input).toContainEqual({
+      type: "function_call_output",
+      call_id: "call_1",
+      output: results[1]?.output,
+    });
+  }
   const input = protocol === "chat" ? (body.messages as Wire[]) : (body.input as Wire[]);
   const calls =
     protocol === "chat"

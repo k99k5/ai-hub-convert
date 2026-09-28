@@ -84,7 +84,7 @@ describe("Responses 请求错误处理", () => {
       item: {
         type: "function_call_output",
         call_id: "private-call",
-        output: [{ type: "input_image", image_url: "private-image" }],
+        output: [{ type: "input_image", image_url: "private-image", detail: "invalid" }],
       },
       tag: "input_image",
     },

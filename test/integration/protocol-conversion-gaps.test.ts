@@ -42,7 +42,13 @@ afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()));
 });
 
-function setup(options: { fallback?: boolean; webSearchProvider?: WebSearchProvider } = {}) {
+function setup(
+  options: {
+    fallback?: boolean;
+    protocol?: "chat" | "responses";
+    webSearchProvider?: WebSearchProvider;
+  } = {},
+) {
   const requests: { path: string; body: Wire }[] = [];
   const upstreamFetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
     const path = new URL(String(input)).pathname;
@@ -77,7 +83,10 @@ function setup(options: { fallback?: boolean; webSearchProvider?: WebSearchProvi
     return body.stream ? responsesStream(response) : Response.json(response);
   });
   const app = buildApp({
-    config: loadConfig({ UPSTREAM_BASE_URL: "https://upstream.test/v1" }),
+    config: loadConfig({
+      UPSTREAM_BASE_URL: "https://upstream.test/v1",
+      ...(options.protocol === undefined ? {} : { UPSTREAM_PROTOCOL: options.protocol }),
+    }),
     logger: false,
     upstreamFetch,
     ...(options.webSearchProvider ? { webSearchProvider: options.webSearchProvider } : {}),
@@ -181,6 +190,129 @@ describe("协议转换缺口 HTTP 回归", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.body.text).toMatchObject({ format: { type: "json_schema", schema } });
     expect(JSON.stringify(requests)).not.toContain("private-");
+  });
+
+  it.each(
+    [false, true].flatMap((stream) =>
+      (["responses", "chat"] as const).flatMap((protocol) =>
+        ["responses", "anthropic"].map((ingress) => ({ stream, protocol, ingress })),
+      ),
+    ),
+  )("同一截图工具结果支持两种入口、上游及流式转换 %j", async ({ stream, protocol, ingress }) => {
+    const { app, requests } = setup({ protocol });
+    const code = 'const browser = await agent.browsers.getForUrl("http://127.0.0.1:8765");';
+    const imageUrl = "data:image/png;base64,aGVsbG8=";
+    const output = [
+      { type: "input_text", text: "before screenshot" },
+      { type: "input_image", image_url: imageUrl, detail: "auto" },
+      { type: "input_text", text: "after screenshot" },
+    ];
+    const input = [
+      { type: "message", role: "user", content: "Inspect the page" },
+      {
+        type: "function_call",
+        call_id: "call_browser",
+        name: "browser",
+        arguments: JSON.stringify({ code }),
+      },
+      { type: "function_call", call_id: "call_other", name: "browser", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_browser", output },
+      { type: "function_call_output", call_id: "call_other", output: "other result" },
+    ];
+    const messages = [
+      { role: "user", content: "Inspect the page" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "call_browser", name: "browser", input: { code } },
+          { type: "tool_use", id: "call_other", name: "browser", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_browser",
+            content: [
+              { type: "text", text: "before screenshot" },
+              {
+                type: "image",
+                source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" },
+              },
+              { type: "text", text: "after screenshot" },
+            ],
+          },
+          { type: "tool_result", tool_use_id: "call_other", content: "other result" },
+        ],
+      },
+    ];
+    const response = await app.inject({
+      method: "POST",
+      url: ingress === "responses" ? "/v1/responses" : "/v1/messages",
+      headers,
+      payload: {
+        model: "model-test",
+        stream,
+        ...(ingress === "responses" ? { input } : { messages, max_tokens: 100 }),
+      },
+    });
+    expectCompleted(response, stream);
+    if (protocol === "responses") {
+      expect(requests[0]?.body.input).toContainEqual({
+        type: "function_call_output",
+        call_id: "call_browser",
+        output,
+      });
+      if (ingress === "anthropic" && !stream) {
+        const counted = await app.inject({
+          method: "POST",
+          url: "/v1/messages/count_tokens",
+          headers,
+          payload: { model: "model-test", messages },
+        });
+        expect(counted.statusCode).toBe(200);
+        expect(counted.json()).toEqual({ input_tokens: 3 });
+        expect(requests[1]?.body.input).toContainEqual({
+          type: "function_call_output",
+          call_id: "call_browser",
+          output,
+        });
+      }
+    } else {
+      expect(requests[0]?.body.messages).toEqual([
+        { role: "user", content: [{ type: "text", text: "Inspect the page" }] },
+        {
+          role: "assistant",
+          tool_calls: [
+            {
+              id: "call_browser",
+              type: "function",
+              function: { name: "browser", arguments: JSON.stringify({ code }) },
+            },
+            { id: "call_other", type: "function", function: { name: "browser", arguments: "{}" } },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_browser",
+          content: "before screenshotafter screenshot",
+        },
+        { role: "tool", tool_call_id: "call_other", content: "other result" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Tool result (call_browser):" },
+            { type: "text", text: "before screenshot" },
+            {
+              type: "image_url",
+              image_url: { url: imageUrl, ...(ingress === "responses" ? { detail: "auto" } : {}) },
+            },
+            { type: "text", text: "after screenshot" },
+          ],
+        },
+      ]);
+    }
   });
 
   it.each(

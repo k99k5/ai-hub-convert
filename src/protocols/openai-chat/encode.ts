@@ -90,7 +90,15 @@ function encodeMessages(
   options?: ChatMessageOptions[],
 ): ChatMessage[] {
   const encoded: ChatMessage[] = [];
+  let pendingToolImages: ChatContentPart[] = [];
+  const flushToolImages = (): void => {
+    if (pendingToolImages.length === 0) return;
+    encoded.push({ role: "user", content: pendingToolImages });
+    pendingToolImages = [];
+  };
   for (const [index, message] of messages.entries()) {
+    // Keep parallel tool replies contiguous before adding their image attachments.
+    if (message.role !== "tool") flushToolImages();
     if (message.itemReference !== undefined) {
       throw new OpenAIAdapterError(
         "INVALID_OPENAI_CHAT_REQUEST",
@@ -111,6 +119,18 @@ function encodeMessages(
           tool_call_id: part.callId,
           content: encodeToolResultOutput(part),
         });
+        if (part.outputContent?.some((item) => item.type === "image")) {
+          pendingToolImages.push(
+            { type: "text", text: `Tool result (${part.callId}):` },
+            ...encodeContent(
+              part.outputContent.map((item) =>
+                item.type === "image" && item.detail === "original"
+                  ? { ...item, detail: "high" as const }
+                  : item,
+              ),
+            ),
+          );
+        }
       }
     } else if (message.role === "assistant") {
       encoded.push(encodeAssistant(message, messageOptions));
@@ -122,6 +142,7 @@ function encodeMessages(
       });
     }
   }
+  flushToolImages();
   return encoded;
 }
 

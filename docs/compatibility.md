@@ -33,7 +33,7 @@
 
 | Responses 入口能力 | Chat 上游行为 |
 | --- | --- |
-| instructions、文本、图片、函数工具 | 转为 Chat 消息和工具定义；图片精度保留 auto/low/high，original 在出站前返回 400 |
+| instructions、文本、图片、函数工具 | 转为 Chat 消息和工具定义；普通消息图片精度保留 auto/low/high，original 在出站前返回 400；工具结果截图的 original 转为 high |
 | 并行调用和工具结果 | 同一 assistant 轮次的 reasoning/text/function_call 合并为一个 Chat assistant 消息，随后附上对应 tool 消息 |
 | `reasoning.effort` | 映射到 `reasoning_effort`；保留 none/minimal/low/medium/high/xhigh/max/null，模型支持范围由上游判断 |
 | `text.format` / `text.verbosity` | 映射到 `response_format` / `verbosity`；JSON Schema 名称、描述、strict 和 schema 保留 |
@@ -66,7 +66,7 @@
 | URL image | 支持 | 支持 | 支持 |
 | Base64 image | 支持 | 支持 | 支持 |
 | function tools | 支持 | 支持 | 支持 |
-| tool calls/results | 支持；`tool_result` 中的 image/search_result 内容返回 HTTP 400 | 同上；不触发 Chat 回退 | 支持；`function_call_output.output` 接受字符串或纯 `input_text` 数组，图片和文件结果返回 HTTP 400 |
+| tool calls/results | 支持；`tool_result` 中的 text/image/search_result 按顺序转换 | 支持；图片以关联调用 ID 的 user 消息附在连续 tool 回复之后 | 支持；`function_call_output.output` 接受字符串或 input_text/input_image 数组；文件结果返回 HTTP 400 |
 | parallel/interleaved calls | 支持 | 支持 | 支持 |
 | reasoning/thinking | Anthropic thinking 可返回客户端；历史 thinking 不伪造成 Responses reasoning continuation | 支持常见 Chat reasoning 扩展 | 支持；真实 item `id` 与 `encrypted_content` 只作同协议 continuation |
 | `output_config.effort` | `reasoning.effort` | `reasoning_effort` | 不适用；`reasoning` 中的 `context`、`effort`、`generate_summary`、`mode`、`summary` 同协议回放 |
@@ -87,9 +87,9 @@
 | file upload/file_id | 不支持 | 不支持 | 不支持 |
 | background lifecycle | 不支持 | 不支持 | `background:true` 被拒绝 |
 
-Responses 的工具结果文本数组按原顺序直接拼接为字符串，保留空白和换行，不自动插入分隔符；空数组归一化为空字符串。JSON 与 SSE 请求采用相同规则，适用于客户端执行普通搜索函数后的结果回传。混入图片、文件或未知内容类型时整条请求返回 HTTP 400，不会仅提取文字并丢弃其他内容。
+Responses 的工具结果纯文本数组按原顺序直接拼接为字符串，保留空白和换行，不自动插入分隔符；空数组归一化为空字符串。包含 input_image 时保留文本和图片的顺序，支持 URL 和 PNG/JPEG/GIF/WebP base64 data URL。Responses 上游直接接收多模态结果数组；Chat 上游先接收文本 tool 回复，再接收包含调用 ID 及完整图文结果的 user 消息，所有连续工具回复保持相邻。工具截图 detail:original 在 Chat 中转为 high。JSON、SSE、WebSocket 和本地历史续传采用相同规则，普通函数及 custom 工具均适用。文件、file_id 图片引用或未知内容类型仍返回 HTTP 400，不会静默丢弃。
 
-Anthropic `tool_result.is_error:true` 在 Responses 和 Chat 上游的结果正文中编码为 JSON 字符串 `{"is_error":true,"output":"原始结果文本"}`；成功结果继续保持原文，包括空白和换行。不会在 OpenAI 工具结果对象上增加协议不支持的字段。发往 Responses 的历史中，文本、图片与工具调用按原顺序编码，只合并连续的文本和图片内容。
+Anthropic `tool_result.is_error:true` 的纯文本结果在 Responses 和 Chat 上游编码为 JSON 字符串 `{"is_error":true,"output":"原始结果文本"}`；Responses 多模态结果在图文数组前添加 `{"is_error":true}` 文本块，Chat 仍在 tool 文本中保留失败标记。成功结果保持原文，包括空白和换行。嵌套 search_result 转为其正文文本。不会在 OpenAI 工具结果对象上增加协议不支持的字段。发往 Responses 的历史中，文本、图片与工具调用按原顺序编码，只合并连续的文本和图片内容。
 
 ### Codex Responses 工具兼容
 
@@ -367,7 +367,7 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 
 - canonical `incomplete` 映射 Anthropic `pause_turn`；`max_output_tokens` 映射 `max_tokens`。
 - OpenAI `content_filter` 与上游 refusal 映射为 canonical `refusal`；Anthropic 出口将 refusal 折为 text 块并输出 `stop_reason:"refusal"`，Responses 流式透传中折叠为 text delta（非流式保留原生 refusal part）。
-- Anthropic `tool_result` 中的 image/search_result 内容无法映射到 Responses `function_call_output` 或 Chat tool 消息，请求在调用上游前返回 HTTP 400，且不触发 Chat 回退。
+- Anthropic `tool_result` 中的图片保留为多模态工具结果；Chat 上游通过连续 tool 回复后的 user 图文消息接收截图，嵌套 search_result 转为文本。文件和其他不支持的内容块仍返回 HTTP 400。
 - Anthropic `stop_sequences` 仅 Chat fallback 可表达（`stop`）；发往 Responses 上游时被丢弃。Anthropic `top_k` 在两条上游路径都无可表达字段，不转发。
 - Anthropic citation 不伪造 encrypted index；仅保留可表达的 URL、title 与文本区间。
 - Chat-compatible upstream 的 reasoning、citation 和 usage 扩展并非统一标准，只有已识别字段进入 canonical 表示。

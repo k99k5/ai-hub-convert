@@ -1120,7 +1120,7 @@ describe("Anthropic Messages conversion", () => {
     });
   });
 
-  it("returns a clean 400 without calling upstream for image content in tool results", async () => {
+  it("returns a clean 400 without calling upstream for malformed images in tool results", async () => {
     const upstreamFetch = vi.fn(async () => {
       throw new Error("upstream must not be called");
     });
@@ -1140,7 +1140,7 @@ describe("Anthropic Messages conversion", () => {
                 { type: "text", text: "screenshot" },
                 {
                   type: "image",
-                  source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" },
+                  source: { type: "base64", media_type: "image/svg+xml", data: "aGVsbG8=" },
                 },
               ],
             },

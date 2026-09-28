@@ -2,6 +2,7 @@ import type {
   CanonicalRequest,
   CanonicalTool,
   Content,
+  FunctionResultContent,
   Message,
   ToolChoice,
 } from "../../core/ir.js";
@@ -199,16 +200,17 @@ function decodeFunctionCall(item: Record<string, unknown>): Message {
 
 function decodeFunctionResult(item: Record<string, unknown>): Message {
   let output = item.output;
+  let outputContent: FunctionResultContent["outputContent"];
   if (Array.isArray(output)) {
-    output = output
-      .map((rawPart) => {
-        const part = record(rawPart, "function_call_output output item");
-        if (part.type !== "input_text" || typeof part.text !== "string") {
-          return invalid("function_call_output.output 仅支持字符串或 input_text 文本数组");
-        }
-        return part.text;
-      })
+    const content = decodeMessageContent(output, "user").map((part) => {
+      if (part.type === "text" || part.type === "image") return part;
+      return invalid("Unsupported OpenAI Responses function_call_output content");
+    });
+    output = content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
       .join("");
+    if (content.some((part) => part.type === "image")) outputContent = content;
   }
   if (typeof output !== "string") {
     return invalid("Unsupported OpenAI Responses input");
@@ -220,6 +222,7 @@ function decodeFunctionResult(item: Record<string, unknown>): Message {
         type: "function_result",
         callId: string(item.call_id, "function_call_output call_id"),
         output,
+        ...(outputContent === undefined ? {} : { outputContent }),
         isError: false,
       },
     ],

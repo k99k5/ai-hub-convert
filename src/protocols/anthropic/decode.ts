@@ -2,6 +2,7 @@ import type {
   CanonicalRequest,
   CanonicalTool,
   Content,
+  FunctionResultContent,
   ImageContent,
   JsonSchemaOutputFormat,
   Message,
@@ -218,7 +219,7 @@ function parseToolResult(block: Record<string, unknown>): Message {
   }
 
   let output = "";
-  const additionalContent: Content[] = [];
+  const outputContent: NonNullable<FunctionResultContent["outputContent"]> = [];
   if (typeof block.content === "string") {
     output = block.content;
   } else if (block.content !== undefined) {
@@ -235,10 +236,13 @@ function parseToolResult(block: Record<string, unknown>): Message {
           return invalidRequest();
         }
         text.push(item.text);
+        outputContent.push({ type: "text", text: item.text });
       } else if (item.type === "image") {
-        additionalContent.push(parseImage(item));
+        outputContent.push(parseImage(item));
       } else if (item.type === "search_result") {
-        additionalContent.push(parseSearchResult(item));
+        const result = parseSearchResult(item);
+        outputContent.push(result);
+        text.push(result.content);
       } else {
         return unsupportedContent();
       }
@@ -253,9 +257,9 @@ function parseToolResult(block: Record<string, unknown>): Message {
         type: "function_result",
         callId,
         output,
+        ...(outputContent.some((part) => part.type !== "text") ? { outputContent } : {}),
         isError: block.is_error ?? false,
       },
-      ...additionalContent,
     ],
   };
 }

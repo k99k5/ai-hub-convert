@@ -1,4 +1,10 @@
-import type { CanonicalRequest, Content, Message, ToolChoice } from "../../core/ir.js";
+import type {
+  CanonicalRequest,
+  Content,
+  FunctionResultContent,
+  Message,
+  ToolChoice,
+} from "../../core/ir.js";
 import type { PromptCacheCapability } from "../../policies/cache/capabilities.js";
 import { withPromptCacheKey } from "../../policies/cache/key.js";
 import {
@@ -34,6 +40,8 @@ function encodeMessageContent(content: readonly Content[]): ResponsesInputConten
   for (const part of content) {
     if (part.type === "text") {
       encoded.push({ type: "input_text", text: part.text });
+    } else if (part.type === "search_result") {
+      encoded.push({ type: "input_text", text: part.content });
     } else if (part.type === "image") {
       encoded.push({
         type: "input_image",
@@ -43,6 +51,14 @@ function encodeMessageContent(content: readonly Content[]): ResponsesInputConten
     }
   }
   return encoded;
+}
+
+function encodeFunctionOutput(part: FunctionResultContent): string | ResponsesInputContent[] {
+  if (part.outputContent === undefined) return encodeToolResultOutput(part);
+  const content = encodeMessageContent(part.outputContent);
+  return part.isError
+    ? [{ type: "input_text", text: JSON.stringify({ is_error: true }) }, ...content]
+    : content;
 }
 
 function replayableReasoning(
@@ -78,7 +94,7 @@ function encodeMessage(message: Message): ResponsesInputItem[] {
       return {
         type: "function_call_output",
         call_id: part.callId,
-        output: encodeToolResultOutput(part),
+        output: encodeFunctionOutput(part),
       };
     });
   }
@@ -121,7 +137,7 @@ function encodeMessage(message: Message): ResponsesInputItem[] {
       items.push({
         type: "function_call_output",
         call_id: part.callId,
-        output: encodeToolResultOutput(part),
+        output: encodeFunctionOutput(part),
       });
     } else if (part.type === "refusal") {
       flushText();

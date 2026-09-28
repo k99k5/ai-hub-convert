@@ -524,7 +524,7 @@ describe("decodeAnthropicRequest", () => {
     expect(decoded.parallelToolCalls).toBe(false);
   });
 
-  it("turns each tool result into a tool message with joined text and colocated images", () => {
+  it("turns each tool result into a tool message with ordered multimodal output", () => {
     const decoded = decodeAnthropicRequest({
       model: "claude-test",
       max_tokens: 128,
@@ -567,10 +567,14 @@ describe("decodeAnthropicRequest", () => {
             callId: "toolu_2",
             output: "line 1\nline 2",
             isError: true,
-          },
-          {
-            type: "image",
-            source: { type: "base64", mediaType: "image/jpeg", data: "anBn" },
+            outputContent: [
+              { type: "text", text: "line 1" },
+              {
+                type: "image",
+                source: { type: "base64", mediaType: "image/jpeg", data: "anBn" },
+              },
+              { type: "text", text: "\nline 2" },
+            ],
           },
         ],
       },
@@ -1139,13 +1143,20 @@ describe("decodeAnthropicRequest", () => {
       {
         role: "tool",
         content: [
-          { type: "function_result", callId: "toolu_2", output: "", isError: false },
           {
-            type: "search_result",
-            title: "Doc",
-            source: "https://example.test",
-            content: "snippet",
-            citationsEnabled: false,
+            type: "function_result",
+            callId: "toolu_2",
+            output: "snippet",
+            isError: false,
+            outputContent: [
+              {
+                type: "search_result",
+                title: "Doc",
+                source: "https://example.test",
+                content: "snippet",
+                citationsEnabled: false,
+              },
+            ],
           },
         ],
       },

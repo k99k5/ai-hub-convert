@@ -38,6 +38,8 @@ export interface FunctionResultContent {
   type: "function_result";
   callId: string;
   output: string;
+  // Ordered multimodal output; output remains the text representation for text-only consumers.
+  outputContent?: (TextContent | ImageContent | SearchResultContent)[];
   isError: boolean;
 }
 
