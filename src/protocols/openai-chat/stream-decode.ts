@@ -69,39 +69,39 @@ export class ChatStreamDecoder {
       return this.#decodeError(payload.error);
     }
 
-    const events = this.#startOrValidate(payload);
+    const events = this.#start(payload);
     if (payload.usage !== undefined && payload.usage !== null) {
       this.#usage = decodeUsage(payload.usage);
     }
 
-    if (!Array.isArray(payload.choices)) {
+    // 纯 usage 帧可能省略 choices 或置为 null，语义上等同于空数组。
+    const choices = payload.choices ?? [];
+    if (!Array.isArray(choices)) {
       throw new Error("Chat stream choices must be an array");
     }
-    if (payload.choices.length === 0) {
+    if (choices.length === 0) {
       return events;
     }
-    if (payload.choices.length !== 1) {
+    if (choices.length !== 1) {
       throw new Error("Chat stream must contain exactly one choice");
     }
-    if (this.#finishReason !== undefined) {
-      throw new Error("Chat stream emitted content after finish_reason");
-    }
 
-    const choice = requireObject(payload.choices[0], "choice");
+    const choice = requireObject(choices[0], "choice");
     if (choice.index !== 0) {
       throw new Error("Chat stream choice index must be zero");
     }
     const delta = requireObject(choice.delta, "choice delta");
     this.#validateRole(delta.role);
+    if (this.#finishReason !== undefined) {
+      this.#validateTrailingChoice(choice, delta);
+      return events;
+    }
     events.push(...this.#decodeReasoning(delta));
     events.push(...this.#decodeText(delta.content));
     events.push(...this.#decodeRefusal(delta.refusal));
     events.push(...this.#decodeTools(delta.tool_calls));
 
     if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
-      if (this.#finishReason !== undefined) {
-        throw new Error("Chat stream emitted finish_reason more than once");
-      }
       this.#finishReason = decodeFinishReason(
         choice.finish_reason,
         this.#refusalIndex !== undefined,
@@ -123,39 +123,63 @@ export class ChatStreamDecoder {
     return events;
   }
 
-  finish(): void {
-    if (!this.#terminal) {
+  // 返回上游 EOF 时需要补发的终态事件。[DONE] 只是哨兵：已收到 finish_reason 时
+  // 正文、工具参数均已完整，按正常完成处理；未收到 finish_reason 才视为流被截断。
+  finish(): CanonicalEvent[] {
+    if (this.#terminal) {
+      return [];
+    }
+    if (this.#finishReason === undefined) {
       throw new Error("Chat stream ended without DONE");
     }
+    return this.#decodeDone();
   }
 
-  #startOrValidate(payload: Record<string, unknown>): CanonicalEvent[] {
+  // 身份以首个 chunk 为准。部分聚合网关会在尾部 usage 帧改写或省略 id、model、created；
+  // 同一 HTTP 响应内不存在串流可能，后续帧的身份字段不参与校验。
+  #start(payload: Record<string, unknown>): CanonicalEvent[] {
+    if (this.#identity) {
+      return [];
+    }
     const id = requireString(payload.id, "id");
     const model = requireString(payload.model, "model");
     const created =
       payload.created === undefined
         ? undefined
         : requireNonNegativeInteger(payload.created, "created");
-    if (!this.#identity) {
-      this.#identity = { id, model, ...(created === undefined ? {} : { created }) };
-      return [
-        {
-          type: "response_start",
-          id,
-          model,
-          ...(this.options.preserveWireMetadata && created !== undefined
-            ? { extensions: { source: "openai-chat", response: { created } } }
-            : {}),
-        },
-      ];
+    this.#identity = { id, model, ...(created === undefined ? {} : { created }) };
+    return [
+      {
+        type: "response_start",
+        id,
+        model,
+        ...(this.options.preserveWireMetadata && created !== undefined
+          ? { extensions: { source: "openai-chat", response: { created } } }
+          : {}),
+      },
+    ];
+  }
+
+  // finish_reason 之后上游可能补发携带 usage 的空 delta 或重复相同的 finish_reason；
+  // 这些帧不含新输出，直接忽略。新的正文、推理、拒答或工具调用仍属协议错误。
+  #validateTrailingChoice(choice: Record<string, unknown>, delta: Record<string, unknown>): void {
+    const hasOutput =
+      ["content", "refusal", "reasoning_content", "reasoning"].some(
+        (key) => delta[key] !== undefined && delta[key] !== null && delta[key] !== "",
+      ) ||
+      (delta.tool_calls !== undefined &&
+        delta.tool_calls !== null &&
+        !(Array.isArray(delta.tool_calls) && delta.tool_calls.length === 0));
+    if (hasOutput) {
+      throw new Error("Chat stream emitted content after finish_reason");
     }
-    if (this.#identity.id !== id || this.#identity.model !== model) {
-      throw new Error("Chat stream id and model must remain stable");
+    if (
+      choice.finish_reason !== undefined &&
+      choice.finish_reason !== null &&
+      choice.finish_reason !== this.#wireFinishReason
+    ) {
+      throw new Error("Chat stream emitted finish_reason more than once");
     }
-    if (created !== undefined && created !== this.#identity.created) {
-      throw new Error("Chat 流的 created 必须保持不变");
-    }
-    return [];
   }
 
   #validateRole(value: unknown): void {

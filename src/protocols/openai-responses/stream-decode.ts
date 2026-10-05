@@ -144,10 +144,12 @@ export class ResponsesStreamDecoder {
     }
   }
 
-  finish(): void {
+  // 与 Chat 解码器保持同一接口；Responses 终态只能来自显式事件，EOF 不补发事件。
+  finish(): CanonicalEvent[] {
     if (!this.#terminal) {
       throw new Error("Responses stream ended without a terminal event");
     }
+    return [];
   }
 
   #decodeCreated(payload: Record<string, unknown>): CanonicalEvent[] {

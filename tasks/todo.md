@@ -1,5 +1,17 @@
 # Implementation Checklist
 
+## Responses 流式收尾误报 upstream_stream_error 修复（2026-10-05）
+
+- [x] 模拟上游复现：17 种 Chat 收尾形态中 12 种被误判为流失败
+- [x] Chat 流解码以 `finish_reason` 判定结束，容忍 usage 尾帧变体与缺失的 `[DONE]`
+- [x] 流身份以首帧为准，不再因尾帧改写 `id` / `model` / `created` 失败
+- [x] 单元、HTTP 与 OpenAI SDK 回归，以及真实中断 / 错误帧仍输出 error 的反向用例
+- [x] 兼容性文档与全量本地验证
+
+根因：网关在 `finish_reason` 帧已关闭全部输出项（客户端看到各 `*.done` 事件），随后严格校验的 Chat 解码器在尾帧抛错，被 Responses 出口统一转换为 `upstream_stream_error`。会触发的尾帧形态包括：缺少 `data: [DONE]` 直接 EOF、`[DONE]` 后无空行、usage 帧改写或省略 `id` / `model` / `created`、usage 帧省略或置空 `choices`、携带空 delta 或重复相同 `finish_reason`。问题描述中的标准形态（空 `choices` 的 usage 帧 + `[DONE]`）修复前即可正常完成。近期提交未改动该路径（解码器最后修改于 `d88cbd8`，2026-09-14），推断为上游收尾形态变化；尚未取得生产原始流，不能确定线上具体是哪一种。
+
+本地验证：`pnpm test:coverage`（84 个文件、1561 项测试中 1560 项通过、1 项跳过；行覆盖率 95.87%，分支覆盖率 92.11%）、`pnpm typecheck`、`pnpm build`、`pnpm lint`、`pnpm format:check`、`git diff --check` 均通过。回退源码后新增回归测试有 17 项以上失败，作为修复前基线。一次覆盖率运行中 Anthropic Read ping 计时测试偶发失败，单独重跑 3 次与再次全量运行均通过，与本次改动无关。线上 curl 验收需部署后用真实密钥执行。
+
 ## Claude Code 流式兼容性回归修复（2026-09-11）
 
 - [x] 固定提交差分及 Claude Code 工具结果续答 HTTP 复现

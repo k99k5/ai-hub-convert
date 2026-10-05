@@ -410,15 +410,121 @@ describe("ChatStreamDecoder", () => {
     ).not.toThrow();
   });
 
-  it("fails when the stream ends without DONE", () => {
+  it("已收到 finish_reason 时上游 EOF 缺少 DONE 仍正常完成", () => {
     const decoder = new ChatStreamDecoder();
+    const base = { id: "chatcmpl_1", model: "model-a" };
+    chunk(decoder, {
+      ...base,
+      choices: [{ index: 0, delta: { content: "complete" }, finish_reason: "stop" }],
+    });
+    chunk(decoder, { ...base, choices: [], usage: { prompt_tokens: 4, completion_tokens: 2 } });
+
+    expect(decoder.finish()).toEqual([
+      {
+        type: "response_complete",
+        finishReason: "end_turn",
+        usage: { inputTokens: 4, outputTokens: 2 },
+      },
+    ]);
+    expect(decoder.finish()).toEqual([]);
+    expect(() => chunk(decoder, { ...base, choices: [] })).toThrow(/after DONE/);
+  });
+
+  it("finish_reason 之前 EOF 视为流被截断", () => {
+    const decoder = new ChatStreamDecoder();
+    expect(() => decoder.finish()).toThrow(/DONE/);
     chunk(decoder, {
       id: "chatcmpl_1",
       model: "model-a",
-      choices: [{ index: 0, delta: { content: "partial" }, finish_reason: "stop" }],
+      choices: [{ index: 0, delta: { content: "partial" } }],
     });
 
     expect(() => decoder.finish()).toThrow(/DONE/);
+  });
+
+  it.each([
+    ["空 choices", { choices: [] }],
+    ["choices 为 null", { choices: null }],
+    ["省略 choices", {}],
+    ["空 delta", { choices: [{ index: 0, delta: {}, finish_reason: null }] }],
+    [
+      "空字符串与空工具列表",
+      {
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              content: "",
+              reasoning_content: "",
+              refusal: null,
+              tool_calls: [],
+            },
+          },
+        ],
+      },
+    ],
+    ["重复相同 finish_reason", { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }],
+    ["改写身份字段", { id: "other", model: "model-b", created: 9, choices: [] }],
+    ["省略身份字段", { id: undefined, model: undefined, choices: [] }],
+  ])("finish_reason 之后接受%s的 usage 尾帧", (_name, trailing) => {
+    const decoder = new ChatStreamDecoder(undefined, undefined, { preserveWireMetadata: true });
+    const base = { id: "chatcmpl_1", model: "model-a", created: 1 };
+    const events = [
+      ...chunk(decoder, { ...base, choices: [{ index: 0, delta: { reasoning_content: "r" } }] }),
+      ...chunk(decoder, {
+        ...base,
+        choices: [{ index: 0, delta: { content: "answer" }, finish_reason: "stop" }],
+      }),
+      ...chunk(decoder, {
+        ...base,
+        ...trailing,
+        usage: { prompt_tokens: 7, completion_tokens: 3 },
+      }),
+      ...decoder.decode({ event: "message", data: "[DONE]" }),
+    ];
+
+    expect(events[0]).toMatchObject({ type: "response_start", id: "chatcmpl_1", model: "model-a" });
+    expect(events.filter((event) => event.type.endsWith("delta"))).toHaveLength(2);
+    expect(events.at(-1)).toEqual({
+      type: "response_complete",
+      finishReason: "end_turn",
+      usage: { inputTokens: 7, outputTokens: 3 },
+      extensions: { source: "openai-chat", response: { created: 1, finish_reason: "stop" } },
+    });
+  });
+
+  it.each([
+    ["推理", { reasoning_content: "late" }],
+    ["拒答", { refusal: "late" }],
+    [
+      "工具调用",
+      { tool_calls: [{ index: 0, id: "call_1", function: { name: "f", arguments: "{}" } }] },
+    ],
+  ])("finish_reason 之后拒绝新的%s输出", (_name, delta) => {
+    const decoder = new ChatStreamDecoder();
+    const base = { id: "chatcmpl_1", model: "model-a" };
+    chunk(decoder, {
+      ...base,
+      choices: [{ index: 0, delta: { content: "complete" }, finish_reason: "stop" }],
+    });
+
+    expect(() => chunk(decoder, { ...base, choices: [{ index: 0, delta }] })).toThrow(
+      /after finish_reason/,
+    );
+  });
+
+  it("finish_reason 之后拒绝不同的 finish_reason", () => {
+    const decoder = new ChatStreamDecoder();
+    const base = { id: "chatcmpl_1", model: "model-a" };
+    chunk(decoder, {
+      ...base,
+      choices: [{ index: 0, delta: { content: "complete" }, finish_reason: "stop" }],
+    });
+
+    expect(() =>
+      chunk(decoder, { ...base, choices: [{ index: 0, delta: {}, finish_reason: "length" }] }),
+    ).toThrow(/finish_reason more than once/);
   });
   it("maps every finish reason in the stream", () => {
     const finish = (finishReason: string) => {
@@ -560,11 +666,10 @@ describe("ChatStreamDecoder", () => {
       }),
     ).toThrow(/role must be assistant/);
 
+    // 身份以首帧为准，后续帧改写 id/model 不影响已建立的响应。
     const unstable = new ChatStreamDecoder();
     chunk(unstable, { id: "s", model: "m", choices: [] });
-    expect(() => chunk(unstable, { id: "other", model: "m", choices: [] })).toThrow(
-      /must remain stable/,
-    );
+    expect(chunk(unstable, { id: "other", model: "m2", choices: [] })).toEqual([]);
 
     const aliases = new ChatStreamDecoder();
     chunk(aliases, { id: "s", model: "m", choices: [] });

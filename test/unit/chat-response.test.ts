@@ -344,15 +344,19 @@ describe("Chat 响应编码", () => {
     );
   });
 
-  it("拒绝流创建时间漂移与未关闭内容", () => {
-    const decoder = new ChatStreamDecoder();
-    chunk(decoder, { content: "a" });
-    expect(() =>
+  it("以首帧创建时间为准并拒绝未关闭内容", () => {
+    const decoder = new ChatStreamDecoder(undefined, undefined, { preserveWireMetadata: true });
+    chunk(decoder, { content: "a" }, "stop");
+    // 聚合网关的尾部 usage 帧常带新的 created，不应使已完成的流失败。
+    expect(
       decoder.decode({
         event: "message",
         data: JSON.stringify({ id: "chatcmpl_1", model: "model-a", created: 124, choices: [] }),
       }),
-    ).toThrow(/created/);
+    ).toEqual([]);
+    expect(decoder.decode({ event: "message", data: "[DONE]" })).toMatchObject([
+      { extensions: { response: { created: 123 } } },
+    ]);
     const encoder = new ChatStreamEncoder();
     encoder.encode({ type: "response_start", id: "c", model: "m" });
     encoder.encode({ type: "content_start", index: 0, content: { type: "text", text: "" } });

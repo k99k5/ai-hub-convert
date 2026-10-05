@@ -354,6 +354,7 @@ Claude Code 断点规划仍要求有效版本且开关启用，最多四个断�
 - 心跳由发送器统一管理，数据写入等待 `drain` 或响应存在背压时跳过心跳，恢复可写后继续。请求取消立即停止心跳；若有阻塞写入则销毁连接并释放等待者，使请求总超时和服务关闭能完成清理。连接仍可写时保留入口协议的流内错误；已取消请求的错误帧若也产生背压，则直接关闭连接，不再等待 `drain`。
 - Responses SSE 重新生成单调 `sequence_number`，以 `response.completed` 或 `response.incomplete` JSON 事件结束，随后关闭流，不追加 Chat Completions 的 `data: [DONE]`。所有 `data:` 帧均为 JSON，兼容逐帧解码的客户端；上游 Responses 附带的 `[DONE]` 仍可被消费。
 - Chat 工具调用的后续增量允许 `id`、`type`、`function.name` 为 `null`，或省略 / 置空 `function`；这些表示没有新元数据，沿用已建立的调用信息。首个分片仍须提供调用 ID 和函数名，非空身份变化和非法字段类型仍会报错，各入口的参数完整性与预算校验保持原有规则。该兼容形状与 [vLLM 的可空 DeltaToolCall / DeltaFunctionCall 字段](https://docs.vllm.ai/en/v0.11.0/api/vllm/entrypoints/openai/protocol.html#vllm.entrypoints.openai.protocol.DeltaToolCall)一致。
+- Chat 上游以 `finish_reason` 判定生成结束：之后的 usage 尾帧可为空 `choices`、省略或置空 `choices`，也可携带不含新输出的空 delta 或重复相同的 `finish_reason`；流身份（`id`、`model`、`created`）以首帧为准，尾帧改写或省略不影响结果。已收到 `finish_reason` 时，上游缺少 `data: [DONE]` 直接 EOF 也按正常完成处理，三个入口均输出各自的完成终态与已报告 usage。`finish_reason` 之前断流、之后出现新的正文 / 推理 / 拒答 / 工具调用、不同的 `finish_reason` 或上游错误帧，仍返回入口协议的流内 error。
 - Web Search 的各轮模型调用保持真实 SSE；普通输出实时转发，内部 function 不暴露给客户端。Anthropic 在搜索等待期间持续发送 ping，并在搜索结果到达时输出对应的原生搜索块。
 - 模型轮次、搜索执行和受限回退共享请求总超时；最终 token/cache usage 累计所有轮次，后续轮次的 HTTP 错误不能触发 Chat 回退。
 - `CONNECTION_TIMEOUT_MS=0` 默认禁用 socket 空闲超时，避免在上游总超时或 SSE 首字节/idle 超时之前截断有效请求。

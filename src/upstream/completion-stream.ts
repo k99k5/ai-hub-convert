@@ -83,7 +83,7 @@ async function* decodeRound(
       yield* decoder.decode(frame);
     }
     roundSignal.throwIfAborted();
-    decoder.finish();
+    yield* decoder.finish();
   } finally {
     clearTimeout(timer);
     controller.abort();
