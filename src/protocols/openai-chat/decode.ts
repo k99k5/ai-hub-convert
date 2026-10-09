@@ -31,7 +31,7 @@ function number(value: unknown, label: string): number {
 }
 
 function optionalNumber(value: unknown, label: string): number | undefined {
-  return value === undefined ? undefined : number(value, label);
+  return value === undefined || value === null ? undefined : number(value, label);
 }
 
 function decodeText(value: unknown): Content[] {
@@ -95,11 +95,11 @@ function decodeToolCalls(value: unknown, validateToolArguments: boolean): Conten
 function decodeUsage(value: unknown): Usage {
   const rawUsage = record(value, "usage");
   const promptDetails =
-    rawUsage.prompt_tokens_details === undefined
+    rawUsage.prompt_tokens_details === undefined || rawUsage.prompt_tokens_details === null
       ? undefined
       : record(rawUsage.prompt_tokens_details, "prompt token details");
   const completionDetails =
-    rawUsage.completion_tokens_details === undefined
+    rawUsage.completion_tokens_details === undefined || rawUsage.completion_tokens_details === null
       ? undefined
       : record(rawUsage.completion_tokens_details, "completion token details");
   const cacheRead =

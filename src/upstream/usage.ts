@@ -3,7 +3,7 @@ import type { Usage } from "../core/ir.js";
 export type CompletionPath = "responses" | "chat/completions";
 
 function record(value: unknown): Record<string, unknown> {
-  if (value === undefined) return {};
+  if (value === undefined || value === null) return {};
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("Invalid upstream usage object");
   }
@@ -11,7 +11,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 function count(value: unknown): number | undefined {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new Error("Invalid upstream token usage");
   }

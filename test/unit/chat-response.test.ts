@@ -170,6 +170,50 @@ describe("Chat 响应编码", () => {
     ).toThrow(/tool_calls must be an array/);
   });
 
+  it("JSON 把 null 用量明细视为缺省，推理耗尽长度时保留空正文", () => {
+    const response = decodeChatResponse({
+      id: "chatcmpl-1",
+      model: "qwen3.8",
+      object: "chat.completion",
+      created: 123,
+      usage: {
+        prompt_tokens: 57,
+        completion_tokens: 20,
+        prompt_tokens_details: null,
+        completion_tokens_details: { reasoning_tokens: null },
+      },
+      choices: [
+        {
+          index: 0,
+          finish_reason: "length",
+          message: {
+            role: "assistant",
+            content: null,
+            refusal: null,
+            reasoning: "We need to reply exactly",
+            function_call: null,
+          },
+        },
+      ],
+    });
+    expect(response.content).toEqual([]);
+    expect(response.finishReason).toBe("max_tokens");
+    expect(response.usage).toEqual({ inputTokens: 57, outputTokens: 20 });
+    expect(encodeChatResponse(response).usage).toEqual({
+      prompt_tokens: 57,
+      completion_tokens: 20,
+      total_tokens: 77,
+    });
+    expect(() =>
+      decodeChatResponse({
+        id: "c",
+        model: "m",
+        usage: { prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: 1 },
+        choices: [{ index: 0, finish_reason: "stop", message: { content: "ok" } }],
+      }),
+    ).toThrow(/prompt token details must be an object/);
+  });
+
   it.each([
     "stop",
     "content_filter",

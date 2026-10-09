@@ -344,6 +344,30 @@ describe("OpenAI Responses adapter", () => {
     expect(JSON.stringify(encoded)).not.toContain("must-not-replay");
   });
 
+  it("treats null usage details in a non-stream Responses body as absent", () => {
+    const response = decodeResponsesResponse(
+      {
+        id: "resp_null_details",
+        object: "response",
+        model: "gpt-test",
+        status: "completed",
+        output: [],
+        usage: {
+          input_tokens: 1,
+          output_tokens: 2,
+          total_tokens: null,
+          input_tokens_details: null,
+          output_tokens_details: { reasoning_tokens: null },
+        },
+      },
+      { preserveWireMetadata: true },
+    );
+    expect(response.usage).toEqual({ inputTokens: 1, outputTokens: 2 });
+    const encoded = encodeResponsesResponse(response);
+    expect(encoded.usage).toMatchObject({ input_tokens: 1, output_tokens: 2 });
+    expect(encoded.usage).not.toHaveProperty("input_tokens_details");
+  });
+
   it("rejects background mode and unsupported input types", () => {
     expect(() =>
       decodeResponsesRequest({ model: "gpt-test", input: "hello", background: true }),

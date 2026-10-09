@@ -57,7 +57,7 @@ function array(value: unknown, label: string): unknown[] {
 }
 
 function optionalNumber(value: unknown, label: string): number | undefined {
-  return value === undefined ? undefined : number(value, label);
+  return value === undefined || value === null ? undefined : number(value, label);
 }
 
 function decodeCitation(value: unknown): Citation | undefined {
@@ -195,11 +195,11 @@ function decodeMessageRole(value: unknown): "assistant" | undefined {
 function decodeUsage(value: unknown): Usage {
   const rawUsage = record(value, "usage");
   const inputDetails =
-    rawUsage.input_tokens_details === undefined
+    rawUsage.input_tokens_details === undefined || rawUsage.input_tokens_details === null
       ? undefined
       : record(rawUsage.input_tokens_details, "input token details");
   const outputDetails =
-    rawUsage.output_tokens_details === undefined
+    rawUsage.output_tokens_details === undefined || rawUsage.output_tokens_details === null
       ? undefined
       : record(rawUsage.output_tokens_details, "output token details");
   const cacheRead =
@@ -305,8 +305,10 @@ function decodeWireMetadata(
     output_layout: layout,
     usage: {
       ...(totalTokens === undefined ? {} : { total_tokens: totalTokens }),
-      input_tokens_details_present: rawUsage.input_tokens_details !== undefined,
-      output_tokens_details_present: rawUsage.output_tokens_details !== undefined,
+      input_tokens_details_present:
+        rawUsage.input_tokens_details !== undefined && rawUsage.input_tokens_details !== null,
+      output_tokens_details_present:
+        rawUsage.output_tokens_details !== undefined && rawUsage.output_tokens_details !== null,
       canonical_input_tokens: usage.inputTokens,
       canonical_output_tokens: usage.outputTokens,
     },
