@@ -70,7 +70,8 @@ function validateArguments(value: unknown, validate: boolean): string {
 }
 
 function decodeToolCalls(value: unknown, validateToolArguments: boolean): Content[] {
-  if (value === undefined) {
+  // 部分 OpenAI 兼容上游在没有工具调用时返回 tool_calls: null，与流式解码一致视为无工具调用
+  if (value === undefined || value === null) {
     return [];
   }
   if (!Array.isArray(value)) {

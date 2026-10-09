@@ -140,6 +140,36 @@ describe("Chat 响应编码", () => {
       }),
     ).toThrow(/角色/);
   });
+
+  it("JSON 把 tool_calls: null 视为无工具调用，非数组仍拒绝", () => {
+    const body = {
+      id: "c",
+      model: "m",
+      usage: { prompt_tokens: 12, completion_tokens: 15 },
+      choices: [
+        {
+          index: 0,
+          finish_reason: "stop",
+          message: { role: "assistant", content: "ok", reasoning: "思考", tool_calls: null },
+        },
+      ],
+    };
+    const response = decodeChatResponse(body);
+    expect(response.content).toEqual([{ type: "text", text: "ok" }]);
+    expect(response.finishReason).toBe("end_turn");
+    expect(encodeChatResponse(response).choices[0]?.message).toEqual({
+      role: "assistant",
+      content: "ok",
+      refusal: null,
+    });
+    expect(() =>
+      decodeChatResponse({
+        ...body,
+        choices: [{ ...body.choices[0], message: { content: "ok", tool_calls: {} } }],
+      }),
+    ).toThrow(/tool_calls must be an array/);
+  });
+
   it.each([
     "stop",
     "content_filter",
